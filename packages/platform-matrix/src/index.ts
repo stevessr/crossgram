@@ -622,7 +622,7 @@ function matrixMessageParts(content: MatrixRoomMessageContent): IMMessage<Matrix
 /** Parse only RFC 5870 point coordinates; malformed or out-of-range locations stay textual. */
 function parseMatrixGeoUri(uri: unknown): { latitude: number, longitude: number } | undefined {
   if (typeof uri !== 'string') return
-  const match = /^geo:([+-]?\\d+(?:\\.\\d+)?),([+-]?\\d+(?:\\.\\d+)?)(?:,[+-]?\\d+(?:\\.\\d+)?)?(?:;[^?#]*)?$/i.exec(uri)
+  const match = /^geo:([+-]?\d+(?:\.\d+)?),([+-]?\d+(?:\.\d+)?)(?:,[+-]?\d+(?:\.\d+)?)?(?:;[^?#]*)?$/i.exec(uri)
   if (!match) return
   const latitude = Number(match[1])
   const longitude = Number(match[2])
