@@ -5,7 +5,7 @@
  * through an untrusted relay, but trust MUST be established over an independent,
  * authenticated channel before the local client accepts them.
  */
-import { createPublicKey, timingSafeEqual } from 'node:crypto'
+import { createHash, createPublicKey, timingSafeEqual } from 'node:crypto'
 import {
   deviceFingerprint, type DeviceIdentity, type VerifiedDevice,
   sealMessage, openMessage, parseEnvelope,
@@ -99,6 +99,19 @@ export function bundleFingerprint(bundle: unknown): string {
 }
 
 /**
+ * Safety number for the EXACT account/device binding. In the verification UI
+ * show the account and device identifiers alongside this fingerprint.
+ * Never trust a value fetched from the same directory server as the keys.
+ */
+export function accountDeviceFingerprint(accountId: string, bundle: unknown): string {
+  validateIdentifier(accountId)
+  const device = parseDeviceBundle(bundle)
+  return createHash('sha256').update(JSON.stringify([
+    'crossgram/account-device-binding/v1', accountId, deviceFingerprint(device),
+  ])).digest('hex')
+}
+
+/**
  * A user-verified public bundle is pinned for an ACCOUNT + device ID.
  * On key rotation, fail closed: the user must explicitly revoke the previous
  * pin and verify a fresh fingerprint via an independent channel.
@@ -112,7 +125,7 @@ export async function verifyAndPinDevice(
   validateIdentifier(accountId)
   const device = parseDeviceBundle(untrustedBundle)
   const expected = fingerprintBytes(independentlyVerifiedFingerprint)
-  const actual = Buffer.from(deviceFingerprint(device), 'hex')
+  const actual = Buffer.from(accountDeviceFingerprint(accountId, exportDeviceBundle(device)), 'hex')
   if (!timingSafeEqual(expected, actual)) throw new Error('E2EE_FINGERPRINT_MISMATCH')
   const canonical = exportDeviceBundle(device)
   const stored = await store.pinIfAbsent(accountId, canonical)
