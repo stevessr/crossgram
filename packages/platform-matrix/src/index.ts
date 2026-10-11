@@ -452,6 +452,8 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     content: IMMessageInput,
     options: IMTransferOptions = {},
   ): Promise<IMMessage<MatrixMediaLocator>> {
+    // Verify current room state before uploading media or exposing any message content.
+    await this.assertUnencryptedRoom(conversation.id)
     const sourceIds: string[] = []
     const parts: IMMessage<MatrixMediaLocator>['content']['parts'] = []
     for (let index = 0; index < content.parts.length; index++) {
@@ -537,6 +539,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   ): Promise<{ message?: string, alert?: boolean }> {
     const match = /^matrix-poll-vote:(0|[1-9]\d?)$/.exec(button.data)
     if (!match) return { message: '无效的投票选项', alert: true }
+    await this.assertUnencryptedRoom(target.conversationId)
     const start = await this.client.getEvent(target.conversationId, target.messageId)
     if (!isMatrixPollStart(start.type) || start.unsigned?.redacted_because) {
       return { message: '投票不存在或已经撤回', alert: true }
@@ -640,6 +643,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     if (content.parts.length !== 1 || content.parts[0]?.type !== 'text') {
       throw new Error('Matrix edits currently support exactly one text part')
     }
+    await this.assertUnencryptedRoom(target.conversationId)
     const text = content.parts[0]
     const originalEvent = await this.client.getEvent(target.conversationId, target.targetId)
     if (originalEvent.type !== 'm.room.message') throw new Error(`Matrix cannot edit event type ${originalEvent.type}`)
@@ -691,6 +695,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   }
 
   async setMessageReactions(session: PlatformSession, target: IMMessageTarget, reactionKeys: readonly string[]): Promise<IMReactionContext> {
+    await this.assertUnencryptedRoom(target.conversationId)
     const userId = await this.getAccountUserId()
     if (reactionKeys.length > MAX_SELECTED_REACTIONS) throw new Error(`Matrix supports at most ${MAX_SELECTED_REACTIONS} selected reactions`)
     const requested = new Set(reactionKeys)
@@ -988,6 +993,27 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       const parent = matrixReference(event.content)
       if (parent) this.rememberPollClosure(`${roomId}\0${parent}`)
     }
+  }
+
+  /**
+   * This adapter does not have a Matrix crypto machine. Never send plaintext to
+   * an encrypted room, including media uploads, edits, votes and reactions.
+   * Query current state on every write: a prior /sync snapshot may be stale.
+   * Failure to verify the state must not be interpreted as an unencrypted room.
+   */
+  private async assertUnencryptedRoom(roomId: string): Promise<void> {
+    const isEncrypted = () => this.roomState.get(roomId)?.has('m.room.encryption\0')
+    if (isEncrypted()) throw new Error('Matrix room is end-to-end encrypted; CrossGram cannot send without Matrix E2EE support')
+
+    let state: MatrixEvent[]
+    try {
+      state = await this.client.getRoomState(roomId)
+      if (!Array.isArray(state)) throw new Error('invalid Matrix room state response')
+    } catch (error) {
+      throw new Error('Cannot verify Matrix room encryption state; plaintext sending was blocked', { cause: error })
+    }
+    this.ingestState(roomId, state)
+    if (isEncrypted()) throw new Error('Matrix room is end-to-end encrypted; CrossGram cannot send without Matrix E2EE support')
   }
 
   private ingestState(roomId: string, events: MatrixEvent[]): void {
