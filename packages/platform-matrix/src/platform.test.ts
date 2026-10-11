@@ -337,6 +337,74 @@ describe('MatrixPlatform', () => {
       .toEqual({ muted: false })
   })
 
+  it('streams external pinned-state additions, removals, and reorders without local echo', async () => {
+    const roomId = '!room:example.org'
+    let sync = 0
+    let nativePins = ['$one']
+    let releaseEcho!: (response: Response) => void
+    const echo = new Promise<Response>((resolve) => { releaseEcho = resolve })
+    const state = (pinned: string[], id: string) =>
+      event('m.room.pinned_events', { pinned }, { id, stateKey: '', ts: 1_000 * sync })
+    const roomSync = (next: string, pinned: string[], id: string) => json({
+      next_batch: next,
+      rooms: { join: { [roomId]: { state: { events: [state(pinned, id)] } } } },
+    })
+    const fetch = routeFetch((url, init) => {
+      if (url.pathname.endsWith('/sync')) {
+        sync++
+        if (sync === 1) return json({
+          next_batch: 's1', rooms: { join: { [roomId]: {
+            state: { events: [...roomState, state(['$one'], '$initial')] },
+          } } },
+        })
+        if (sync === 2) {
+          nativePins = ['$one', '$two']
+          return roomSync('s2', nativePins, '$external-add')
+        }
+        if (sync === 3) {
+          nativePins = ['$two', '$one']
+          return roomSync('s3', nativePins, '$external-order')
+        }
+        if (sync === 4) {
+          nativePins = ['$two']
+          return roomSync('s4', nativePins, '$external-remove')
+        }
+        if (sync === 5) return echo
+        return pendingUntilAbort(init?.signal)
+      }
+      if (url.pathname.endsWith('/state/m.room.pinned_events')) {
+        if (init?.method === 'PUT') {
+          nativePins = (JSON.parse(String(init.body)) as { pinned: string[] }).pinned
+          return json({ event_id: '$local' })
+        }
+        return json({ pinned: nativePins })
+      }
+      throw new Error(`unexpected Matrix HTTP call: ${url}`)
+    })
+    const platform = createPlatform(fetch, { userId: session.userId, syncTimeoutMs: 50 })
+    const observed: IMEvent[] = []
+    const unsubscribe = await platform.subscribe(session, (value) => { observed.push(value) })
+    await vi.waitFor(() => expect(observed.filter((item) => item.type === 'message-pins')).toHaveLength(3))
+    const pins = observed.filter((item): item is Extract<IMEvent, { type: 'message-pins' }> =>
+      item.type === 'message-pins')
+    expect(pins.map((item) => ({
+      eventId: item.eventId,
+      pinned: item.pinnedMessageIds,
+      removed: item.removedMessageIds,
+    }))).toEqual([
+      { eventId: '$external-add', pinned: ['$one', '$two'], removed: [] },
+      { eventId: '$external-order', pinned: ['$two', '$one'], removed: [] },
+      { eventId: '$external-remove', pinned: ['$two'], removed: ['$one'] },
+    ])
+
+    await platform.setMessagePinned(session, { id: roomId }, '$self', true)
+    expect(nativePins).toEqual(['$two', '$self'])
+    releaseEcho(roomSync('s5', nativePins, '$local'))
+    await vi.waitFor(() => expect(sync).toBeGreaterThanOrEqual(6))
+    await unsubscribe()
+    expect(observed.filter((item) => item.type === 'message-pins')).toHaveLength(3)
+  })
+
   it('subscribes from an initial token and emits messages, edits, redactions, receipts, and conversation changes', async () => {
     let sync = 0
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
