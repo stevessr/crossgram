@@ -992,10 +992,12 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.search(req as tl.messages.RawSearchRequest))
   rpc.register('messages.updatePinnedMessage', async (rpc, req) => {
     const state = await requireBridgeSession(rpc)
-    const changed = await state.dialogs.updatePinnedMessage(req as tl.messages.RawUpdatePinnedMessageRequest)
-    // The initiating client receives the response; broadcast to its other
-    // Telegram sessions so they can refresh the pinned banner immediately.
-    if (changed._ === 'updates') {
+    const { response: changed, published } = await state.dialogs.updatePinnedMessageWithDelivery(
+      req as tl.messages.RawUpdatePinnedMessageRequest,
+    )
+    // Durable pin publication already reached other Telegram sessions.
+    // Retain the legacy push only when no platform-event publisher is attached.
+    if (!published && changed._ === 'updates') {
       await updates.publishAccountUpdates(
         state.session, changed.updates,
         rpc.authKeyId ? authKeyHex(rpc.authKeyId) : undefined,
@@ -1005,11 +1007,14 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   })
   rpc.register('messages.unpinAllMessages', async (rpc, req) => {
     const state = await requireBridgeSession(rpc)
-    const { affected, updates: pinnedUpdates } = await state.dialogs.unpinAllMessages(
+    const { affected, updates: pinnedUpdates, published } = await state.dialogs.unpinAllMessages(
       req as tl.messages.RawUnpinAllMessagesRequest,
     )
-    // AffectedHistory has no embedded updates, so notify all authorized clients.
-    if (pinnedUpdates.length) await updates.publishAccountUpdates(state.session, pinnedUpdates)
+    // Native durable publication already notified all clients, including the
+    // requester (AffectedHistory itself does not contain pin updates).
+    if (!published && pinnedUpdates.length) {
+      await updates.publishAccountUpdates(state.session, pinnedUpdates)
+    }
     return affected
   })
   rpc.register('messages.getSearchCounters', async (rpc, req) => bareVector(
