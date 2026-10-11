@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { chmod, mkdtemp, readdir, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -22,6 +22,19 @@ describe('durable POSIX E2EE replay prevention', () => {
     const guard = new PosixFileReplayGuard('/not/a/client/keychain')
     await expect(guard.acceptOnce('../escape')).rejects.toThrow('E2EE_INVALID_REPLAY_ID')
     await expect(guard.acceptOnce('a'.repeat(65))).rejects.toThrow('E2EE_INVALID_REPLAY_ID')
+  })
+
+  it.skipIf(process.platform === 'win32')('rejects world-readable directories and symlink roots', async () => {
+    const root = await directory()
+    const guard = new PosixFileReplayGuard(root)
+    const id = 'e'.repeat(64)
+    await chmod(root, 0o755)
+    await expect(guard.acceptOnce(id)).rejects.toThrow('E2EE_REPLAY_DIRECTORY_UNSAFE')
+    await chmod(root, 0o700)
+    const link = join(root, 'alias')
+    await symlink(root, link)
+    await expect(new PosixFileReplayGuard(link).acceptOnce(id))
+      .rejects.toThrow('E2EE_REPLAY_DIRECTORY_UNSAFE')
   })
 
   it.skipIf(process.platform === 'win32')('remains closed across reopen and concurrent processes', async () => {
