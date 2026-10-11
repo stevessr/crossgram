@@ -44,6 +44,8 @@ const QQ_POKE_MAX_COUNT = 10
 export interface Config extends QQNTClientOptions {
   /** Hide QQ gray-tip service messages whose text contains any configured entry. */
   grayTipFilters?: string[]
+  /** Poll the QQ dialog head only as a fallback for websocket message delivery. */
+  dialogsPollIntervalMs?: number
   /** Generate tiny photoStrippedSize payloads after delivering the original message. */
   generatePreviews?: boolean
   /** Maximum number of concurrent inline preview generation jobs. */
@@ -57,6 +59,7 @@ export const Config = z.object({
   webSocketEndpoint: z.string(),
   token: z.string().role('secret'),
   grayTipFilters: z.array(z.string()).default(DEFAULT_GRAY_TIP_FILTERS),
+  dialogsPollIntervalMs: z.natural().min(15_000).max(300_000).default(60_000),
   generatePreviews: z.boolean().default(false),
   previewConcurrency: z.natural().min(1).max(8).default(2),
 }).i18n({
@@ -67,7 +70,7 @@ export const Config = z.object({
 export const name = 'im-platform-qqnt'
 export const inject = ['imPlatform', 'imSticker', 'database', 'model']
 
-const DIALOGS_POLL_INTERVAL_MS = 15_000
+const DEFAULT_DIALOGS_POLL_INTERVAL_MS = 60_000
 const REACTION_CATALOG_GRACE_MS = 10
 const REACTION_CATALOG_RPC_GRACE_MS = 250
 const REACTION_CATALOG_RETRY_DELAY_MS = 60_000
@@ -237,6 +240,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
   private readonly stickerAssetMetaPending = new Map<string, Promise<ResolvedStickerAssetMeta | undefined>>()
   private reactionResourceWarmup?: Promise<void>
   private readonly grayTipFilters: readonly string[]
+  private readonly dialogsPollIntervalMs: number
   private readonly originSessions = new Map<string, string>()
   private readonly splitOutgoingMessages = new Map<string, WireMessage>()
   private readonly multiForwardMessages = new Map<string, Promise<WireMessage[]>>()
@@ -277,6 +281,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       this.voiceMedia = { start: (call, _session, endpoint) => this.startVoiceMedia(call, endpoint) }
     }
     this.grayTipFilters = options.grayTipFilters ?? DEFAULT_GRAY_TIP_FILTERS
+    this.dialogsPollIntervalMs = options.dialogsPollIntervalMs ?? DEFAULT_DIALOGS_POLL_INTERVAL_MS
   }
 
   private async startVoiceMedia(call: VoiceWorkerCall, endpoint: VoiceWorkerMediaEndpoint) {
@@ -647,7 +652,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
       } catch {
         if (signal.aborted) return
       }
-      await abortableDelay(DIALOGS_POLL_INTERVAL_MS, signal)
+      await abortableDelay(this.dialogsPollIntervalMs, signal)
     }
   }
 

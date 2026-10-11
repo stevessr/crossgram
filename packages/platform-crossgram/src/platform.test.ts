@@ -4104,8 +4104,8 @@ describe('QQNTPlatform dialogs polling', () => {
     const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
     await vi.advanceTimersByTimeAsync(0)
     includeNewConversation = true
-    await vi.advanceTimersByTimeAsync(15_000)
-    await vi.advanceTimersByTimeAsync(15_000)
+    await vi.advanceTimersByTimeAsync(60_000)
+    await vi.advanceTimersByTimeAsync(60_000)
 
     expect(events).toMatchObject([{
       type: 'message', conversation: { id: 'new-group' }, message: { id: 'new-group-message' },
@@ -4130,7 +4130,7 @@ describe('QQNTPlatform dialogs polling', () => {
     const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
     await vi.advanceTimersByTimeAsync(0)
     latestId = 'existing-2'
-    await vi.advanceTimersByTimeAsync(15_000)
+    await vi.advanceTimersByTimeAsync(60_000)
 
     expect(events).toMatchObject([{
       type: 'message', conversation: { id: 'existing' }, message: { id: 'existing-2' },
@@ -4160,7 +4160,7 @@ describe('QQNTPlatform dialogs polling', () => {
     const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
     await vi.advanceTimersByTimeAsync(0)
     latestId = '102'
-    await vi.advanceTimersByTimeAsync(15_000)
+    await vi.advanceTimersByTimeAsync(60_000)
 
     expect(events.map((event) => event.message.id)).toEqual(['101', '102'])
     await unsubscribe()
@@ -4183,10 +4183,10 @@ describe('QQNTPlatform dialogs polling', () => {
     const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
     await vi.advanceTimersByTimeAsync(0)
     includeNewConversation = true
-    await vi.advanceTimersByTimeAsync(15_000)
+    await vi.advanceTimersByTimeAsync(60_000)
     expect(events).toEqual([])
     newConversationHasMessage = true
-    await vi.advanceTimersByTimeAsync(15_000)
+    await vi.advanceTimersByTimeAsync(60_000)
 
     expect(events).toMatchObject([{
       type: 'message', conversation: { id: 'new-group' }, message: { id: 'new-group-message' },
@@ -4217,7 +4217,7 @@ describe('QQNTPlatform dialogs polling', () => {
     const unsubscribe = await platform.subscribe(session, handler)
     await vi.advanceTimersByTimeAsync(0)
     includeNewConversation = true
-    const polling = vi.advanceTimersByTimeAsync(15_000)
+    const polling = vi.advanceTimersByTimeAsync(60_000)
     await handlerStarted.promise
     await wireHandler!({
       type: 'message',
@@ -4266,8 +4266,8 @@ describe('QQNTPlatform dialogs polling', () => {
     })).rejects.toThrow('temporary handler failure')
     expect(handler).toHaveBeenCalledTimes(1)
 
-    await vi.advanceTimersByTimeAsync(15_000)
-    await vi.advanceTimersByTimeAsync(15_000)
+    await vi.advanceTimersByTimeAsync(60_000)
+    await vi.advanceTimersByTimeAsync(60_000)
 
     expect(handler).toHaveBeenCalledTimes(2)
     await unsubscribe()
@@ -4296,7 +4296,7 @@ describe('QQNTPlatform dialogs polling', () => {
     await platform.sendMessage(session, { id: 'new-group' }, { parts: [{ type: 'text', text: 'echo' }] })
     originRequestId = (platform.client.sendMessage as ReturnType<typeof vi.fn>).mock.calls[0]![4]
     includeNewConversation = true
-    await vi.advanceTimersByTimeAsync(15_000)
+    await vi.advanceTimersByTimeAsync(60_000)
 
     expect(events).toEqual([])
     await unsubscribe()
@@ -4319,9 +4319,9 @@ describe('QQNTPlatform dialogs polling', () => {
     const unsubscribe = await platform.subscribe(session, handler)
     await vi.advanceTimersByTimeAsync(0)
     includeNewConversation = true
-    await vi.advanceTimersByTimeAsync(15_000)
+    await vi.advanceTimersByTimeAsync(60_000)
     expect(handler).toHaveBeenCalledTimes(1)
-    await vi.advanceTimersByTimeAsync(15_000)
+    await vi.advanceTimersByTimeAsync(60_000)
 
     expect(handler).toHaveBeenCalledTimes(2)
     await unsubscribe()
@@ -4340,6 +4340,21 @@ describe('QQNTPlatform dialogs polling', () => {
     await vi.advanceTimersByTimeAsync(30_000)
 
     expect(platform.client.getDialogs).toHaveBeenCalledTimes(1)
+  })
+
+  it('uses the configurable lower-frequency dialog polling fallback', async () => {
+    vi.useFakeTimers()
+    const platform = new QQNTPlatform({ dialogsPollIntervalMs: 120_000 })
+    mockSubscribe(platform)
+    platform.client.getDialogs = vi.fn(async () => ({ conversations: [] }))
+
+    const unsubscribe = await platform.subscribe(session, () => {})
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(platform.client.getDialogs).toHaveBeenCalledTimes(1)
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(platform.client.getDialogs).toHaveBeenCalledTimes(2)
+    await unsubscribe()
   })
 
   it('forwards setConversationNotificationMask to the QQNT bridge with chatType and peerUin', async () => {
