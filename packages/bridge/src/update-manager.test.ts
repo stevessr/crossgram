@@ -147,9 +147,12 @@ describe('UpdateManager', () => {
     ] })
     expect(() => roundTrip(second)).not.toThrow()
 
-    // Re-delivery of the same Matrix state event is idempotent.
-    await manager.publish(session, pin('$pin2', ['$two'], ['$one']))
+    // A local Telegram RPC and the Matrix /sync echo may carry the same native
+    // event ID but different observed snapshots. Never reserve or send twice.
+    await manager.publish(session, pin('$pin2', ['$two'], []))
     expect(sent).toHaveLength(2)
+    const delivery = await store.getUpdateDelivery(`${session.platformSessionId}:pin:${conversation.id}:$pin2`)
+    expect(delivery?.published).toBe(true)
     const recovered = await manager.getChannelDifference(session.platformSessionId, {
       _: 'updates.getChannelDifference',
       channel: { _: 'inputChannel', channelId: peerTlId(conversation.id), accessHash: Long.ONE },
