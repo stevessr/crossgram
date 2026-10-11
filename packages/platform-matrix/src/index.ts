@@ -83,6 +83,11 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   private readonly directRoomIds = new Set<string>()
   /** The live invitation index also authorizes accept/reject actions by opaque request ID. */
   private readonly pendingInvites = new Map<string, IMRequest<MatrixMediaLocator>>()
+  /** A successful local action must not be undone by an old /sync snapshot. */
+  private readonly locallyResolvedInvites = new Map<string, IMRequest<MatrixMediaLocator>>()
+  private readonly resolvingInvites = new Set<string>()
+  /** Freeze a paginated request listing: each page must refer to the same /sync snapshot. */
+  private requestPageSnapshot?: IMRequest<MatrixMediaLocator>[]
 
   constructor(config: Config, logger?: MatrixLogger) {
     this.client = new MatrixClient(config satisfies MatrixClientOptions)
@@ -178,30 +183,44 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     query: IMRequestQuery = {},
   ): Promise<IMRequestPage<MatrixMediaLocator>> {
     if (query.kind && query.kind !== 'group-join') return { requests: [] }
-    const userId = await this.getAccountUserId()
-    const snapshot = await this.client.sync({ timeout: 0, fullState: true })
-    const requests: IMRequest<MatrixMediaLocator>[] = []
-    const seen = new Set<string>()
-    for (const [roomId, room] of Object.entries(snapshot.rooms?.invite ?? {})) {
-      const request = this.mapRoomInvite(roomId, room, userId)
-      if (!request) continue
-      seen.add(roomId)
-      requests.push(request)
-      this.pendingInvites.set(roomId, request)
-    }
-    // A previously seen invitation can be accepted or withdrawn while the
-    // bridge is reconciling its request inbox. Preserve the terminal update.
-    for (const [roomId, request] of this.pendingInvites) {
-      if (seen.has(roomId)) continue
-      requests.push({
-        ...request,
-        state: snapshot.rooms?.join?.[roomId] ? 'accepted' : 'rejected',
-      })
-      this.pendingInvites.delete(roomId)
-    }
-    requests.sort((a, b) =>
-      Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0) || a.id.localeCompare(b.id))
     const start = requestPageStart(query.cursor)
+    if (!query.cursor || !this.requestPageSnapshot) {
+      const userId = await this.getAccountUserId()
+      const snapshot = await this.client.sync({ timeout: 0, fullState: true })
+      const requests: IMRequest<MatrixMediaLocator>[] = []
+      const seen = new Set<string>()
+      for (const [roomId, room] of Object.entries(snapshot.rooms?.invite ?? {})) {
+        const request = this.mapRoomInvite(roomId, room, userId)
+        if (!request) continue
+        seen.add(roomId)
+        const locallyResolved = this.locallyResolvedInvites.get(roomId)
+        if (locallyResolved && locallyResolved.id === request.id) {
+          // An upstream snapshot may temporarily lag a successful join/leave.
+          requests.push(locallyResolved)
+          continue
+        }
+        if (locallyResolved) this.locallyResolvedInvites.delete(roomId)
+        requests.push(request)
+        this.pendingInvites.set(roomId, request)
+      }
+      // A fresh full_state sync is an authoritative list of outstanding
+      // invitations; emit terminal states for invites no longer present.
+      for (const [roomId, request] of this.pendingInvites) {
+        if (seen.has(roomId)) continue
+        requests.push({
+          ...request,
+          state: snapshot.rooms?.join?.[roomId] ? 'accepted' : 'rejected',
+        })
+        this.pendingInvites.delete(roomId)
+      }
+      for (const roomId of this.locallyResolvedInvites.keys()) {
+        if (!seen.has(roomId)) this.locallyResolvedInvites.delete(roomId)
+      }
+      requests.sort((a, b) =>
+        Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0) || a.id.localeCompare(b.id))
+      this.requestPageSnapshot = requests
+    }
+    const requests = this.requestPageSnapshot
     const limit = clampLimit(query.limit)
     const page = requests.slice(start, start + limit)
     return {
@@ -218,13 +237,28 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     const pending = [...this.pendingInvites.values()].find((request) => request.id === id)
     if (!pending) throw new Error(`Unknown or no longer pending Matrix room invitation: ${id}`)
     const roomId = pending.group!.id
-    if (action === 'accept') {
-      await this.client.joinRoom(roomId)
-    } else {
-      await this.client.leaveRoom(roomId)
+    if (this.resolvingInvites.has(roomId)) {
+      throw new Error(`Matrix room invitation resolution is already in progress: ${roomId}`)
     }
-    this.pendingInvites.delete(roomId)
-    return { ...pending, state: action === 'accept' ? 'accepted' : 'rejected' }
+    this.resolvingInvites.add(roomId)
+    try {
+      if (action === 'accept') {
+        await this.client.joinRoom(roomId)
+      } else {
+        await this.client.leaveRoom(roomId)
+      }
+      const resolved: IMRequest<MatrixMediaLocator> = {
+        ...pending, state: action === 'accept' ? 'accepted' : 'rejected',
+      }
+      // A concurrent sync may already have replaced the room's invitation.
+      // Never delete a distinct newer invitation when this action completes.
+      if (this.pendingInvites.get(roomId)?.id === id) this.pendingInvites.delete(roomId)
+      this.locallyResolvedInvites.set(roomId, resolved)
+      this.requestPageSnapshot = undefined
+      return resolved
+    } finally {
+      this.resolvingInvites.delete(roomId)
+    }
   }
 
   async getHistory(
@@ -447,6 +481,9 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     for (const [roomId, room] of Object.entries(response.rooms?.invite ?? {})) {
       const request = this.mapRoomInvite(roomId, room, userId)
       if (!request) continue
+      const locallyResolved = this.locallyResolvedInvites.get(roomId)
+      if (locallyResolved?.id === request.id) continue
+      if (locallyResolved) this.locallyResolvedInvites.delete(roomId)
       const previous = this.pendingInvites.get(roomId)
       if (previous && previous.id !== request.id) {
         await handler({ type: 'request', request: { ...previous, state: 'rejected' } })
@@ -462,6 +499,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         await handler({ type: 'request', request: { ...invite, state: 'accepted' } })
         this.pendingInvites.delete(roomId)
       }
+      this.locallyResolvedInvites.delete(roomId)
       const stateEvents = [
         ...(room.state?.events ?? []),
         ...(room.timeline?.events ?? []).filter((event) => event.state_key !== undefined),
@@ -498,9 +536,11 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     }
     for (const roomId of Object.keys(response.rooms?.leave ?? {})) {
       const invite = this.pendingInvites.get(roomId)
-      if (!invite) continue
-      await handler({ type: 'request', request: { ...invite, state: 'rejected' } })
-      this.pendingInvites.delete(roomId)
+      if (invite) {
+        await handler({ type: 'request', request: { ...invite, state: 'rejected' } })
+        this.pendingInvites.delete(roomId)
+      }
+      this.locallyResolvedInvites.delete(roomId)
     }
   }
 
