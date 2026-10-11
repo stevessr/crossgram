@@ -320,6 +320,7 @@ export class ServerSession {
   private _sessionIdSet = false
   private _serverSalt = Long.ZERO
   private _authorized = false
+  private _dcId: number | undefined
   private _loginTokenPending = false
   private _loginToken: Uint8Array | null = null
   private _loginTokenExpiresAt: number | null = null
@@ -852,6 +853,7 @@ export class ServerSession {
       )
 
       this._msgIdGen.updateTimeOffset(result.timeOffset)
+      this._dcId = result.dcId
 
       if (isTemp && !result.temporary) {
         throw new Error('client requested a permanent key during a PFS handshake')
@@ -874,7 +876,7 @@ export class ServerSession {
         this._log.info('handshake complete, auth key id = %h', this._permAuthKey.id)
         // Persist the perm key so a returning client can resume without re-handshaking.
         try {
-          await this._keyStore?.save(this._permAuthKey.id, { key: result.authKey })
+          await this._keyStore?.save(this._permAuthKey.id, { key: result.authKey, dcId: result.dcId })
         } catch (err) {
           this._log.warn('failed to persist auth key: %s', err instanceof Error ? err.message : err)
         }
@@ -923,6 +925,7 @@ export class ServerSession {
       const permanent = await this._keyStore?.get(temporary.permanentKeyId)
       if (!permanent || permanent.permanentKeyId) return false
       this._permAuthKey.setup(permanent.key)
+      this._dcId = temporary.dcId ?? permanent.dcId
       this._tempAuthKey = new ServerAuthKey(this._crypto, this._log, this._readerMap)
       this._tempAuthKey.setup(temporary.key)
       this._tempAuthKeyExpiresAt = temporary.expiresAt ?? null
@@ -941,6 +944,7 @@ export class ServerSession {
     const permanent = await this._keyStore?.get(keyId)
     if (!permanent || permanent.permanentKeyId || !typed.equal(permanent.key, record.key)) return false
     this._permAuthKey.setup(permanent.key)
+    this._dcId ??= permanent.dcId
     this._log.info('resumed permanent auth key %h', this._permAuthKey.id)
     this._generateFutureSalts()
     this._authorized = true
@@ -1370,6 +1374,7 @@ export class ServerSession {
         key: this._tempAuthKey!.key,
         permanentKeyId: new Uint8Array(candidate.id),
         expiresAt: req.expiresAt,
+        dcId: this._dcId ?? storedPermanent?.dcId,
       })
     } catch (err) {
       this._log.warn('failed to persist bound temp auth key: %s', err instanceof Error ? err.message : err)
@@ -1678,6 +1683,7 @@ export class ServerSession {
       authKeyId: this._permAuthKey.ready ? new Uint8Array(this._permAuthKey.id) : null,
       sessionId: clientSessionId,
       isAuthorized: this._authorized,
+      dcId: this._dcId,
       sendUpdate: (update) => this.sendUpdate(update, clientSessionId),
       afterResponse: (task) => afterResponse.push(task),
       afterResponseSettled: (task) => afterResponseSettled.push(task),

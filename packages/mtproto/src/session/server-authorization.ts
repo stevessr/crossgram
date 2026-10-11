@@ -99,6 +99,8 @@ const DH_SAFETY_RANGE = 2n ** (2048n - 64n)
  * Result of a successful server-side DH handshake.
  */
 export interface AuthorizationResult {
+  /** Logical DC requested by the client; negative DCs identify media transports. */
+  dcId: number
   /** The 2048-bit auth key (shared secret) */
   authKey: Uint8Array
   /** The server salt (newNonce[0:8] XOR serverNonce[0:8]) */
@@ -339,7 +341,7 @@ export async function doServerAuthorization(
 
   authLog.info('server authorization successful')
 
-  return { authKey, serverSalt, timeOffset, temporary, expiresAt }
+  return { authKey, serverSalt, timeOffset, temporary, expiresAt, dcId: Math.abs(pqInnerData.dc) % 10000 }
 }
 
 // ── RSA decryption helpers ──

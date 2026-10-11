@@ -19,6 +19,7 @@ export interface StoredAuthKey {
   expiresAt?: number
   /** Last API layer negotiated by the permanent key. */
   apiLayer?: number
+  dcId?: number
 }
 
 /** Persistent store for permanent keys and their bound temporary PFS keys. */
@@ -109,6 +110,7 @@ interface SerializedAuthKey {
   permanentKeyId?: string
   expiresAt?: number
   apiLayer?: number
+  dcId?: number
 }
 
 interface SerializedAuthKeyEnvelope {
@@ -198,6 +200,7 @@ export class FileAuthKeyStore implements AuthKeyStore {
       permanentKeyId: value.permanentKeyId ? fromHex(value.permanentKeyId) : undefined,
       expiresAt: value.expiresAt,
       apiLayer: value.apiLayer,
+      dcId: value.dcId,
     }
   }
 
@@ -214,6 +217,7 @@ export class FileAuthKeyStore implements AuthKeyStore {
       permanentKeyId: record.permanentKeyId ? toHex(record.permanentKeyId) : undefined,
       expiresAt: record.expiresAt,
       apiLayer: record.apiLayer,
+      dcId: record.dcId,
     })
     this._commit(keys, new Set(this._revoked))
   }

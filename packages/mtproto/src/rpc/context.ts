@@ -59,6 +59,8 @@ export interface MtprotoRpcScope {
  * a per-session scratch slot for backend state (e.g. the resolved platform session).
  */
 export interface ServerRpcContext {
+  /** Logical DC selected during DH; retained on reconnect and PFS binding. */
+  readonly dcId?: number
   /** The Cordis derived context for this invocation, when dispatched by Mtproto. */
   readonly cordis?: Context
   /** Connection-level metadata inherited from the connection fiber. */

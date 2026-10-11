@@ -105,6 +105,16 @@ describe('FileAuthKeyStore', () => {
     })
   })
 
+  it('persists logical DC identity for permanent and temporary keys across restart', () => {
+    const path = join(mkdtempSync(join(tmpdir(), 'authkeys-dc-')), 'auth-keys.json')
+    const store = new FileAuthKeyStore(path)
+    store.save(id(1), { key: key(0x42), dcId: 2 })
+    store.save(id(2), { key: key(0x43), dcId: 2, permanentKeyId: id(1), expiresAt: 4_000_000_000 })
+    const resumed = new FileAuthKeyStore(path)
+    expect(resumed.get(id(1))?.dcId).toBe(2)
+    expect(resumed.get(id(2))).toMatchObject({ dcId: 2, permanentKeyId: id(1) })
+  })
+
   it('persists keys to disk and reloads them in a new instance', () => {
     const path = join(mkdtempSync(join(tmpdir(), 'authkeys-')), 'auth-keys.json')
 
