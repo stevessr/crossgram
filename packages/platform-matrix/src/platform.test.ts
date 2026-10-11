@@ -309,6 +309,188 @@ describe('MatrixPlatform', () => {
     expect(events[3]).toMatchObject({ messageIds: ['$old'] })
     expect(events[4]).toMatchObject({ upToMessageId: '$new' })
   })
+
+  it('maps joined rooms beneath nested Matrix Spaces with stable pagination', async () => {
+    const space = '!space:example.org'
+    const nested = '!nested:example.org'
+    const general = '!general:example.org'
+    const leaf = '!leaf:example.org'
+    const standalone = '!standalone:example.org'
+    const join: MatrixSyncResponse['rooms'] = { join: {
+      [space]: { state: { events: [
+        event('m.room.create', { type: 'm.space' }, { stateKey: '' }),
+        event('m.room.name', { name: 'Workspace' }, { stateKey: '' }),
+        event('m.space.child', { via: ['example.org'], order: 'a' }, { stateKey: general }),
+        event('m.space.child', { via: ['example.org'], order: 'b' }, { stateKey: nested }),
+        event('m.space.child', { via: ['example.org'] }, { stateKey: '!not-joined:example.org' }),
+      ] } },
+      [nested]: { state: { events: [
+        event('m.room.create', { type: 'm.space' }, { stateKey: '' }),
+        event('m.room.name', { name: 'Nested' }, { stateKey: '' }),
+        event('m.space.child', { via: ['example.org'] }, { stateKey: leaf }),
+      ] } },
+      [general]: { state: { events: [
+        event('m.room.create', {}, { stateKey: '' }),
+        event('m.room.name', { name: 'General' }, { stateKey: '' }),
+      ] }, unread_notifications: { notification_count: 2 } },
+      [leaf]: { state: { events: [
+        event('m.room.create', {}, { stateKey: '' }),
+        event('m.room.name', { name: 'Nested room' }, { stateKey: '' }),
+      ] } },
+      [standalone]: { state: { events: [
+        event('m.room.create', {}, { stateKey: '' }),
+        event('m.room.name', { name: 'Standalone' }, { stateKey: '' }),
+      ] } },
+    } }
+    const fetch = routeFetch((url) => {
+      if (url.pathname.endsWith('/sync')) return json({ next_batch: 's1', rooms: join })
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+
+    expect(platform.capabilities.conversations.subchannels).toBe(true)
+    const roots = await platform.getDialogs(session)
+    expect(roots.total).toBe(2)
+    expect(roots.dialogs.map((dialog) => dialog.conversation.id)).toEqual([space, standalone])
+    expect(roots.dialogs[0]?.conversation).toMatchObject({
+      kind: 'channel', spaceId: space,
+      metadata: { matrixSpace: true, hasSubchannels: true },
+    })
+
+    const first = await platform.getSubdialogs(session, { id: space }, { limit: 1 })
+    expect(first).toMatchObject({ total: 2, nextCursor: '1' })
+    expect(first.dialogs[0]).toMatchObject({
+      unreadCount: 2, conversation: {
+        id: general, kind: 'channel', parentId: space, spaceId: space,
+      },
+    })
+    const second = await platform.getSubdialogs(session, { id: space }, { afterId: general, limit: 10 })
+    expect(second.dialogs.map((dialog) => dialog.conversation.id)).toEqual([nested])
+    expect(second.dialogs[0]?.conversation.metadata).toMatchObject({
+      matrixSpace: true, hasSubchannels: true,
+    })
+    const nestedPage = await platform.getSubdialogs(session, { id: nested })
+    expect(nestedPage.dialogs[0]?.conversation).toMatchObject({
+      id: leaf, kind: 'channel', parentId: nested, spaceId: space,
+    })
+    expect((await platform.getSubdialogs(session, { id: general })).total).toBe(0)
+    await expect(platform.getConversation(session, leaf)).resolves.toMatchObject({
+      id: leaf, kind: 'channel', parentId: nested, spaceId: space,
+    })
+    await expect(platform.getConversation(session, '!not-joined:example.org')).resolves.toBeNull()
+  })
+
+  it('shares one full-state request across concurrent Space and dialog reads', async () => {
+    let reads = 0
+    const space = '!space:example.org'
+    const child = '!child:example.org'
+    const fetch = routeFetch(async (url) => {
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      reads++
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      return json({
+        next_batch: 's0', rooms: { join: {
+          [space]: { state: { events: [
+            event('m.room.create', { type: 'm.space' }, { stateKey: '' }),
+            event('m.space.child', { via: ['example.org'] }, { stateKey: child }),
+          ] } },
+          [child]: { state: { events: [event('m.room.create', {}, { stateKey: '' })] } },
+        } },
+      })
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+    const [roots, children] = await Promise.all([
+      platform.getDialogs(session), platform.getSubdialogs(session, { id: space }),
+    ])
+    expect(roots.dialogs.map((dialog) => dialog.conversation.id)).toEqual([space])
+    expect(children.dialogs.map((dialog) => dialog.conversation.id)).toEqual([child])
+    expect(reads).toBe(1)
+    await platform.getSubdialogs(session, { id: space }, { cursor: '0', limit: 1 })
+    expect(reads).toBe(1)
+  })
+
+  it('emits child parent changes even when the child has a timeline in the same sync batch', async () => {
+    const space = '!space:example.org'
+    const child = '!child:example.org'
+    let sync = 0
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      const url = new URL(String(input))
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      if (++sync === 1) return json({ next_batch: 's0', rooms: { join: {
+        [space]: { state: { events: [
+          event('m.room.create', { type: 'm.space' }, { stateKey: '' }),
+        ] } },
+        [child]: { state: { events: [
+          event('m.room.create', {}, { stateKey: '' }),
+        ] } },
+      } } })
+      if (sync === 2) return json({ next_batch: 's1', rooms: { join: {
+        [space]: { state: { events: [
+          event('m.space.child', { via: ['example.org'] }, { stateKey: child }),
+        ] } },
+        [child]: { timeline: { events: [
+          event('m.room.message', { msgtype: 'm.text', body: 'hello' }, {
+            id: '$child-message', sender: '@alice:example.org', ts: 12_000,
+          }),
+        ] } },
+      } } })
+      return pendingUntilAbort(init?.signal)
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org', syncTimeoutMs: 50 })
+    const events: IMEvent[] = []
+    const unsubscribe = await platform.subscribe(session, (value) => { events.push(value) })
+    await vi.waitFor(() => expect(events.filter((value) =>
+      value.type === 'conversation' && value.conversation.id === child)).toHaveLength(1))
+    await unsubscribe()
+
+    expect(events.map((value) => value.type)).toEqual([
+      'conversation', 'conversation', 'message',
+    ])
+    expect(events[1]).toMatchObject({
+      type: 'conversation', conversation: {
+        id: child, kind: 'channel', parentId: space, spaceId: space,
+      },
+    })
+    expect(events[2]).toMatchObject({
+      type: 'message', conversation: { id: child, parentId: space },
+      message: { id: '$child-message' },
+    })
+  })
+
+  it('updates child metadata after a Space relationship is removed in incremental sync', async () => {
+    const space = '!space:example.org'
+    const child = '!child:example.org'
+    let sync = 0
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      const url = new URL(String(input))
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      if (++sync === 1) return json({ next_batch: 's0', rooms: { join: {
+        [space]: { state: { events: [
+          event('m.room.create', { type: 'm.space' }, { stateKey: '' }),
+          event('m.space.child', { via: ['example.org'] }, { stateKey: child }),
+        ] } },
+        [child]: { state: { events: [event('m.room.create', {}, { stateKey: '' })] } },
+      } } })
+      if (sync === 2) return json({ next_batch: 's1', rooms: { join: {
+        [space]: { state: { events: [
+          event('m.space.child', {}, { stateKey: child }),
+        ] } },
+      } } })
+      return pendingUntilAbort(init?.signal)
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org', syncTimeoutMs: 50 })
+    const events: IMEvent[] = []
+    const unsubscribe = await platform.subscribe(session, (value) => { events.push(value) })
+    await vi.waitFor(() => expect(events.some((value) =>
+      value.type === 'conversation' && value.conversation.id === child)).toBe(true))
+    await unsubscribe()
+    const root = events.find((value) =>
+      value.type === 'conversation' && value.conversation.id === space)
+    const updatedChild = events.find((value) =>
+      value.type === 'conversation' && value.conversation.id === child)
+    expect(root).toMatchObject({ conversation: { metadata: { hasSubchannels: false } } })
+    expect(updatedChild).toMatchObject({ conversation: { kind: 'group', parentId: undefined } })
+  })
 })
 
 function createPlatform(fetch: typeof globalThis.fetch, extra: Record<string, unknown> = {}) {

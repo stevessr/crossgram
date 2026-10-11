@@ -2064,6 +2064,36 @@ describe('conversation kinds', () => {
     }
   })
 
+  it('shows empty Space child channels as accessible Telegram forum topics', async () => {
+    const emptyChildPlatform: IMPlatform = {
+      ...platform,
+      async getHistory(localSession, target, query) {
+        if (target.id === 'subchannel') return { messages: [] }
+        return platform.getHistory!(localSession, target, query)
+      },
+    }
+    const { rpc } = await createRpc(emptyChildPlatform)
+    const dialogs = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
+    const parent = dialogs.chats.find((chat) => chat._ === 'channel' && chat.title === 'Discord / general')
+    if (!parent || parent._ !== 'channel') throw new Error('forum parent missing')
+    const peer = { _: 'inputPeerChannel' as const, channelId: parent.id, accessHash: Long.ZERO }
+    const topics = await rpc.getForumTopics({
+      _: 'messages.getForumTopics', peer, offsetDate: 0, offsetId: 0, offsetTopic: 0, limit: 100,
+    })
+    expect(topics.topics).toMatchObject([{ _: 'forumTopic', title: 'Discord / support' }])
+    expect(topics.messages).toMatchObject([{ _: 'message', message: 'Discord / support' }])
+    expect(() => roundTrip(topics)).not.toThrow()
+    const topic = topics.topics[0] as tl.RawForumTopic
+    const replies = await rpc.getReplies({
+      _: 'messages.getReplies', peer, msgId: topic.id,
+      offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+    }) as tl.messages.RawChannelMessages
+    expect(replies).toMatchObject({
+      _: 'messages.channelMessages', count: 0, topics: [{ id: topic.id }], messages: [],
+    })
+    expect(() => roundTrip(replies)).not.toThrow()
+  })
+
   it('grants modern Telegram clients writable defaults for ordinary group members', async () => {
     const memberGroup: IMConversation = {
       id: 'member-group', kind: 'group', title: 'Member Group', selfRole: 'member',

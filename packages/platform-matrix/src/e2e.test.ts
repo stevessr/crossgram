@@ -7,6 +7,7 @@ import { MatrixPlatform } from './index.js'
 describe('Matrix platform HTTP e2e', () => {
   const requests: Array<{ method: string, path: string, authorization?: string, body: Uint8Array }> = []
   let eventSequence = 0
+  let spaceFixture = false
   const server = createServer(async (request, response) => {
     const body = await readBody(request)
     requests.push({
@@ -55,6 +56,7 @@ describe('Matrix platform HTTP e2e', () => {
   afterEach(async () => {
     await activePlatform?.stop()
     activePlatform = undefined
+    spaceFixture = false
   })
 
   it('bridges a complete account, dialog, history, send, and media workflow over real HTTP', async () => {
@@ -114,11 +116,58 @@ describe('Matrix platform HTTP e2e', () => {
     })
   })
 
+  it('exposes nested joined Matrix Spaces through the real authenticated HTTP transport', async () => {
+    spaceFixture = true
+    const platform = activePlatform = new MatrixPlatform({
+      homeserver, accessToken: 'space-e2e-token', userId: '@bot:test', requestTimeoutMs: 2_000,
+    })
+    const session: PlatformSession = {
+      platformSessionId: 'space-e2e', platformId: 'matrix', userId: '@bot:test',
+      credentials: {}, metadata: {},
+    }
+
+    const roots = await platform.getDialogs(session)
+    const spaces = await platform.getSubdialogs(session, { id: '!space:test' }, { limit: 1 })
+    const nested = await platform.getSubdialogs(session, { id: '!nested:test' })
+    expect(roots.dialogs.map((item) => item.conversation.id)).toEqual(['!space:test'])
+    expect(spaces.dialogs[0]?.conversation).toMatchObject({
+      id: '!nested:test', kind: 'channel', parentId: '!space:test',
+      metadata: { matrixSpace: true, hasSubchannels: true },
+    })
+    expect(nested.dialogs[0]?.conversation).toMatchObject({
+      id: '!room:test', kind: 'channel', parentId: '!nested:test', spaceId: '!space:test',
+    })
+    const calls = requests.filter((item) => item.path.startsWith('/_matrix/client/v3/sync')
+      && item.authorization === 'Bearer space-e2e-token')
+    // One /sync snapshot feeds both the root and nested pagination calls.
+    expect(calls).toHaveLength(1)
+    expect(calls.every((item) => item.path.includes('full_state=true'))).toBe(true)
+  })
+
   async function route(request: IncomingMessage, response: ServerResponse, _body: Uint8Array): Promise<void> {
     const url = new URL(request.url ?? '/', homeserver || 'http://127.0.0.1')
     if (url.pathname.endsWith('/account/whoami')) return sendJson(response, { user_id: '@bot:test' })
     if (url.pathname.includes('/profile/')) return sendJson(response, {
       displayname: 'E2E Bot', avatar_url: 'mxc://test/avatar',
+    })
+    if (url.pathname.endsWith('/sync') && spaceFixture) return sendJson(response, {
+      next_batch: 'spaces-sync',
+      rooms: { join: {
+        '!space:test': { state: { events: [
+          { type: 'm.room.create', state_key: '', content: { type: 'm.space' } },
+          { type: 'm.room.name', state_key: '', content: { name: 'Root Space' } },
+          { type: 'm.space.child', state_key: '!nested:test', content: { via: ['test'] } },
+        ] } },
+        '!nested:test': { state: { events: [
+          { type: 'm.room.create', state_key: '', content: { type: 'm.space' } },
+          { type: 'm.room.name', state_key: '', content: { name: 'Nested Space' } },
+          { type: 'm.space.child', state_key: '!room:test', content: { via: ['test'] } },
+        ] } },
+        '!room:test': { state: { events: [
+          { type: 'm.room.create', state_key: '', content: {} },
+          { type: 'm.room.name', state_key: '', content: { name: 'Child Room' } },
+        ] } },
+      } },
     })
     if (url.pathname.endsWith('/sync')) return sendJson(response, {
       next_batch: 'e2e-sync',

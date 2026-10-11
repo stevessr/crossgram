@@ -11,6 +11,7 @@ import type {
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { MatrixClient, type MatrixClientOptions } from './client.js'
 import { matrixMentionUserIds, matrixTextEntities, textContent } from './formatting.js'
+import { buildSpaceHierarchy } from './space-hierarchy.js'
 import type {
   MatrixDirectAccountData, MatrixEvent, MatrixJoinedRoom, MatrixMediaLocator, MatrixRoomMemberContent,
   MatrixRoomMessageContent, MatrixSyncResponse,
@@ -63,7 +64,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       maxTextLength: 60_000,
       maxMedia: 10,
     },
-    conversations: { groups: true, channels: true, subchannels: false },
+    conversations: { groups: true, channels: true, subchannels: true },
     members: { list: true, administrators: true, permissions: true },
     avatars: { users: true, conversations: true },
     messageActions: {
@@ -81,6 +82,12 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   private readonly roomState = new Map<string, Map<string, MatrixEvent>>()
   private readonly conversations = new Map<string, IMConversation<MatrixMediaLocator>>()
   private readonly directRoomIds = new Set<string>()
+  private readonly joinedRoomIds = new Set<string>()
+  private spaceParents = new Map<string, string>()
+  private spaceChildren = new Map<string, string[]>()
+  private dialogsSnapshot?: { loadedAt: number, dialogs: IMDialog<MatrixMediaLocator>[] }
+  private dialogsLoad?: Promise<IMDialog<MatrixMediaLocator>[]>
+  private dialogsRevision = 0
 
   constructor(config: Config, logger?: MatrixLogger) {
     this.client = new MatrixClient(config satisfies MatrixClientOptions)
@@ -110,8 +117,9 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     const controller = new AbortController()
     const initial = await this.client.sync({ timeout: 0, fullState: true, signal: controller.signal })
     this.ingestAccountData(initial)
+    this.invalidateDialogsSnapshot()
+    this.refreshJoinedRoomState(initial.rooms?.join ?? {}, true)
     for (const [roomId, room] of Object.entries(initial.rooms?.join ?? {})) {
-      this.ingestState(roomId, room.state?.events ?? [])
       this.updateConversation(roomId, room)
     }
     let since = initial.next_batch
@@ -139,12 +147,89 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   }
 
   async getDialogs(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<MatrixMediaLocator>> {
+    const dialogs = (await this.loadJoinedDialogs())
+      .filter((dialog) => !dialog.conversation.parentId)
+      .sort((left, right) => (right.lastMessage?.timestamp ?? 0) - (left.lastMessage?.timestamp ?? 0))
+    const start = pageStart(dialogs, query)
+    const limit = clampLimit(query.limit)
+    const page = dialogs.slice(start, start + limit)
+    return {
+      dialogs: page,
+      total: dialogs.length,
+      nextCursor: start + page.length < dialogs.length ? String(start + page.length) : undefined,
+    }
+  }
+
+  async getConversation(
+    _session: PlatformSession,
+    conversationId: string,
+  ): Promise<IMConversation<MatrixMediaLocator> | null> {
+    // Targeted Telegram peer recovery must also resolve non-root child rooms.
+    const known = this.conversations.get(conversationId)
+    if (known && this.joinedRoomIds.has(conversationId)) return known
+    await this.loadJoinedDialogs()
+    return this.conversations.get(conversationId) ?? null
+  }
+
+  async getSubdialogs(
+    _session: PlatformSession,
+    parent: IMConversationRef,
+    query: IMPageQuery = {},
+  ): Promise<IMDialogPage<MatrixMediaLocator>> {
+    const dialogs = await this.loadJoinedDialogs()
+    const byId = new Map(dialogs.map((dialog) => [dialog.conversation.id, dialog]))
+    const children = (this.spaceChildren.get(parent.id) ?? [])
+      .flatMap((id) => {
+        const dialog = byId.get(id)
+        return dialog ? [dialog] : []
+      })
+    const start = pageStart(children, query)
+    const limit = clampLimit(query.limit)
+    const page = children.slice(start, start + limit)
+    return {
+      dialogs: page,
+      total: children.length,
+      nextCursor: start + page.length < children.length ? String(start + page.length) : undefined,
+    }
+  }
+
+  /**
+   * Reuse one full-state snapshot for root-dialog and paginated subdialog reads.
+   * Space expansion must not request a fresh /sync for every page.
+   */
+  private async loadJoinedDialogs(): Promise<IMDialog<MatrixMediaLocator>[]> {
+    const cached = this.dialogsSnapshot
+    if (cached && Date.now() - cached.loadedAt < 5_000) return cached.dialogs
+    if (this.dialogsLoad) return this.dialogsLoad
+
+    const revision = this.dialogsRevision
+    const pending = this.fetchJoinedDialogs()
+    this.dialogsLoad = pending
+    try {
+      const dialogs = await pending
+      if (revision === this.dialogsRevision) {
+        this.dialogsSnapshot = { dialogs, loadedAt: Date.now() }
+      }
+      return dialogs
+    } finally {
+      if (this.dialogsLoad === pending) this.dialogsLoad = undefined
+    }
+  }
+
+  /** A full-state snapshot resolves parents before mapping any individual room. */
+  private async fetchJoinedDialogs(): Promise<IMDialog<MatrixMediaLocator>[]> {
     await this.getAccountUserId()
-    const response = await this.client.sync({ timeout: 0, fullState: true })
+    const revision = this.dialogsRevision
+    let response = await this.client.sync({ timeout: 0, fullState: true })
+    // A streaming sync may have changed membership or parent links during
+    // the fetch. Retry once rather than replace newer state with old state.
+    if (revision !== this.dialogsRevision) {
+      response = await this.client.sync({ timeout: 0, fullState: true })
+    }
     this.ingestAccountData(response)
+    this.refreshJoinedRoomState(response.rooms?.join ?? {}, true)
     const dialogs: IMDialog<MatrixMediaLocator>[] = []
     for (const [roomId, room] of Object.entries(response.rooms?.join ?? {})) {
-      this.ingestState(roomId, room.state?.events ?? [])
       const conversation = this.updateConversation(roomId, room)
       const lastMessage = [...(room.timeline?.events ?? [])].reverse()
         .map((event) => this.mapTimelineMessage(roomId, event))
@@ -155,15 +240,12 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         lastMessage,
       })
     }
-    dialogs.sort((left, right) => (right.lastMessage?.timestamp ?? 0) - (left.lastMessage?.timestamp ?? 0))
-    const start = pageStart(dialogs, query)
-    const limit = clampLimit(query.limit)
-    const page = dialogs.slice(start, start + limit)
-    return {
-      dialogs: page,
-      total: dialogs.length,
-      nextCursor: start + page.length < dialogs.length ? String(start + page.length) : undefined,
-    }
+    return dialogs
+  }
+
+  private invalidateDialogsSnapshot(): void {
+    this.dialogsRevision++
+    this.dialogsSnapshot = undefined
   }
 
   async getHistory(
@@ -384,16 +466,27 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     userId: string,
     handler: (event: IMEvent<MatrixMediaLocator>) => void | Promise<void>,
   ): Promise<void> {
+    this.invalidateDialogsSnapshot()
     this.ingestAccountData(response)
+    const previous = new Map(this.conversations)
+    for (const roomId of Object.keys(response.rooms?.leave ?? {})) {
+      this.joinedRoomIds.delete(roomId)
+      this.roomState.delete(roomId)
+      this.conversations.delete(roomId)
+    }
+    this.refreshJoinedRoomState(response.rooms?.join ?? {}, false)
     for (const [roomId, room] of Object.entries(response.rooms?.join ?? {})) {
-      const stateEvents = [
-        ...(room.state?.events ?? []),
-        ...(room.timeline?.events ?? []).filter((event) => event.state_key !== undefined),
-      ]
-      const stateChanged = stateEvents.length > 0
-      this.ingestState(roomId, stateEvents)
+      const stateChanged = (room.state?.events?.length ?? 0) > 0
+        || (room.timeline?.events ?? []).some((event) => event.state_key !== undefined)
       const conversation = this.updateConversation(roomId, room)
-      if (stateChanged) await handler({ type: 'conversation', conversation })
+      const prior = previous.get(roomId)
+      const hierarchyChanged = prior && (
+        prior.parentId !== conversation.parentId
+        || prior.spaceId !== conversation.spaceId
+        || prior.kind !== conversation.kind
+        || prior.metadata?.hasSubchannels !== conversation.metadata?.hasSubchannels
+      )
+      if (stateChanged || hierarchyChanged) await handler({ type: 'conversation', conversation })
       for (const event of room.timeline?.events ?? []) {
         if (!event.event_id || event.state_key !== undefined) continue
         const redacts = event.redacts ?? (event.content as { redacts?: string }).redacts
@@ -420,6 +513,19 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       const receiptEventId = receipt && latestReadReceipt(receipt.content, userId)
       if (receiptEventId) await handler({ type: 'read', conversationId: roomId, upToMessageId: receiptEventId })
     }
+
+    // Updating a Space changes its children's parents even when those rooms
+    // have no state/timeline entries in the incremental sync response.
+    for (const roomId of this.joinedRoomIds) {
+      if (response.rooms?.join?.[roomId]) continue
+      const old = previous.get(roomId)
+      if (!old) continue
+      const now = this.updateConversation(roomId)
+      if (old.parentId !== now.parentId || old.spaceId !== now.spaceId
+        || old.kind !== now.kind || old.metadata?.hasSubchannels !== now.metadata?.hasSubchannels) {
+        await handler({ type: 'conversation', conversation: now })
+      }
+    }
   }
 
   private ingestAccountData(response: MatrixSyncResponse): void {
@@ -433,6 +539,24 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     for (const roomIds of Object.values(direct)) {
       for (const roomId of roomIds) this.directRoomIds.add(roomId)
     }
+  }
+
+  private refreshJoinedRoomState(rooms: Record<string, MatrixJoinedRoom>, fullSnapshot: boolean): void {
+    if (fullSnapshot) {
+      this.joinedRoomIds.clear()
+      this.roomState.clear()
+      this.conversations.clear()
+    }
+    for (const [roomId, room] of Object.entries(rooms)) {
+      this.joinedRoomIds.add(roomId)
+      this.ingestState(roomId, [
+        ...(room.state?.events ?? []),
+        ...(room.timeline?.events ?? []).filter((event) => event.state_key !== undefined),
+      ])
+    }
+    const hierarchy = buildSpaceHierarchy(this.roomState, this.joinedRoomIds)
+    this.spaceParents = hierarchy.parents
+    this.spaceChildren = hierarchy.children
   }
 
   private ingestState(roomId: string, events: MatrixEvent[]): void {
@@ -454,19 +578,29 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     const members = [...(state?.values() ?? [])].filter((event) =>
       event.type === 'm.room.member' && (event.content as MatrixRoomMemberContent).membership === 'join')
     const direct = this.directRoomIds.has(roomId)
+    const parentId = this.spaceParents.get(roomId)
+    const isSpace = create?.type === 'm.space'
+    let spaceId = parentId
+    // buildSpaceHierarchy guarantees the parent chain cannot contain a cycle.
+    while (spaceId && this.spaceParents.has(spaceId)) spaceId = this.spaceParents.get(spaceId)
+    if (!spaceId && isSpace) spaceId = roomId
     const heroId = room?.summary?.['m.heroes']?.find((id) => id !== this.accountUserId)
       ?? members.find((event) => event.state_key !== this.accountUserId)?.state_key
     const hero = heroId ? state?.get(`m.room.member\0${heroId}`)?.content as MatrixRoomMemberContent | undefined : undefined
     const title = name?.name || alias?.alias || (direct ? hero?.displayname || heroId : undefined) || roomId
     const conversation: IMConversation<MatrixMediaLocator> = {
       id: roomId,
-      kind: create?.type === 'm.space' ? 'channel' : direct ? 'direct' : 'group',
+      kind: isSpace || parentId ? 'channel' : direct ? 'direct' : 'group',
       title,
+      parentId,
+      spaceId,
       avatar: avatar?.url ? avatarMedia(roomId, avatar.url) : direct && hero?.avatar_url
         ? avatarMedia(heroId!, hero.avatar_url)
         : undefined,
       metadata: {
         matrixRoomId: roomId,
+        matrixSpace: isSpace,
+        hasSubchannels: isSpace && (this.spaceChildren.get(roomId)?.length ?? 0) > 0,
         encrypted,
         participantsCount: room?.summary?.['m.joined_member_count'] ?? members.length,
       },

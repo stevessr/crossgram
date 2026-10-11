@@ -5474,9 +5474,10 @@ export class DialogRpc {
   ): Promise<{ topic: tl.RawForumTopic, top: MaterializedMessage }> {
     const stored = await this._storedTopicSeed(child.id)
     const history = stored.length ? stored : await this._loadHistory(child.id, { limit: 100 })
-    const top = history[0]
-    const oldest = history.at(-1)
-    if (!top || !oldest) throw new RpcError(500, 'FORUM_TOPIC_EMPTY')
+    // Space containers and newly created child rooms may contain no messages.
+    // Telegram still needs a topic seed to display and open them.
+    const top = history[0] ?? this._emptyTopicSeed(child)
+    const oldest = history.at(-1) ?? top
     const topicId = await this._store?.getOldestTlMessageId(this._session.platformSessionId, child.id)
       ?? oldest.tlId
     this._topicToConversation.set(topicId, child.id)
@@ -5496,6 +5497,22 @@ export class DialogRpc {
         ))?.draft,
       },
     }
+  }
+
+  private _emptyTopicSeed(child: import('./platform.js').IMConversation): MaterializedMessage {
+    const source: IMMessage = {
+      id: `bridge:empty-topic:${child.id}`,
+      conversationId: child.id,
+      senderId: this._session.userId,
+      timestamp: 0,
+      outgoing: true,
+      content: { parts: [{ type: 'text', text: child.title }] },
+    }
+    const item: MaterializedMessage = {
+      source, tlId: this._messageId(child.id, source.id), ordinal: 0,
+    }
+    this._rememberMessage(item)
+    return item
   }
 
   private async _storedTopicSeed(conversationId: string): Promise<MaterializedMessage[]> {
