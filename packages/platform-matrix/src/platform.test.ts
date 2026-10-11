@@ -350,6 +350,23 @@ describe('MatrixPlatform', () => {
           { id: '$missing', sender: '@alice:example.org' }),
         event('m.room.message', { msgtype: 'm.location', body: 'Southwest edge', geo_uri: 'geo:-90,-180' },
           { id: '$edge', sender: '@alice:example.org' }),
+        event('m.room.message', {
+          msgtype: 'm.location', body: 'Old location',
+          'm.location': { uri: 'geo:39.9,116.4;u=20', description: 'Beijing' },
+          'm.text': 'Geographic coordinates',
+        }, { id: '$extensible', sender: '@alice:example.org' }),
+        event('m.location', {
+          'm.location': { uri: 'geo:35.68,139.69', description: 'Tokyo' },
+        }, { id: '$standalone', sender: '@alice:example.org' }),
+        event('m.room.message', {
+          msgtype: 'm.location',
+          'org.matrix.msc3488.location': { uri: 'geo:23.1,113.3', description: 'Guangzhou' },
+        }, { id: '$unstable', sender: '@alice:example.org' }),
+        event('m.room.message', {
+          msgtype: 'm.location', body: 'Legacy fallback',
+          geo_uri: 'geo:37.56,126.97',
+          'm.location': { uri: 'not a geo uri', description: 'Seoul' },
+        }, { id: '$legacy-fallback', sender: '@alice:example.org' }),
       ] })
     })
     const platform = createPlatform(fetch)
@@ -362,6 +379,18 @@ describe('MatrixPlatform', () => {
     expect(page.messages[2]?.content.parts).toEqual([{ type: 'text', text: 'Missing URI' }])
     expect(page.messages[3]).toMatchObject({ content: { parts: [{ type: 'card', card: {
       latitude: -90, longitude: -180,
+    } }] } })
+    expect(page.messages[4]).toMatchObject({ content: { parts: [{ type: 'card', card: {
+      title: 'Beijing', latitude: 39.9, longitude: 116.4,
+    } }] } })
+    expect(page.messages[5]).toMatchObject({ content: { parts: [{ type: 'card', card: {
+      title: 'Tokyo', latitude: 35.68, longitude: 139.69,
+    } }] } })
+    expect(page.messages[6]).toMatchObject({ content: { parts: [{ type: 'card', card: {
+      title: 'Guangzhou', latitude: 23.1, longitude: 113.3,
+    } }] } })
+    expect(page.messages[7]).toMatchObject({ content: { parts: [{ type: 'card', card: {
+      title: 'Seoul', latitude: 37.56, longitude: 126.97,
     } }] } })
   })
 
