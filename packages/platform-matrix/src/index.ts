@@ -6,6 +6,7 @@ import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialog,
   IMDialogPage, IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia,
   IMInlineKeyboardButton, IMMessage, IMMessageInput, IMMessageSearchPage, IMMessageSearchQuery, IMMessageTarget, IMPageQuery, IMPlatform, IMReadTarget,
+  IMRequest, IMRequestAction, IMRequestPage, IMRequestQuery,
   IMTransferOptions, IMUser, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
@@ -13,7 +14,7 @@ import { MatrixClient, type MatrixClientOptions } from './client.js'
 import { matrixMentionUserIds, matrixTextEntities, textContent } from './formatting.js'
 import { countClosedMatrixPoll, type MatrixPollTally } from './poll-results.js'
 import type {
-  MatrixDirectAccountData, MatrixEvent, MatrixJoinedRoom, MatrixMediaLocator, MatrixRoomMemberContent,
+  MatrixDirectAccountData, MatrixEvent, MatrixInvitedRoom, MatrixJoinedRoom, MatrixMediaLocator, MatrixRoomMemberContent,
   MatrixRoomMessageContent, MatrixSyncResponse,
 } from './types.js'
 
@@ -83,6 +84,13 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   private readonly roomState = new Map<string, Map<string, MatrixEvent>>()
   private readonly conversations = new Map<string, IMConversation<MatrixMediaLocator>>()
   private readonly directRoomIds = new Set<string>()
+  /** The live invitation index also authorizes accept/reject actions by opaque request ID. */
+  private readonly pendingInvites = new Map<string, IMRequest<MatrixMediaLocator>>()
+  /** A successful local action must not be undone by an old /sync snapshot. */
+  private readonly locallyResolvedInvites = new Map<string, IMRequest<MatrixMediaLocator>>()
+  private readonly resolvingInvites = new Set<string>()
+  /** Freeze a paginated request listing: each page must refer to the same /sync snapshot. */
+  private requestPageSnapshot?: IMRequest<MatrixMediaLocator>[]
   /** Poll closures observed in sync/history, scoped to the room to avoid cross-room event collisions. */
   private readonly closedPolls = new Set<string>()
   private readonly pollTallies = new Map<string, MatrixPollTally>()
@@ -115,6 +123,14 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     const controller = new AbortController()
     const initial = await this.client.sync({ timeout: 0, fullState: true, signal: controller.signal })
     this.ingestAccountData(initial)
+    for (const [roomId, room] of Object.entries(initial.rooms?.invite ?? {})) {
+      const request = this.mapRoomInvite(roomId, room, userId)
+      if (!request) continue
+      const resolved = this.locallyResolvedInvites.get(roomId)
+      if (resolved?.id === request.id) continue
+      if (resolved) this.locallyResolvedInvites.delete(roomId)
+      this.pendingInvites.set(roomId, request)
+    }
     for (const [roomId, room] of Object.entries(initial.rooms?.join ?? {})) {
       this.ingestState(roomId, room.state?.events ?? [])
       this.updateConversation(roomId, room)
@@ -128,8 +144,9 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
             timeout: this.syncTimeoutMs,
             signal: controller.signal,
           })
-          since = response.next_batch
           await this.dispatchSync(response, userId, handler)
+          // Only advance the token after the bridge has durably handled the batch.
+          since = response.next_batch
         } catch (error) {
           if (controller.signal.aborted) return
           this.logger?.warn('Matrix sync failed: %s', formatError(error))
@@ -169,6 +186,113 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       dialogs: page,
       total: dialogs.length,
       nextCursor: start + page.length < dialogs.length ? String(start + page.length) : undefined,
+    }
+  }
+
+  async getRequests(
+    _session: PlatformSession,
+    query: IMRequestQuery = {},
+  ): Promise<IMRequestPage<MatrixMediaLocator>> {
+    if (query.kind && query.kind !== 'group-join') return { requests: [] }
+    const start = requestPageStart(query.cursor)
+    if (!query.cursor || !this.requestPageSnapshot) {
+      const userId = await this.getAccountUserId()
+      const snapshot = await this.client.sync({ timeout: 0, fullState: true })
+      const requests: IMRequest<MatrixMediaLocator>[] = []
+      const seen = new Set<string>()
+      for (const [roomId, room] of Object.entries(snapshot.rooms?.invite ?? {})) {
+        const request = this.mapRoomInvite(roomId, room, userId)
+        if (!request) continue
+        seen.add(roomId)
+        const locallyResolved = this.locallyResolvedInvites.get(roomId)
+        if (locallyResolved && locallyResolved.id === request.id) {
+          // An upstream snapshot may temporarily lag a successful join/leave.
+          requests.push(locallyResolved)
+          continue
+        }
+        if (locallyResolved) {
+          // A newer invitation replaced an already handled one before its
+          // terminal result could be recovered by the bridge.
+          requests.push(locallyResolved)
+          this.locallyResolvedInvites.delete(roomId)
+        }
+        const previous = this.pendingInvites.get(roomId)
+        if (previous && previous.id !== request.id) {
+          requests.push({ ...previous, state: 'rejected' })
+        }
+        requests.push(request)
+        this.pendingInvites.set(roomId, request)
+      }
+      // A fresh full_state sync is an authoritative list of outstanding
+      // invitations; emit terminal states for invites no longer present.
+      for (const [roomId, request] of this.pendingInvites) {
+        if (seen.has(roomId)) continue
+        requests.push({
+          ...request,
+          state: snapshot.rooms?.join?.[roomId] ? 'accepted' : 'rejected',
+        })
+        this.pendingInvites.delete(roomId)
+      }
+      for (const [roomId, resolved] of this.locallyResolvedInvites) {
+        if (seen.has(roomId)) continue
+        // Reconcile the terminal state once even if an out-of-band /sync
+        // snapshot has already removed the invite. The bridge may not have
+        // persisted the preceding inline button callback yet.
+        requests.push(resolved)
+        this.locallyResolvedInvites.delete(roomId)
+      }
+      requests.sort((a, b) =>
+        Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0) || a.id.localeCompare(b.id))
+      this.requestPageSnapshot = requests
+    }
+    const requests = this.requestPageSnapshot
+    const limit = clampLimit(query.limit)
+    const page = requests.slice(start, start + limit)
+    return {
+      requests: page,
+      nextCursor: start + page.length < requests.length ? String(start + page.length) : undefined,
+    }
+  }
+
+  async resolveRequest(
+    _session: PlatformSession,
+    id: string,
+    action: IMRequestAction,
+  ): Promise<IMRequest<MatrixMediaLocator>> {
+    const pending = [...this.pendingInvites.values()].find((request) => request.id === id)
+    if (!pending) {
+      // A remote join/leave can succeed before the bridge persists the
+      // terminal inbox update. Allow the same callback to retry without
+      // issuing a second remote operation.
+      const resolved = [...this.locallyResolvedInvites.values()].find((request) => request.id === id)
+      if (resolved && resolved.state === (action === 'accept' ? 'accepted' : 'rejected')) return resolved
+      throw new Error(`Unknown or no longer pending Matrix room invitation: ${id}`)
+    }
+    const roomId = pending.group!.id
+    if (this.resolvingInvites.has(roomId)) {
+      throw new Error(`Matrix room invitation resolution is already in progress: ${roomId}`)
+    }
+    this.resolvingInvites.add(roomId)
+    try {
+      if (action === 'accept') {
+        await this.client.joinRoom(roomId)
+      } else {
+        await this.client.leaveRoom(roomId)
+      }
+      const resolved: IMRequest<MatrixMediaLocator> = {
+        ...pending, state: action === 'accept' ? 'accepted' : 'rejected',
+      }
+      // A concurrent sync may already have replaced the room's invitation.
+      // Never delete a distinct newer invitation when this action completes.
+      if (this.pendingInvites.get(roomId)?.id === id) this.pendingInvites.delete(roomId)
+      this.locallyResolvedInvites.set(roomId, resolved)
+      // Keep the current paginated view stable even when an inline callback
+      // resolves one of its entries between two request-list pages.
+      this.requestPageSnapshot = this.requestPageSnapshot?.map((request) =>
+        request.id === id ? resolved : request)
+      return resolved
+    } finally {
+      this.resolvingInvites.delete(roomId)
     }
   }
 
@@ -600,7 +724,32 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     handler: (event: IMEvent<MatrixMediaLocator>) => void | Promise<void>,
   ): Promise<void> {
     this.ingestAccountData(response)
+    for (const [roomId, room] of Object.entries(response.rooms?.invite ?? {})) {
+      const request = this.mapRoomInvite(roomId, room, userId)
+      if (!request) continue
+      const locallyResolved = this.locallyResolvedInvites.get(roomId)
+      if (locallyResolved?.id === request.id) continue
+      if (locallyResolved) {
+        await handler({ type: 'request', request: locallyResolved })
+        this.locallyResolvedInvites.delete(roomId)
+      }
+      const previous = this.pendingInvites.get(roomId)
+      if (previous && previous.id !== request.id && previous.id !== locallyResolved?.id) {
+        await handler({ type: 'request', request: { ...previous, state: 'rejected' } })
+      }
+      if (!previous || JSON.stringify(previous) !== JSON.stringify(request)) {
+        await handler({ type: 'request', request })
+      }
+      this.pendingInvites.set(roomId, request)
+    }
     for (const [roomId, room] of Object.entries(response.rooms?.join ?? {})) {
+      const invite = this.pendingInvites.get(roomId)
+      const settled = this.locallyResolvedInvites.get(roomId)
+      if (invite || settled) {
+        await handler({ type: 'request', request: { ...(invite ?? settled!), state: 'accepted' } })
+        this.pendingInvites.delete(roomId)
+        this.locallyResolvedInvites.delete(roomId)
+      }
       const stateEvents = [
         ...(room.state?.events ?? []),
         ...(room.timeline?.events ?? []).filter((event) => event.state_key !== undefined),
@@ -650,6 +799,53 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       const receipt = room.ephemeral?.events?.find((event) => event.type === 'm.receipt')
       const receiptEventId = receipt && latestReadReceipt(receipt.content, userId)
       if (receiptEventId) await handler({ type: 'read', conversationId: roomId, upToMessageId: receiptEventId })
+    }
+    for (const roomId of Object.keys(response.rooms?.leave ?? {})) {
+      const invite = this.pendingInvites.get(roomId)
+      const settled = this.locallyResolvedInvites.get(roomId)
+      if (invite || settled) {
+        await handler({ type: 'request', request: { ...(invite ?? settled!), state: 'rejected' } })
+        this.pendingInvites.delete(roomId)
+        this.locallyResolvedInvites.delete(roomId)
+      }
+    }
+  }
+
+  /** Matrix invites have stripped state, not the full state of joined rooms. */
+  private mapRoomInvite(
+    roomId: string,
+    room: MatrixInvitedRoom,
+    userId: string,
+  ): IMRequest<MatrixMediaLocator> | undefined {
+    const events = room.invite_state?.events ?? []
+    const membership = [...events].reverse().find((event) =>
+      event.type === 'm.room.member'
+      && event.state_key === userId
+      && (event.content as MatrixRoomMemberContent).membership === 'invite')
+    if (!membership?.sender) return
+    const findState = (type: string, stateKey: string) => events.find((event) =>
+      event.type === type && event.state_key === stateKey)?.content
+    const name = findState('m.room.name', '') as { name?: string } | undefined
+    const alias = findState('m.room.canonical_alias', '') as { alias?: string } | undefined
+    const avatar = findState('m.room.avatar', '') as { url?: string } | undefined
+    const create = findState('m.room.create', '') as { type?: string } | undefined
+    const inviter = findState('m.room.member', membership.sender) as MatrixRoomMemberContent | undefined
+    const reason = (membership.content as MatrixRoomMemberContent).reason
+    return {
+      id: `matrix:invite:${encodeURIComponent(roomId)}:${encodeURIComponent(membership.event_id ?? String(membership.origin_server_ts ?? membership.sender))}`,
+      kind: 'group-join',
+      state: 'pending',
+      requester: this.mapUser(membership.sender, inviter),
+      group: {
+        id: roomId,
+        kind: create?.type === 'm.space' ? 'channel' : 'group',
+        title: name?.name || alias?.alias || roomId,
+        avatar: avatar?.url ? avatarMedia(roomId, avatar.url) : undefined,
+        metadata: { matrixRoomId: roomId, matrixRoomInvite: true },
+      },
+      message: reason,
+      createdAt: membership.origin_server_ts,
+      metadata: { matrixRoomInvite: true, matrixRoomId: roomId },
     }
   }
 
@@ -1030,6 +1226,13 @@ function latestReadReceipt(content: unknown, userId: string): string | undefined
     if (!latest || ts >= latest.ts) latest = { eventId, ts }
   }
   return latest?.eventId
+}
+
+function requestPageStart(cursor?: string): number {
+  if (!cursor) return 0
+  const value = Number(cursor)
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error(`invalid Matrix request cursor: ${cursor}`)
+  return value
 }
 
 function pageStart(items: Array<{ conversation: { id: string } }>, query: IMPageQuery): number {

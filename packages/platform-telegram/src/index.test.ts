@@ -93,11 +93,13 @@ describe('Telegram text adapter', () => {
     try {
       const path = join(directory, 'private', 'session.sqlite')
       await prepareStorage(path)
-      expect((await stat(path)).mode & 0o777).toBe(0o600)
+      if (process.platform !== 'win32') expect((await stat(path)).mode & 0o777).toBe(0o600)
       await symlink(path, join(directory, 'link'))
       await expect(prepareStorage(join(directory, 'link'))).rejects.toThrow()
-      await chmod(join(directory, 'private'), 0o755)
-      await expect(prepareStorage(path)).rejects.toThrow('0700')
+      if (process.platform !== 'win32') {
+        await chmod(join(directory, 'private'), 0o755)
+        await expect(prepareStorage(path)).rejects.toThrow('0700')
+      }
     } finally { await rm(directory, { recursive: true, force: true }) }
   })
 })
