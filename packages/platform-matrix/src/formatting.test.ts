@@ -84,6 +84,24 @@ describe('Matrix mention formatting', () => {
     }])
   })
 
+  it('decodes named and numeric HTML entities without shifting linked mention offsets', () => {
+    const prefix = `&<>"'\u00a0#`
+    const body = `${prefix} @Alice`
+    const content = {
+      msgtype: 'm.text',
+      body,
+      format: 'org.matrix.custom.html',
+      formatted_body: '&amp;&lt;&gt;&quot;&apos;&nbsp;&#35; <a href="https://matrix.to/#/%40alice%3Aexample.org">@Alice</a>',
+      'm.mentions': { user_ids: ['@alice:example.org'] },
+    }
+    expect(matrixTextEntities(content)).toEqual([{
+      type: 'mention',
+      offset: body.indexOf('@Alice'),
+      length: 6,
+      userId: '@alice:example.org',
+    }])
+  })
+
   it('still finds additional literal Matrix user IDs after a rich user link', () => {
     const body = '@Alice and @alice:example.org'
     expect(matrixTextEntities({

@@ -568,6 +568,367 @@ describe('MatrixPlatform', () => {
     expect(root).toMatchObject({ conversation: { metadata: { hasSubchannels: false } } })
     expect(updatedChild).toMatchObject({ conversation: { kind: 'group', parentId: undefined } })
   })
+  it('projects stable and legacy Matrix polls without showing individual votes as messages', async () => {
+    const fetch = routeFetch((url) => {
+      if (!url.pathname.endsWith('/messages')) throw new Error(`unexpected request: ${url}`)
+      return json({ chunk: [
+        event('m.poll.start', {
+          'm.text': [{ mimetype: 'text/plain', body: 'Dinner? 1. Pizza 2. Noodles' }],
+          'm.poll': {
+            kind: 'm.disclosed', max_selections: 2,
+            question: { 'm.text': [{ body: 'Dinner?' }] },
+            answers: [
+              { 'm.id': 'pizza', 'm.text': [{ body: 'Pizza' }] },
+              { 'm.id': 'noodles', 'm.text': [{ body: 'Noodles' }] },
+            ],
+          },
+        }, { id: '$poll', sender: '@alice:example.org', ts: 1_000 }),
+        event('m.poll.response', {
+          'm.relates_to': { rel_type: 'm.reference', event_id: '$poll' },
+          'm.selections': ['pizza'],
+        }, { id: '$vote', sender: '@me:example.org', ts: 2_000 }),
+        event('m.poll.end', {
+          'm.relates_to': { rel_type: 'm.reference', event_id: '$poll' },
+          'm.text': [{ body: 'Poll closed' }],
+        }, { id: '$close', sender: '@alice:example.org', ts: 3_000 }),
+        event('org.matrix.msc3381.poll.start', {
+          'org.matrix.msc1767.text': 'Where to go?',
+          'org.matrix.msc3381.poll.start': {
+            kind: 'org.matrix.msc3381.poll.undisclosed',
+            question: { 'org.matrix.msc1767.text': 'Where to go?' },
+            answers: [{ id: 'beach', 'org.matrix.msc1767.text': 'Beach' }],
+          },
+        }, { id: '$legacy', sender: '@alice:example.org', ts: 4_000 }),
+        event('org.matrix.msc3381.poll.end', {
+          'm.relates_to': { rel_type: 'm.reference', event_id: '$legacy' },
+          'org.matrix.msc1767.text': 'Voting ended',
+        }, { id: '$legacy-end', sender: '@alice:example.org', ts: 5_000 }),
+        event('m.poll.start', { 'm.text': [{ body: 'Fallback when poll is malformed' }] },
+          { id: '$fallback', sender: '@alice:example.org', ts: 6_000 }),
+      ] })
+    })
+    const platform = createPlatform(fetch)
+    const page = await platform.getHistory(session, { id: '!room:example.org' })
+    expect(page.messages.map((item) => item.id)).toEqual([
+      '$poll', '$close', '$legacy', '$legacy-end', '$fallback',
+    ])
+    expect(page.messages[0]).toMatchObject({ content: { parts: [{ type: 'poll', poll: {
+      question: 'Dinner?', kind: 'disclosed', maxSelections: 2,
+      answers: [{ id: 'pizza', text: 'Pizza' }, { id: 'noodles', text: 'Noodles' }],
+    } }] } })
+    expect(page.messages[1]).toMatchObject({
+      replyToId: '$poll', content: { parts: [{ type: 'text', text: 'Poll closed' }] },
+    })
+    expect(page.messages[2]).toMatchObject({ content: { parts: [{ type: 'poll', poll: {
+      question: 'Where to go?', kind: 'undisclosed', maxSelections: 1,
+      answers: [{ id: 'beach', text: 'Beach' }],
+    } }] } })
+    expect(page.messages[3]).toMatchObject({ replyToId: '$legacy', content: {
+      parts: [{ text: 'Voting ended' }],
+    } })
+    expect(page.messages[4]?.content.parts).toEqual([
+      { type: 'text', text: 'Fallback when poll is malformed' },
+    ])
+  })
+
+  it('maps Matrix poll replacement edits from m.new_content and preserves the source ID', async () => {
+    const fetch = routeFetch((url) => {
+      if (!url.pathname.endsWith('/messages')) throw new Error(`unexpected request: ${url}`)
+      return json({ chunk: [
+        event('m.poll.start', {
+          'm.text': [{ body: '* Old question' }],
+          'm.poll': { kind: 'm.undisclosed', question: { 'm.text': [{ body: 'Old question' }] },
+            answers: [{ 'm.id': 'old', 'm.text': [{ body: 'Old answer' }] }] },
+          'm.new_content': {
+            'm.text': [{ body: 'Updated question and answers' }],
+            'm.poll': {
+              kind: 'm.poll.disclosed', question: { 'm.text': [{ body: 'Updated question' }] },
+              answers: [{ 'm.id': 'new', 'm.text': [{ body: 'Updated answer' }] }],
+            },
+          },
+          'm.relates_to': { rel_type: 'm.replace', event_id: '$original-poll' },
+        }, { id: '$poll-edit', sender: '@alice:example.org', ts: 8_000 }),
+      ] })
+    })
+    const page = await createPlatform(fetch).getHistory(session, { id: '!room:example.org' })
+    expect(page.messages).toHaveLength(1)
+    expect(page.messages[0]).toMatchObject({
+      id: '$original-poll', sourceIds: ['$original-poll'],
+      content: { parts: [{ type: 'poll', poll: {
+        question: 'Updated question', kind: 'disclosed', maxSelections: 1,
+        answers: [{ id: 'new', text: 'Updated answer' }],
+      } }] },
+    })
+  })
+
+
+  it('submits stable single-choice poll votes through Matrix reference events', async () => {
+    const poll = event('m.poll.start', {
+      'm.text': [{ body: 'Choose a dessert' }],
+      'm.poll.start': {
+        kind: 'm.poll.disclosed',
+        question: { 'm.text': [{ body: 'Dessert?' }] },
+        answers: [
+          { id: '🍓', 'm.text': [{ body: 'Strawberries' }] },
+          { id: '🍰', 'm.text': [{ body: 'Cake' }] },
+        ],
+      },
+    }, { id: '$dessert', sender: '@alice:example.org' })
+    const sent: Array<{ path: string, body: Record<string, unknown> }> = []
+    const fetch = routeFetch((url, init) => {
+      if (url.pathname.endsWith('/messages')) return json({ chunk: [poll] })
+      if (url.pathname.includes('/event/')) return json(poll)
+      if (url.pathname.includes('/relations/')) return json({ chunk: [] })
+      if (url.pathname.includes('/send/')) {
+        sent.push({ path: url.pathname, body: JSON.parse(String(init?.body)) })
+        return json({ event_id: '$vote' })
+      }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch)
+    const history = await platform.getHistory(session, { id: '!room:example.org' })
+    expect(history.messages[0].content.parts[0]).toMatchObject({
+      type: 'poll', poll: { question: 'Dessert?', kind: 'disclosed' },
+    })
+    const buttons = history.messages[0].content.inlineKeyboard?.rows
+      .flatMap((row) => row.buttons)
+    expect(buttons).toMatchObject([
+      { type: 'callback', text: 'Strawberries', data: 'matrix-poll-vote:0' },
+      { type: 'callback', text: 'Cake', data: 'matrix-poll-vote:1' },
+    ])
+    const result = await platform.clickInlineButton(session, {
+      conversationId: '!room:example.org', messageId: '$dessert',
+    }, { type: 'callback', text: 'Cake', data: 'matrix-poll-vote:1' })
+    expect(result).toMatchObject({ message: expect.stringContaining('投票已提交') })
+    expect(sent).toHaveLength(1)
+    expect(sent[0].path).toContain('/send/m.poll.response/')
+    expect(sent[0].body).toMatchObject({
+      'm.relates_to': { rel_type: 'm.reference', event_id: '$dessert' },
+      'm.selections': ['🍰'],
+      'm.poll.response': { answers: ['🍰'] },
+    })
+    await expect(platform.clickInlineButton(session, {
+      conversationId: '!room:example.org', messageId: '$dessert',
+    }, { type: 'callback', text: 'Nope', data: 'matrix-poll-vote:35' }))
+      .resolves.toMatchObject({ alert: true })
+    expect(sent).toHaveLength(1)
+  })
+
+  it('prevents late votes and omits keyboards on closed or multi-choice Matrix polls', async () => {
+    const poll = event('org.matrix.msc3381.poll.start', {
+      'org.matrix.msc3381.poll.start': {
+        kind: 'org.matrix.msc3381.poll.disclosed', max_selections: 1,
+        question: { 'org.matrix.msc1767.text': 'Go?' },
+        answers: [{ id: 'yes', 'org.matrix.msc1767.text': 'Yes' }],
+      },
+    }, { id: '$poll', sender: '@alice:example.org' })
+    const end = event('org.matrix.msc3381.poll.end', {
+      'm.relates_to': { rel_type: 'm.reference', event_id: '$poll' },
+      'org.matrix.msc3381.poll.end': {},
+    }, { id: '$end', sender: '@alice:example.org' })
+    let sends = 0
+    const fetch = routeFetch((url) => {
+      if (url.pathname.endsWith('/messages')) return json({ chunk: [poll, end] })
+      if (url.pathname.includes('/event/')) return json(poll)
+      if (url.pathname.includes('/relations/')) return json({ chunk: [end] })
+      if (url.pathname.includes('/send/')) { sends++; return json({ event_id: '$nope' }) }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch)
+    const history = await platform.getHistory(session, { id: '!room:example.org' })
+    expect(history.messages[0].content.inlineKeyboard).toBeUndefined()
+    expect(await platform.clickInlineButton(session, {
+      conversationId: '!room:example.org', messageId: '$poll',
+    }, { type: 'callback', text: 'Yes', data: 'matrix-poll-vote:0' })).toMatchObject({
+      alert: true, message: '投票已经结束',
+    })
+    expect(sends).toBe(0)
+  })
+
+  it('sends unstable MSC3381 votes only after paginated relation checks succeed', async () => {
+    const poll = event('org.matrix.msc3381.poll.start', {
+      'org.matrix.msc3381.poll.start': {
+        question: { 'org.matrix.msc1767.text': 'Question' },
+        answers: [{ id: 'a', 'org.matrix.msc1767.text': 'Answer' }],
+      },
+    }, { id: '$poll', sender: '@alice:example.org' })
+    const paths: string[] = []
+    const sent: Record<string, unknown>[] = []
+    const fetch = routeFetch((url, init) => {
+      paths.push(`${url.pathname}${url.search}`)
+      if (url.pathname.includes('/event/')) return json(poll)
+      if (url.pathname.includes('/relations/')) {
+        return json(url.searchParams.has('from') ? { chunk: [] } : { chunk: [], next_batch: 'more' })
+      }
+      if (url.pathname.includes('/send/')) {
+        sent.push(JSON.parse(String(init?.body)))
+        return json({ event_id: '$vote' })
+      }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch)
+    expect(await platform.clickInlineButton(session, {
+      conversationId: '!room:example.org', messageId: '$poll',
+    }, { type: 'callback', text: 'Answer', data: 'matrix-poll-vote:0' }))
+      .toMatchObject({ message: expect.stringContaining('投票已提交') })
+    expect(paths.filter((value) => value.includes('/relations/'))).toHaveLength(2)
+    expect(paths.find((value) => value.includes('from=more'))).toBeDefined()
+    expect(sent).toMatchObject([{ 'org.matrix.msc3381.poll.response': { answers: ['a'] } }])
+  })
+
+
+  it('fails closed when the homeserver cannot confirm poll relations', async () => {
+    const poll = event('m.poll.start', {
+      'm.poll.start': { question: { 'm.text': [{ body: 'Are you sure?' }] },
+        answers: [{ 'm.id': 'yes', 'm.text': [{ body: 'Yes' }] }] },
+    }, { id: '$poll', sender: '@alice:example.org' })
+    let attempts = 0
+    const fetch = routeFetch((url) => {
+      if (url.pathname.includes('/event/')) return json(poll)
+      if (url.pathname.includes('/relations/')) return json({
+        errcode: 'M_UNAVAILABLE', error: 'temporarily unavailable',
+      }, { status: 503 })
+      if (url.pathname.includes('/send/')) { attempts++; return json({ event_id: '$unexpected' }) }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const response = await createPlatform(fetch).clickInlineButton(session, {
+      conversationId: '!room:example.org', messageId: '$poll',
+    }, { type: 'callback', text: 'Yes', data: 'matrix-poll-vote:0' })
+    expect(response).toMatchObject({ alert: true, message: expect.stringContaining('无法验证') })
+    expect(attempts).toBe(0)
+  })
+
+  it('updates the original poll keyboard when Matrix sync delivers a poll-end event', async () => {
+    const roomId = '!room:example.org'
+    const poll = event('m.poll.start', {
+      'm.poll.start': {
+        question: { 'm.text': [{ body: 'Lunch?' }] },
+        answers: [{ 'm.id': 'rice', 'm.text': [{ body: 'Rice' }] }],
+      },
+    }, { id: '$poll', sender: '@alice:example.org', ts: 1_000 })
+    const end = event('m.poll.end', {
+      'm.relates_to': { rel_type: 'm.reference', event_id: '$poll' },
+      'm.text': [{ body: 'Lunch poll ended' }],
+    }, { id: '$end', sender: '@alice:example.org', ts: 2_000 })
+    let sync = 0
+    const fetch = routeFetch((url, init) => {
+      if (url.pathname.includes('/event/')) return json(poll)
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      sync++
+      if (sync === 1) return json({
+        next_batch: 'start', rooms: { join: { [roomId]: { state: { events: roomState } } } },
+      })
+      if (sync === 2) return json({
+        next_batch: 'next', rooms: { join: { [roomId]: { timeline: { events: [poll, end] } } } },
+      })
+      return pendingUntilAbort(init?.signal)
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+    const events: IMEvent[] = []
+    const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
+    await vi.waitFor(() => expect(events).toHaveLength(3))
+    await unsubscribe()
+    expect(events.map((event) => event.type)).toEqual(['message', 'message', 'message-edit'])
+    const opened = events[0], closed = events[2]
+    if (opened?.type !== 'message' || closed?.type !== 'message-edit') throw new Error('wrong event types')
+    expect(opened.message.content.inlineKeyboard?.rows).toHaveLength(1)
+    expect(closed.message).toMatchObject({ id: '$poll' })
+    expect(closed.message.content.inlineKeyboard).toBeUndefined()
+  })
+
+
+  it('backfills verified counts for a closed poll in Matrix history', async () => {
+    const poll = event('m.poll.start', {
+      'm.poll.start': {
+        kind: 'm.poll.undisclosed',
+        question: { 'm.text': [{ body: 'Best fruit?' }] },
+        answers: [{ 'm.id': 'apple', 'm.text': [{ body: 'Apple' }] },
+          { 'm.id': 'pear', 'm.text': [{ body: 'Pear' }] }],
+      },
+    }, { id: '$poll', sender: '@alice:example.org', ts: 1_000 })
+    const end = event('m.poll.end', {
+      'm.relates_to': { rel_type: 'm.reference', event_id: '$poll' },
+      'm.text': [{ body: 'Voting closed' }],
+      'm.poll.results': { apple: 9999 },
+    }, { id: '$end', sender: '@alice:example.org', ts: 5_000 })
+    const response = (id: string, sender: string, selection: string) =>
+      event('m.poll.response', {
+        'm.relates_to': { rel_type: 'm.reference', event_id: '$poll' },
+        'm.selections': [selection],
+      }, { id, sender, ts: 4_000 })
+    const fetch = routeFetch((url) => {
+      if (url.pathname.endsWith('/messages')) return json({ chunk: [poll, end] })
+      if (url.pathname.includes('/relations/')) return json({
+        chunk: [response('$vote1', '@bob:example.org', 'apple'),
+          response('$vote2', '@carol:example.org', 'pear'), end],
+      })
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch)
+    const messages = (await platform.getHistory(session, { id: '!room:example.org' })).messages
+    expect(messages[0]).toMatchObject({ content: { parts: [{ type: 'poll', poll: {
+      question: 'Best fruit?', closed: true, totalVoters: 2,
+      counts: { apple: 1, pear: 1 },
+    } }] } })
+    expect(messages[0].content.inlineKeyboard).toBeUndefined()
+  })
+
+  it('parses valid geo URIs into map cards and preserves malformed locations as text', async () => {
+    const fetch = routeFetch((url) => {
+      if (!url.pathname.endsWith('/messages')) throw new Error(`unexpected request: ${url}`)
+      return json({ chunk: [
+        event('m.room.message', { msgtype: 'm.location', body: 'Big Ben', geo_uri: 'geo:51.5008,-0.1247;u=15' },
+          { id: '$geo', sender: '@alice:example.org' }),
+        event('m.room.message', { msgtype: 'm.location', body: 'Invalid point', geo_uri: 'geo:91,200' },
+          { id: '$invalid', sender: '@alice:example.org' }),
+        event('m.room.message', { msgtype: 'm.location', body: 'Missing URI' },
+          { id: '$missing', sender: '@alice:example.org' }),
+        event('m.room.message', { msgtype: 'm.location', body: 'Southwest edge', geo_uri: 'geo:-90,-180' },
+          { id: '$edge', sender: '@alice:example.org' }),
+        event('m.room.message', {
+          msgtype: 'm.location', body: 'Old location',
+          'm.location': { uri: 'geo:39.9,116.4;u=20', description: 'Beijing' },
+          'm.text': 'Geographic coordinates',
+        }, { id: '$extensible', sender: '@alice:example.org' }),
+        event('m.location', {
+          'm.location': { uri: 'geo:35.68,139.69', description: 'Tokyo' },
+        }, { id: '$standalone', sender: '@alice:example.org' }),
+        event('m.room.message', {
+          msgtype: 'm.location',
+          'org.matrix.msc3488.location': { uri: 'geo:23.1,113.3', description: 'Guangzhou' },
+        }, { id: '$unstable', sender: '@alice:example.org' }),
+        event('m.room.message', {
+          msgtype: 'm.location', body: 'Legacy fallback',
+          geo_uri: 'geo:37.56,126.97',
+          'm.location': { uri: 'not a geo uri', description: 'Seoul' },
+        }, { id: '$legacy-fallback', sender: '@alice:example.org' }),
+      ] })
+    })
+    const platform = createPlatform(fetch)
+    const page = await platform.getHistory(session, { id: '!room:example.org' })
+    expect(page.messages[0]).toMatchObject({ content: { parts: [{ type: 'card', card: {
+      kind: 'location', title: 'Big Ben', latitude: 51.5008, longitude: -0.1247,
+      url: 'https://www.openstreetmap.org/?mlat=51.5008&mlon=-0.1247',
+    } }] } })
+    expect(page.messages[1]?.content.parts).toEqual([{ type: 'text', text: 'Invalid point' }])
+    expect(page.messages[2]?.content.parts).toEqual([{ type: 'text', text: 'Missing URI' }])
+    expect(page.messages[3]).toMatchObject({ content: { parts: [{ type: 'card', card: {
+      latitude: -90, longitude: -180,
+    } }] } })
+    expect(page.messages[4]).toMatchObject({ content: { parts: [{ type: 'card', card: {
+      title: 'Beijing', latitude: 39.9, longitude: 116.4,
+    } }] } })
+    expect(page.messages[5]).toMatchObject({ content: { parts: [{ type: 'card', card: {
+      title: 'Tokyo', latitude: 35.68, longitude: 139.69,
+    } }] } })
+    expect(page.messages[6]).toMatchObject({ content: { parts: [{ type: 'card', card: {
+      title: 'Guangzhou', latitude: 23.1, longitude: 113.3,
+    } }] } })
+    expect(page.messages[7]).toMatchObject({ content: { parts: [{ type: 'card', card: {
+      title: 'Seoul', latitude: 37.56, longitude: 126.97,
+    } }] } })
+  })
+
 })
 
 function createPlatform(fetch: typeof globalThis.fetch, extra: Record<string, unknown> = {}) {

@@ -10,6 +10,7 @@ export interface MatrixProfile {
 
 export interface MatrixEvent<T = Record<string, unknown>> {
   type: string
+  room_id?: string
   event_id?: string
   sender?: string
   origin_server_ts?: number
@@ -41,6 +42,13 @@ export interface MatrixRoomMemberContent {
 export interface MatrixRoomMessageContent {
   msgtype?: string
   body?: string
+  /** RFC 5870 geo URI for m.location room messages. */
+  geo_uri?: string
+  /** MSC3488 extensible location content. */
+  'm.location'?: { uri?: string, description?: string }
+  'org.matrix.msc3488.location'?: { uri?: string, description?: string }
+  'm.text'?: string | Array<{ body?: string, mimetype?: string }>
+  'org.matrix.msc1767.text'?: string
   formatted_body?: string
   format?: string
   'm.mentions'?: { user_ids?: string[], room?: boolean }
@@ -103,6 +111,11 @@ export interface MatrixMessagesResponse {
   state?: MatrixEvent[]
 }
 
+export interface MatrixRelationsResponse {
+  chunk: MatrixEvent[]
+  next_batch?: string
+}
+
 export interface MatrixEventContextResponse {
   start?: string
   end?: string
@@ -127,4 +140,21 @@ export interface MatrixDirectAccountData {
 export interface MatrixMediaLocator {
   mxc: string
   thumbnailMxc?: string
+}
+
+export interface MatrixRoomEventFilter {
+  types?: string[]
+  rooms?: string[]
+  senders?: string[]
+}
+
+/** POST /_matrix/client/v3/search response for the room_events category. */
+export interface MatrixSearchResponse {
+  search_categories?: {
+    room_events?: {
+      count?: number
+      next_batch?: string
+      results?: Array<{ result: MatrixEvent }>
+    }
+  }
 }

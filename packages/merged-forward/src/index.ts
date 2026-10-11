@@ -3,6 +3,7 @@ import type { tl } from '@mtcute/core'
 import Long from 'long'
 import {
   projectDetachedMessage,
+  messagePartText,
   stableId,
   type BridgeSessionState,
   type IMMedia,
@@ -950,6 +951,7 @@ export function snapshotPreview(snapshots: readonly IMMessageSnapshot[]): string
         }
         if (part.type === 'sticker') return '[表情]'
         if (part.type === 'card') return part.card.title?.trim() || '[卡片消息]'
+        if (part.type === 'poll') return messagePartText(part)
         return `[${part.bundle.title || '聊天记录'}]`
       }).filter(Boolean).join(' ').replace(/\s+/g, ' ').trim()
       return content ? `${sender}: ${content}` : ''
