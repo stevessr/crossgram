@@ -1200,7 +1200,10 @@ export class DialogRpc {
     const nativeIds = [...new Set(await this._platform.getPinnedMessageIds(this._session, conversation))]
     if (!nativeIds.length) {
       return { affected: {
-        _: 'messages.affectedHistory', pts: await this._channelPts(conversation),
+        _: 'messages.affectedHistory',
+        pts: conversation.kind === 'direct'
+          ? (await this._store.getUpdateState(this._session.platformSessionId)).pts
+          : await this._channelPts(conversation),
         ptsCount: 0, offset: 0,
       }, updates: [] }
     }
