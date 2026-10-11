@@ -38,7 +38,7 @@ describe('Matrix content projection', () => {
     expect(messagePartText({ type: 'poll', poll: {
       question: 'Tea or coffee?', kind: 'disclosed', maxSelections: 2,
       answers: [{ id: 'tea', text: 'Tea' }, { id: 'coffee', text: 'Coffee' }],
-    } })).toBe('🗳️ Tea or coffee?\\n1. Tea\\n2. Coffee\\n最多选择 2 项')
+    } })).toBe('🗳️ Tea or coffee?\n1. Tea\n2. Coffee\n最多选择 2 项')
   })
 
   it('renders location cards as native Telegram geolocation media', () => {
