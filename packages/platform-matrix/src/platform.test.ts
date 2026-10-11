@@ -220,7 +220,7 @@ describe('MatrixPlatform', () => {
           '!beta:example.org': invite('!beta:example.org', '@bob:example.org', 'Beta'),
         } },
       } satisfies MatrixSyncResponse)
-      if (/\\/(join|leave)$/.test(url.pathname)) {
+      if (/\/(join|leave)$/.test(url.pathname)) {
         actions.push({ path: url.pathname, method: init?.method ?? 'GET' })
         return json({})
       }
