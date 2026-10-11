@@ -2067,6 +2067,14 @@ describe('conversation kinds', () => {
   it('shows empty Space child channels as accessible Telegram forum topics', async () => {
     const emptyChildPlatform: IMPlatform = {
       ...platform,
+      async getDialogs() {
+        return {
+          dialogs: conversations.map((conversation) => ({
+            conversation, unreadCount: 0,
+            ...(conversation.id === 'subchannel' ? {} : { lastMessage: source(conversation) }),
+          })),
+        }
+      },
       async getHistory(localSession, target, query) {
         if (target.id === 'subchannel') return { messages: [] }
         return platform.getHistory!(localSession, target, query)
@@ -2153,7 +2161,8 @@ describe('conversation kinds', () => {
         const index = query?.afterId === first.id ? 1 : 0
         const selected = [first, later][index]!
         return {
-          dialogs: [{ conversation: selected, unreadCount: 0, lastMessage: source(selected) }],
+          // A lazy listing does not guarantee a cached message in every child.
+          dialogs: [{ conversation: selected, unreadCount: 0 }],
           total: 2,
           nextCursor: index === 0 ? '1' : undefined,
         }
