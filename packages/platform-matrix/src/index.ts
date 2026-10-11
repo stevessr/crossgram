@@ -500,13 +500,8 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     const selfMember = selfState && this.accountUserId && selfState.membership === 'join'
       ? this.mapMember(this.accountUserId, selfState, roomId)
       : undefined
-    const ownMembership = state?.get(`m.room.member\0${this.accountUserId}`)?.content as MatrixRoomMemberContent | undefined
-    const ownMember = this.accountUserId && ownMembership?.membership === 'join'
-      ? this.mapMember(this.accountUserId, ownMembership, roomId)
-      : undefined
     const conversation: IMConversation<MatrixMediaLocator> = {
       id: roomId,
-      ...(ownMember ? { selfRole: ownMember.role, selfPermissions: ownMember.permissions } : {}),
       kind: create?.type === 'm.space' ? 'channel' : direct ? 'direct' : 'group',
       title,
       selfRole: selfMember?.role,
