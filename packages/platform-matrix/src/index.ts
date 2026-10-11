@@ -57,6 +57,16 @@ export function apply(ctx: Context, config: Config): void {
   ctx.effect(() => () => platform.stop())
 }
 
+/** Native Matrix Megolm encryption is not supported by this adapter yet. */
+export class MatrixEncryptionRequiredError extends Error {
+  readonly code = 'MATRIX_E2EE_REQUIRED'
+
+  constructor(readonly roomId: string) {
+    super(`Matrix room ${roomId} uses end-to-end encryption; plaintext sends are blocked until a Matrix Olm/Megolm crypto backend is configured`)
+    this.name = 'MatrixEncryptionRequiredError'
+  }
+}
+
 export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   readonly platformKind = 'matrix'
   readonly capabilities: PlatformCapabilities = {
@@ -446,19 +456,45 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     return this.mapTimelineMessage(conversation.id, event) ?? null
   }
 
+  /**
+   * Never infer that a room is unencrypted from a missing local /sync cache.
+   * An encryption state event is irreversible; retain positive observations
+   * even if a subsequent homeserver response is stale or incomplete.
+   *
+   * A state read cannot atomically lock the room against an encryption upgrade.
+   * This is a fail-closed transitional safety measure, not Matrix E2EE.
+   */
+  private async assertPlaintextRoom(roomId: string): Promise<void> {
+    if (this.roomState.get(roomId)?.has('m.room.encryption\0')) {
+      throw new MatrixEncryptionRequiredError(roomId)
+    }
+    if (await this.client.hasRoomEncryption(roomId)) {
+      this.ingestState(roomId, [{ type: 'm.room.encryption', state_key: '', content: {} }])
+      throw new MatrixEncryptionRequiredError(roomId)
+    }
+  }
+
+  /** Every outgoing content event must check the current encryption state. */
+  private async sendPlaintextEvent(roomId: string, eventType: string, content: unknown): Promise<string> {
+    await this.assertPlaintextRoom(roomId)
+    return this.client.sendEvent(roomId, eventType, content)
+  }
+
   async sendMessage(
     session: PlatformSession,
     conversation: IMConversationRef,
     content: IMMessageInput,
     options: IMTransferOptions = {},
   ): Promise<IMMessage<MatrixMediaLocator>> {
+    // Check *before* consuming/uploading any plaintext media bytes.
+    await this.assertPlaintextRoom(conversation.id)
     const sourceIds: string[] = []
     const parts: IMMessage<MatrixMediaLocator>['content']['parts'] = []
     for (let index = 0; index < content.parts.length; index++) {
       const part = content.parts[index]!
       if (part.type === 'text') {
         const matrixContent = textContent(part.text, content.replyToId, part.entities)
-        sourceIds.push(await this.client.sendEvent(conversation.id, 'm.room.message', matrixContent))
+        sourceIds.push(await this.sendPlaintextEvent(conversation.id, 'm.room.message', matrixContent))
         parts.push({ type: 'text', text: part.text, entities: part.entities })
       } else if (part.type === 'media') {
         let transferredBytes = 0
@@ -474,7 +510,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
           },
         })
         const matrixContent = mediaContent(part.media, mxc, content.replyToId)
-        sourceIds.push(await this.client.sendEvent(conversation.id, 'm.room.message', matrixContent))
+        sourceIds.push(await this.sendPlaintextEvent(conversation.id, 'm.room.message', matrixContent))
         parts.push({
           type: 'media',
           media: {
@@ -504,7 +540,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
             await options.onProgress?.({ phase: 'upload', mediaIndex: index, transferredBytes, totalBytes: sticker.source.size })
           },
         })
-        sourceIds.push(await this.client.sendEvent(conversation.id, 'm.sticker', stickerContent(sticker, mxc, content.replyToId)))
+        sourceIds.push(await this.sendPlaintextEvent(conversation.id, 'm.sticker', stickerContent(sticker, mxc, content.replyToId)))
         parts.push({ type: 'media', media: {
           id: mxc, kind: sticker.mimeType.startsWith('image/') ? 'image' : 'file',
           name: `${sticker.stickerId}.${mediaExtension(sticker.mimeType)}`, mimeType: sticker.mimeType,
@@ -537,6 +573,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   ): Promise<{ message?: string, alert?: boolean }> {
     const match = /^matrix-poll-vote:(0|[1-9]\d?)$/.exec(button.data)
     if (!match) return { message: '无效的投票选项', alert: true }
+    await this.assertPlaintextRoom(target.conversationId)
     const start = await this.client.getEvent(target.conversationId, target.messageId)
     if (!isMatrixPollStart(start.type) || start.unsigned?.redacted_because) {
       return { message: '投票不存在或已经撤回', alert: true }
@@ -580,7 +617,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     this.closedPolls.delete(pollKey)
 
     const unstable = start.type === 'org.matrix.msc3381.poll.start'
-    await this.client.sendEvent(target.conversationId,
+    await this.sendPlaintextEvent(target.conversationId,
       unstable ? 'org.matrix.msc3381.poll.response' : 'm.poll.response', {
         'm.relates_to': { rel_type: 'm.reference', event_id: target.messageId },
         ...(unstable
@@ -641,6 +678,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       throw new Error('Matrix edits currently support exactly one text part')
     }
     const text = content.parts[0]
+    await this.assertPlaintextRoom(target.conversationId)
     const originalEvent = await this.client.getEvent(target.conversationId, target.targetId)
     if (originalEvent.type !== 'm.room.message') throw new Error(`Matrix cannot edit event type ${originalEvent.type}`)
     const raw = matrixRoomMessageContent(originalEvent.content)
@@ -654,7 +692,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       'm.new_content': newContent,
       'm.relates_to': { rel_type: 'm.replace', event_id: target.targetId },
     }
-    await this.client.sendEvent(target.conversationId, 'm.room.message', replacement)
+    await this.sendPlaintextEvent(target.conversationId, 'm.room.message', replacement)
     return {
       id: target.messageId,
       sourceIds: [target.targetId],
@@ -691,6 +729,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   }
 
   async setMessageReactions(session: PlatformSession, target: IMMessageTarget, reactionKeys: readonly string[]): Promise<IMReactionContext> {
+    await this.assertPlaintextRoom(target.conversationId)
     const userId = await this.getAccountUserId()
     if (reactionKeys.length > MAX_SELECTED_REACTIONS) throw new Error(`Matrix supports at most ${MAX_SELECTED_REACTIONS} selected reactions`)
     const requested = new Set(reactionKeys)
@@ -703,7 +742,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       if (requested.has(relation.key) && !selected.has(relation.key)) selected.add(relation.key)
       else if (event.event_id) await this.client.redactEvent(target.conversationId, event.event_id)
     }
-    for (const key of requested) if (!selected.has(key)) await this.client.sendEvent(target.conversationId, 'm.reaction', {
+    for (const key of requested) if (!selected.has(key)) await this.sendPlaintextEvent(target.conversationId, 'm.reaction', {
       'm.relates_to': { rel_type: 'm.annotation', event_id: target.targetId, key },
     })
     return this.getMessageReactions(session, target)
