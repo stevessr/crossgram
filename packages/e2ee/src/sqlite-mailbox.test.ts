@@ -29,7 +29,7 @@ describe('SQLite encrypted mailbox prototype', () => {
     const sender = generateDeviceIdentity(alice.deviceId)
     const recipient = generateDeviceIdentity(bob.deviceId)
     const plaintext = 'do not persist this in cleartext'
-    const sealed = sealMessage(new TextEncoder().encode(plaintext), 'room:secret', sender, publicDevice(recipient))
+    const sealed = sealMessage(new TextEncoder().encode(plaintext), 'room:secret', sender, publicDevice(recipient), { senderAccountId: 'alice', recipientAccountId: 'bob' })
     const pinStore = new MemoryDevicePinStore()
     const bundle = exportDeviceBundle(sender)
     await verifyAndPinDevice(pinStore, 'alice', bundle, bundleFingerprint(bundle))
@@ -44,7 +44,7 @@ describe('SQLite encrypted mailbox prototype', () => {
     expect(JSON.stringify(waiting)).not.toContain(plaintext)
     expect(waiting[0].id).toBe(queued.id)
     expect(new TextDecoder().decode(await openFromPinnedDevice(waiting[0].envelope,
-      'room:secret', recipient, pinStore, 'alice', new MemoryReplayGuard()))).toBe(plaintext)
+      'room:secret', recipient, pinStore, 'alice', new MemoryReplayGuard(), 'bob'))).toBe(plaintext)
     expect(await reopened.acknowledge(stranger, [queued.id])).toBe(0)
     expect(await reopened.acknowledge(bob, [queued.id])).toBe(1)
     reopened.close()
@@ -60,7 +60,7 @@ describe('SQLite encrypted mailbox prototype', () => {
     try {
       const sender = generateDeviceIdentity(alice.deviceId)
       const recipient = generateDeviceIdentity(bob.deviceId)
-      const first = sealMessage(new Uint8Array([1]), 'room:secret', sender, publicDevice(recipient))
+      const first = sealMessage(new Uint8Array([1]), 'room:secret', sender, publicDevice(recipient), { senderAccountId: 'alice', recipientAccountId: 'bob' })
       await expect(db.publish({ accountId: 'stranger', deviceId: alice.deviceId }, bob, first))
         .rejects.toThrow('E2EE_MAILBOX_UNAUTHORIZED')
       await expect(db.publish(alice, { accountId: 'bob', deviceId: 'other' }, first))
@@ -73,12 +73,12 @@ describe('SQLite encrypted mailbox prototype', () => {
       expect((await db.publish(alice, bob, first)).duplicate).toBe(true)
       await expect(db.acknowledge(bob, ['../../escape'])).rejects.toThrow('E2EE_INVALID_DELIVERY_IDS')
       for (let i = 1; i < 100; i++) {
-        const message = sealMessage(new Uint8Array([i]), 'room:secret', sender, publicDevice(recipient))
+        const message = sealMessage(new Uint8Array([i]), 'room:secret', sender, publicDevice(recipient), { senderAccountId: 'alice', recipientAccountId: 'bob' })
         await db.publish(alice, bob, message)
       }
       expect((await db.list(bob, 100)).length).toBe(100)
       await expect(db.publish(alice, bob,
-        sealMessage(new Uint8Array([101]), 'room:secret', sender, publicDevice(recipient))))
+        sealMessage(new Uint8Array([101]), 'room:secret', sender, publicDevice(recipient), { senderAccountId: 'alice', recipientAccountId: 'bob' })))
         .rejects.toThrow('E2EE_MAILBOX_FULL')
       expect(await db.acknowledge(bob, [saved.id, saved.id])).toBe(1)
     } finally {
@@ -92,7 +92,7 @@ describe('SQLite encrypted mailbox prototype', () => {
     try {
       const a = generateDeviceIdentity(alice.deviceId)
       const b = generateDeviceIdentity(bob.deviceId)
-      const message = sealMessage(new TextEncoder().encode('expiring'), 'room:secret', a, publicDevice(b))
+      const message = sealMessage(new TextEncoder().encode('expiring'), 'room:secret', a, publicDevice(b), { senderAccountId: 'alice', recipientAccountId: 'bob' })
       expect((await db.publish(alice, bob, message)).duplicate).toBe(false)
       now += 500
       expect((await db.publish(alice, bob, message)).duplicate).toBe(true)
