@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { bundleFingerprint, exportDeviceBundle, MemoryDevicePinStore,
+import { accountDeviceFingerprint, bundleFingerprint, exportDeviceBundle, MemoryDevicePinStore,
   openFromPinnedDevice, verifyAndPinDevice } from './devices.js'
 import { MemoryReplayGuard, generateDeviceIdentity, publicDevice, sealMessage } from './envelope.js'
 import { SqliteEncryptedMailbox } from './sqlite-mailbox.js'
@@ -32,7 +32,7 @@ describe('SQLite encrypted mailbox prototype', () => {
     const sealed = sealMessage(new TextEncoder().encode(plaintext), 'room:secret', sender, publicDevice(recipient), { senderAccountId: 'alice', recipientAccountId: 'bob' })
     const pinStore = new MemoryDevicePinStore()
     const bundle = exportDeviceBundle(sender)
-    await verifyAndPinDevice(pinStore, 'alice', bundle, bundleFingerprint(bundle))
+    await verifyAndPinDevice(pinStore, 'alice', bundle, accountDeviceFingerprint('alice', bundle))
     let first = new SqliteEncryptedMailbox(filename, allowed)
     const queued = await first.publish(alice, bob, sealed)
     expect(queued.duplicate).toBe(false)
