@@ -67,7 +67,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       maxTextLength: 60_000,
       maxMedia: 10,
     },
-    conversations: { groups: true, channels: true, subchannels: false },
+    conversations: { groups: true, channels: true, subchannels: true },
     members: { list: true, administrators: true, permissions: true },
     avatars: { users: true, conversations: true },
     messageActions: {
