@@ -369,8 +369,12 @@ describe('conversation kinds', () => {
       },
       async getPinnedMessageIds() { return [...nativePins] },
       async setMessagePinned(_session, _conversation, id, pinned) {
-        if (pinned && !nativePins.includes(id)) nativePins.push(id)
-        else if (!pinned) nativePins.splice(0, nativePins.length, ...nativePins.filter((item) => item !== id))
+        if ((pinned && nativePins.includes(id)) || (!pinned && !nativePins.includes(id))) {
+          return { changed: false, pinnedMessageIds: [...nativePins] }
+        }
+        if (pinned) nativePins.push(id)
+        else nativePins.splice(0, nativePins.length, ...nativePins.filter((item) => item !== id))
+        return { changed: true, eventId: '$native-pin', pinnedMessageIds: [...nativePins] }
       },
     }
     const { rpc, localEvents, localDeliveryOptions } = await createRpc(p, { publishLocalEvents: true })
@@ -389,9 +393,13 @@ describe('conversation kinds', () => {
     })
     expect(nativePins).toEqual([source(room).id])
     expect(localEvents.at(-1)).toMatchObject({
-      type: 'message-pins', pinnedMessageIds: [source(room).id],
+      type: 'message-pins', eventId: '$native-pin', pinnedMessageIds: [source(room).id],
       removedMessageIds: [],
     })
+    const before = localEvents.length
+    const noOp = await rpc.updatePinnedMessageWithDelivery({ peer, id: id! })
+    expect(noOp).toMatchObject({ published: true, response: { _: 'updates', updates: [] } })
+    expect(localEvents).toHaveLength(before)
     expect(localDeliveryOptions.at(-1)).toMatchObject({
       excludeAuthKeyId: '0011223344556677', deliveredViaRpc: true,
     })
