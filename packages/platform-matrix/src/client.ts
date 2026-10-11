@@ -156,6 +156,16 @@ export class MatrixClient {
     })
   }
 
+  /** Accept an invitation to a room using its opaque Matrix room ID. */
+  joinRoom(roomId: string): Promise<{ room_id: string }> {
+    return this.request(`/_matrix/client/v3/rooms/${segment(roomId)}/join`, { method: 'POST', body: {} })
+  }
+
+  /** Decline an invitation (or leave an already joined room). */
+  leaveRoom(roomId: string): Promise<void> {
+    return this.request(`/_matrix/client/v3/rooms/${segment(roomId)}/leave`, { method: 'POST', body: {} })
+  }
+
   async sendEvent(roomId: string, eventType: string, content: unknown, transactionId = randomUUID()): Promise<string> {
     const response = await this.request<{ event_id: string }>(
       `/_matrix/client/v3/rooms/${segment(roomId)}/send/${segment(eventType)}/${segment(transactionId)}`,

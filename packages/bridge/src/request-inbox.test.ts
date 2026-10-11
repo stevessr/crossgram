@@ -109,6 +109,38 @@ async function seedPendingRequest(store: MessageStore): Promise<IMRequest> {
   return request
 }
 
+describe('Matrix room invitation inbox', () => {
+  it('labels incoming invitations separately from requests to join our group', () => {
+    const message = requestInboxMessage({
+      id: 'matrix:invite:room',
+      kind: 'group-join',
+      state: 'pending',
+      requester: { id: '@alice:hs', firstName: 'Alice' },
+      group: { id: '!room:hs', kind: 'group', title: 'Development' },
+      metadata: { matrixRoomInvite: true, matrixRoomId: '!room:hs' },
+    })
+    expect(message.content.parts).toEqual([{
+      type: 'text',
+      text: 'Matrix 房间邀请\n邀请人：Alice\n邀请房间：Development\n邀请说明：无\n状态：待处理',
+    }])
+    expect(message.content.inlineKeyboard?.rows[0]?.buttons.map((button) => button.text))
+      .toEqual(['接受', '拒绝'])
+    const accepted = requestInboxMessage({
+      id: 'matrix:invite:room',
+      kind: 'group-join',
+      state: 'accepted',
+      requester: { id: '@alice:hs', firstName: 'Alice' },
+      group: { id: '!room:hs', kind: 'group', title: 'Development' },
+      metadata: { matrixRoomInvite: true },
+    })
+    expect(accepted.content.inlineKeyboard).toBeUndefined()
+    expect(accepted.content.parts).toEqual([{
+      type: 'text',
+      text: 'Matrix 房间邀请\n邀请人：Alice\n邀请房间：Development\n邀请说明：无\n状态：已接受',
+    }])
+  })
+})
+
 describe('request inbox dialog identity', () => {
   it.each([
     ['friend', {

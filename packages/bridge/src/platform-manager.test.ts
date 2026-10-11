@@ -1319,6 +1319,83 @@ describe('PlatformRegistry', () => {
     expect(registry.get('second')).toBeUndefined()
   })
 
+  it('does not reject a new live Matrix invite arriving during cold reconciliation', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform() as PushPlatform & { platformKind: string }
+    platform.platformKind = 'matrix'
+    const pendingPage = Promise.withResolvers<{ requests: IMRequest[] }>()
+    platform.getRequests = vi.fn(async () => pendingPage.promise)
+    const store = new MessageStore(database)
+    const manager = new PlatformSubscriptionManager(
+      database, new PlatformRegistry([['push', platform]]), store,
+    )
+    await manager.ensure(session)
+    await vi.waitFor(() => expect(platform.getRequests).toHaveBeenCalledTimes(1))
+    const live: IMRequest = {
+      id: 'new-during-reconcile', kind: 'group-join', state: 'pending', createdAt: 100,
+      requester: { id: '@alice:example.org', firstName: 'Alice' },
+      group: { id: '!new:example.org', kind: 'group', title: 'New' },
+      metadata: { matrixRoomInvite: true, matrixRoomId: '!new:example.org' },
+    }
+    await platform.emit({ type: 'request', request: live })
+    pendingPage.resolve({ requests: [] })
+    await vi.waitFor(async () => {
+      expect((await store.getRequest(session.platformSessionId, live.id))?.state).toBe('pending')
+    })
+    await manager.stop()
+  })
+
+  it('repairs joined and withdrawn Matrix invites missed during a bridge restart', async () => {
+    const database = await createDatabase()
+    const store = new MessageStore(database)
+    class MatrixPushPlatform extends PushPlatform {
+      readonly platformKind = 'matrix'
+    }
+    const platform = new MatrixPushPlatform()
+    platform.capabilities.history = true
+    platform.getDialogs = vi.fn(async () => ({
+      dialogs: [{
+        conversation: {
+          id: '!joined:example.org', kind: 'group' as const, title: 'Joined Room',
+          metadata: { matrixRoomId: '!joined:example.org' },
+        },
+        unreadCount: 0,
+      }],
+      total: 1,
+    }))
+    const invite = (id: string, roomId: string): IMRequest => ({
+      id, kind: 'group-join', state: 'pending', createdAt: 100,
+      requester: { id: '@inviter:example.org', firstName: 'Inviter' },
+      group: { id: roomId, kind: 'group', title: roomId },
+      metadata: { matrixRoomInvite: true, matrixRoomId: roomId },
+    })
+    const joined = invite('invite-joined', '!joined:example.org')
+    const revoked = invite('invite-revoked', '!revoked:example.org')
+    const active = invite('invite-active', '!active:example.org')
+    const unrelated: IMRequest = {
+      id: 'friend-request', kind: 'friend', state: 'pending',
+      requester: { id: 'friend', firstName: 'Friend' },
+    }
+    for (const request of [joined, revoked, active, unrelated]) {
+      await store.ingestRequest(session, request)
+    }
+    platform.getRequests = vi.fn(async () => ({ requests: [active] }))
+    const manager = new PlatformSubscriptionManager(
+      database, new PlatformRegistry([['push', platform]]), store,
+    )
+
+    await manager.ensure(session)
+    await vi.waitFor(async () => {
+      expect((await store.getRequest(session.platformSessionId, joined.id))?.state).toBe('accepted')
+      expect((await store.getRequest(session.platformSessionId, revoked.id))?.state).toBe('rejected')
+    })
+    expect((await store.getRequest(session.platformSessionId, active.id))?.state).toBe('pending')
+    expect((await store.getRequest(session.platformSessionId, unrelated.id))?.state).toBe('pending')
+    expect((await store.readHistory(session.platformSessionId, 'bridge:request-inbox'))
+      .filter((message) => message.content.inlineKeyboard)).toHaveLength(2)
+    await manager.stop()
+  })
+
   it('cold-syncs requests without requiring dialog history support', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()

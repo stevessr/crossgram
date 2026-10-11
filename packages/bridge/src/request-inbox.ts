@@ -189,19 +189,22 @@ export class RequestInboxSystemPeerProvider implements SystemPeerProvider {
 }
 
 function requestInboxText(request: IMRequest): string {
+  const inviter = request.metadata?.matrixRoomInvite === true
   const requester = request.requester.firstName || request.requester.id
   const lines = [
-    request.kind === 'friend' ? '好友申请' : '入群申请',
-    `申请人：${requester}`,
+    inviter ? 'Matrix 房间邀请' : request.kind === 'friend' ? '好友申请' : '入群申请',
+    `${inviter ? '邀请人' : '申请人'}：${requester}`,
   ]
-  if (request.kind === 'group-join') lines.push(`目标群：${request.group?.title ?? request.group?.id ?? '未知群'}`)
+  if (request.kind === 'group-join') {
+    lines.push(`${inviter ? '邀请房间' : '目标群'}：${request.group?.title ?? request.group?.id ?? '未知群'}`)
+  }
   if (request.metadata?.qqRequestSource === 'doubt') {
     lines.push('QQ 已过滤')
     if (typeof request.metadata.qqRequestReason === 'string' && request.metadata.qqRequestReason.trim()) {
       lines.push(`风险提示：${request.metadata.qqRequestReason}`)
     }
   }
-  lines.push(`验证信息：${request.message || '无'}`)
+  lines.push(`${inviter ? '邀请说明' : '验证信息'}：${request.message || '无'}`)
   lines.push(`状态：${request.state === 'pending' ? '待处理' : request.state === 'accepted' ? '已接受' : '已拒绝'}`)
   return lines.join('\n')
 }

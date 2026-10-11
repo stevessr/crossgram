@@ -78,9 +78,7 @@ it('isolates downstream keys, pushes only to the matching key and restores stick
   expect(clients).toHaveLength(3)
   const key = createHash('sha256').update(rpc().authKeyId!).digest('hex')
   expect((await store.load(key))?.phone).toBe('15551234567')
-  if (process.platform !== 'win32') {
-    expect((await stat(join(store.directory, `${key}.json`))).mode & 0o777).toBe(0o600)
-  }
+  if (process.platform !== 'win32') expect((await stat(join(store.directory, `${key}.json`))).mode & 0o777).toBe(0o600)
 })
 it('rejects non-allowlisted numbers, cross-account switching, migration/QR and repeated code requests', async () => {
   const { gateway, dependencies } = await setup()

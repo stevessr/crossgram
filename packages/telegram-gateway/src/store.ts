@@ -32,7 +32,9 @@ export class RouteStore {
   async init() {
     await mkdir(this.directory, { recursive: true, mode: 0o700 })
     const stat = await lstat(this.directory)
-    if (!stat.isDirectory() || hasUnsafeUnixMode(stat.mode)) throw new Error('Gateway storage directory must have mode 0700')
+    // Windows mode bits are synthesized from attributes rather than NTFS ACLs.
+    // Preserve file type/symlink checks and POSIX permission enforcement.
+    if (!stat.isDirectory() || stat.isSymbolicLink() || (process.platform !== 'win32' && (stat.mode & 0o077))) throw new Error('Gateway storage directory must have mode 0700')
   }
   private path(key: string, extension: string) {
     if (!/^[a-f0-9]{64}$/.test(key)) throw new Error('Invalid gateway storage key')
@@ -44,7 +46,7 @@ export class RouteStore {
     catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return; throw error }
     try {
       const stat = await file.stat()
-      if (!stat.isFile() || hasUnsafeUnixMode(stat.mode) || stat.size > 16384) throw new Error('Unsafe gateway route metadata')
+      if (!stat.isFile() || (process.platform !== 'win32' && (stat.mode & 0o077)) || stat.size > 16384) throw new Error('Unsafe gateway route metadata')
       const record = JSON.parse(await file.readFile('utf8')) as RouteRecord
       if (record.version !== 1 || !/^[1-9]\d{4,14}$/.test(record.phone) || !Number.isSafeInteger(record.apiId) || record.apiId < 1 ||
         !/^[a-f\d]{32}$/i.test(record.apiHash)) throw new Error('Invalid gateway route metadata')
@@ -80,18 +82,26 @@ export class RouteStore {
     const file = await open(this.path(key, 'ticket'), constants.O_RDONLY | constants.O_NOFOLLOW)
     try {
       const stat = await file.stat()
-      if (!stat.isFile() || hasUnsafeUnixMode(stat.mode) || stat.size > 32768) throw new Error('Unsafe gateway ticket')
+      if (!stat.isFile() || (process.platform !== 'win32' && (stat.mode & 0o077)) || stat.size > 32768) throw new Error('Unsafe gateway ticket')
       return JSON.parse(await file.readFile('utf8')) as ExportTicket
     } finally { await file.close() }
   }
   async importTicket(token: Uint8Array, userId: string, dcId?: number): Promise<ExportTicket> {
     if (token.length !== 32) throw new Error('Invalid gateway authorization token')
     const key = createHash('sha256').update(token).digest('hex')
-    // Moving an open ticket file does not serialize concurrent claimers on
-    // every Windows filesystem. O_EXCL ('wx') does, across processes as well
-    // as within one process. Keep the lock through validation and consumption.
-    const lockPath = this.path(key, 'claim')
-    const lock = await open(lockPath, 'wx', 0o600)
+    // O_EXCL works on Windows as well as POSIX. Acquire the lock BEFORE
+    // reading/validating, so parallel importers cannot both claim one token.
+    // A crashed importer leaves the ticket locked (fail closed).
+    const lockPath = this.path(key, 'claim-lock')
+    let lock
+    try {
+      lock = await open(lockPath, 'wx', 0o600)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error('Invalid or expired gateway authorization token')
+      }
+      throw error
+    }
     try {
       const value = await this.readTicket(key)
       if (value.expiresAt < Date.now() || value.userId !== userId || (dcId !== undefined && value.dcId !== dcId) || !await this.load(value.parent)) {
@@ -109,7 +119,7 @@ export class RouteStore {
   async sessionPath(key: string): Promise<string> {
     const path = this.path(key, 'sqlite')
     const file = await open(path, constants.O_CREAT | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600)
-    try { const stat = await file.stat(); if (!stat.isFile() || hasUnsafeUnixMode(stat.mode)) throw new Error('Unsafe gateway session file') }
+    try { const stat = await file.stat(); if (!stat.isFile() || (process.platform !== 'win32' && (stat.mode & 0o077))) throw new Error('Unsafe gateway session file') }
     finally { await file.close() }
     return path
   }
@@ -133,9 +143,4 @@ export class RouteStore {
   async remove(key: string) {
     await Promise.all(['json', 'sqlite', 'sqlite-wal', 'sqlite-shm'].map(ext => rm(this.path(key, ext), { force: true })))
   }
-}
-
-/** Windows reports synthetic POSIX mode bits; access is governed by NTFS ACLs. */
-function hasUnsafeUnixMode(mode: number): boolean {
-  return process.platform !== 'win32' && (mode & 0o077) !== 0
 }

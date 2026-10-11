@@ -57,6 +57,9 @@ describe('Matrix platform HTTP e2e', () => {
   let homeserver: string
   let proxyUrl: string
   let activePlatform: MatrixPlatform | undefined
+  let invitationScenario = false
+  const invitedRooms = new Set<string>()
+  const joinedRooms = new Set<string>()
 
   beforeAll(async () => {
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -76,6 +79,9 @@ describe('Matrix platform HTTP e2e', () => {
     await activePlatform?.stop()
     activePlatform = undefined
     spaceFixture = false
+    invitationScenario = false
+    invitedRooms.clear()
+    joinedRooms.clear()
   })
 
   it('bridges a complete account, dialog, history, send, and media workflow over real HTTP', async () => {
@@ -135,6 +141,45 @@ describe('Matrix platform HTTP e2e', () => {
     })
   })
 
+  it('handles Matrix invitation accept/reject over real authenticated HTTP', async () => {
+    invitationScenario = true
+    invitedRooms.add('!accept:test')
+    invitedRooms.add('!decline:test')
+    const platform = activePlatform = new MatrixPlatform({
+      homeserver, accessToken: 'e2e-token', proxy: proxyUrl, userId: '@bot:test',
+      requestTimeoutMs: 2_000, syncTimeoutMs: 100,
+    })
+    const session: PlatformSession = {
+      platformSessionId: 'matrix-invite-e2e', platformId: 'matrix',
+      userId: '@bot:test', credentials: {}, metadata: {},
+    }
+    const requests = (await platform.getRequests(session)).requests
+    expect(requests).toHaveLength(2)
+    const accept = requests.find((request) => request.group?.id === '!accept:test')!
+    const decline = requests.find((request) => request.group?.id === '!decline:test')!
+    expect(accept).toMatchObject({
+      kind: 'group-join', state: 'pending',
+      requester: { id: '@alice:test' },
+      group: { title: 'Invite !accept:test' },
+    })
+    expect((await platform.resolveRequest(session, accept.id, 'accept')).state).toBe('accepted')
+    expect((await platform.resolveRequest(session, decline.id, 'reject')).state).toBe('rejected')
+    const updated = (await platform.getRequests(session)).requests
+    expect(updated.find((request) => request.id === accept.id)?.state).toBe('accepted')
+    expect(updated.find((request) => request.id === decline.id)?.state).toBe('rejected')
+    expect((await platform.getDialogs(session)).dialogs.map((dialog) => dialog.conversation.id))
+      .toContain('!accept:test')
+    const posted = requestsForInvitations()
+    expect(posted.map((item) => item.path)).toEqual([
+      '/_matrix/client/v3/rooms/!accept%3Atest/join',
+      '/_matrix/client/v3/rooms/!decline%3Atest/leave',
+    ])
+    expect(posted.every((item) => item.method === 'POST' && item.authorization === 'Bearer e2e-token'))
+      .toBe(true)
+    expect(posted.map((item) => JSON.parse(new TextDecoder().decode(item.body))))
+      .toEqual([{}, {}])
+  })
+
   it('exposes nested joined Matrix Spaces through the real authenticated HTTP transport', async () => {
     spaceFixture = true
     const platform = activePlatform = new MatrixPlatform({
@@ -163,12 +208,48 @@ describe('Matrix platform HTTP e2e', () => {
     expect(calls.every((item) => item.path.includes('full_state=true'))).toBe(true)
   })
 
+  function requestsForInvitations() {
+    return requests.filter((request) =>
+      request.path.endsWith('/join') || request.path.endsWith('/leave'))
+  }
+
   async function route(request: IncomingMessage, response: ServerResponse, _body: Uint8Array): Promise<void> {
     const url = new URL(request.url ?? '/', homeserver || 'http://127.0.0.1')
     if (url.pathname.endsWith('/account/whoami')) return sendJson(response, { user_id: '@bot:test' })
     if (url.pathname.includes('/profile/')) return sendJson(response, {
       displayname: 'E2E Bot', avatar_url: 'mxc://test/avatar',
     })
+    if (invitationScenario) {
+      const match = /^\/_matrix\/client\/v3\/rooms\/(.+)\/(join|leave)$/.exec(url.pathname)
+      if (match && request.method === 'POST') {
+        const roomId = decodeURIComponent(match[1]!)
+        if (match[2] === 'join') {
+          invitedRooms.delete(roomId)
+          joinedRooms.add(roomId)
+          return sendJson(response, { room_id: roomId })
+        }
+        invitedRooms.delete(roomId)
+        joinedRooms.delete(roomId)
+        return sendJson(response, {})
+      }
+      if (url.pathname.endsWith('/sync')) {
+        const invite = Object.fromEntries([...invitedRooms].map((roomId) => [roomId, {
+          invite_state: { events: [
+            { type: 'm.room.name', state_key: '', content: { name: `Invite ${roomId}` } },
+            {
+              type: 'm.room.member', state_key: '@bot:test', sender: '@alice:test',
+              event_id: `$invite-${roomId}`, content: { membership: 'invite', reason: 'Join us' },
+            },
+          ] },
+        }]))
+        const join = Object.fromEntries([...joinedRooms].map((roomId) => [roomId, {
+          state: { events: [
+            { type: 'm.room.name', state_key: '', content: { name: `Invite ${roomId}` } },
+          ] },
+        }]))
+        return sendJson(response, { next_batch: 'invite-token', rooms: { invite, join } })
+      }
+    }
     if (url.pathname.endsWith('/sync') && spaceFixture) return sendJson(response, {
       next_batch: 'spaces-sync',
       rooms: { join: {
