@@ -60,7 +60,30 @@ yarn vitest run packages/e2ee/src/replay-ledger.test.ts
 
 以上测试是本地密码学原型测试，尚未在 GitHub CI 上获得通过记录，尚未接入任何真实 Telegram 客户端。
 
-## 四、完整实现所需工作
+## 四、加密投递与离线持久化原型（新增）
+
+新增 `packages/e2ee/src/mailbox.ts` 与 `packages/e2ee/src/sqlite-mailbox.ts`，供**服务器端传输层**使用；它们只保存客户端产生的密文信封和必要的路由元信息，不接受客户端私钥，也不执行客户端消息解密。
+
+- `MemoryEncryptedMailbox`：内存队列、每设备最多 100 条、重复提交去重、消息过期、设备隔离和 ACK；**仅用于模拟测试**。
+- `SqliteEncryptedMailbox`：通过 `node:sqlite` 事务将密文信封、账号/设备 ID、时间戳、保留期、去重墓碑写入 SQLite；采用 `BEGIN IMMEDIATE`、WAL（磁盘库）与 `synchronous=FULL`。重启后仍可拉取未确认密文，且确认消费后仍保留去重墓碑至其 TTL。默认保留期 7 天，每设备最多 100 条。
+- 任何投递都必须传入**可信服务端上下文**生成的发送账号/设备身份，并提供独立的 ACL 回调，核查接收设备归属、会话成员权限及服务器上的身份绑定。不能直接从 HTTP/MTProto 请求体提取这两项并宣称已认证。
+- 收取与 ACK 同样必须由服务器把实际登录会话解析为收信账号+设备；SDK 的 TypeScript `AuthenticatedDevice` 接口**本身不是认证凭据**。
+- 收件方必须在端上验证发送者身份、公钥、AEAD 和本地重放记录成功后，才向服务端发送 ACK；对密文的 JSON 完整性及签名验证不能托付给服务端。
+
+**重要局限**：两个邮箱实现均尚未接入 CrossGram Bridge、真实的 MTProto/HTTP RPC 或客户端，也没有部署认证接口。SQLite 后端是单机持久化原型，尚未实现水平扩展、完整限速、设备目录与账号绑定、正式的消息恢复/确认协议、数据库密文备份策略、存储加密、基于端到端密码状态的同步安全性。服务器仍可观察账号、聊天标识、设备、长度和时间，且能够丢弃、重排或延迟消息。服务器即使无法解密，也不代表消息获得完整的前向保密或入侵后恢复。
+
+**桥接安全边界没有改变**：这些原型仅可用于双方终端支持此协议的 CrossGram 原生收件设备；不能透明地将 QQ/Discord 等平台的普通聊天改造成端到端加密。
+
+### 新增测试指令
+
+```sh
+yarn vitest run packages/e2ee/src/mailbox.e2e.test.ts --config vitest.mtproto-e2e.config.mts
+yarn vitest run packages/e2ee/src/sqlite-mailbox.test.ts
+```
+
+仅覆盖模拟原生设备及本地 SQLite 生命周期，不构成上线测试或安全审计。
+
+## 五、完整实现所需工作
 
 1. **明确受保护的通信对象**：区分 CrossGram 原生 E2EE 联系人与 QQ/Discord/Matrix 外部桥接联系人。普通外部适配器不可能让其不支持此协议的终端自动解密；若桥接端解密，必须显式提示信任边界。
 2. **选择成熟协议**：对 Telegram 原生设备间聊天优先评估 Secret Chat 全套协议；对自研原生多设备消息优先考虑经过审计的 Double Ratchet、MLS 或成熟客户端库，而非扩展此演示型密文信封。
@@ -70,11 +93,11 @@ yarn vitest run packages/e2ee/src/replay-ledger.test.ts
 6. **高级功能与安全性**：异步会话建立及预密钥、Double Ratchet 恢复能力、加密媒体分块、多设备同步、群成员变更重新密钥协商、密钥备份和透明迁移。
 7. **测试与发布门槛**：两端独立进程真实消息流、恶意服务器篡改和重放、断网同步、SQLite/PostgreSQL 重启场景、客户端兼容矩阵及独立密码审计。
 
-## 五、测试
+## 六、测试
 
 ```sh
-yarn vitest run packages/e2ee/src/envelope.test.ts
-yarn vitest run --config vitest.mtproto-e2e.config.mts packages/e2ee/src/envelope.e2e.test.ts
+yarn vitest run packages/e2ee/src/envelope.test.ts packages/e2ee/src/devices.test.ts packages/e2ee/src/replay-ledger.test.ts packages/e2ee/src/sqlite-mailbox.test.ts
+yarn vitest run --config vitest.mtproto-e2e.config.mts packages/e2ee/src/envelope.e2e.test.ts packages/e2ee/src/mailbox.e2e.test.ts
 yarn typecheck
 ```
 
