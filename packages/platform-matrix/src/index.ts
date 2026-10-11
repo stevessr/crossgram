@@ -5,7 +5,7 @@ import zhCN from './locales/zh-CN.yml'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialog,
   IMDialogPage, IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia,
-  IMMessage, IMMessageInput, IMMessageTarget, IMPageQuery, IMPlatform, IMReadTarget,
+  IMInlineKeyboardButton, IMMessage, IMMessageInput, IMMessageTarget, IMPageQuery, IMPlatform, IMReadTarget,
   IMTransferOptions, IMUser, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
@@ -80,6 +80,8 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   private readonly roomState = new Map<string, Map<string, MatrixEvent>>()
   private readonly conversations = new Map<string, IMConversation<MatrixMediaLocator>>()
   private readonly directRoomIds = new Set<string>()
+  /** Poll closures observed in sync/history, scoped to the room to avoid cross-room event collisions. */
+  private readonly closedPolls = new Set<string>()
 
   constructor(config: Config, logger?: MatrixLogger) {
     this.client = new MatrixClient(config satisfies MatrixClientOptions)
@@ -659,7 +661,8 @@ function matrixEventText(value: unknown): string {
 /** Preserve structured poll questions and option IDs, with a plain-text fallback. */
 function matrixPollParts(value: unknown): IMMessage<MatrixMediaLocator>['content']['parts'] {
   const content = matrixObject(value)
-  const poll = matrixObject(content?.['m.poll'])
+  const poll = matrixObject(content?.['m.poll.start'])
+    ?? matrixObject(content?.['m.poll'])
     ?? matrixObject(content?.['org.matrix.msc3381.poll.start'])
   const fallback = matrixEventText(content)
   if (!poll) return fallback ? [{ type: 'text', text: fallback }] : []
