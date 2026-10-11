@@ -30,7 +30,8 @@ non-empty text searches, with room and sender constraints applied by the homeser
 Result ordering is newest first and pagination uses the homeserver's opaque
 `next_batch` token. Date ranges and image/file-type filters are evaluated after
 retrieval, so counts may be unavailable and pages may be shorter if very few
-messages match. A filter-only search without keywords scans paginated room history.
+messages match. Searches without keywords scan paginated room history, including
+links and combined photo/video filters applied by the Telegram bridge.
 Full-text results depend on the homeserver's search-index configuration; encrypted
 messages cannot be searched by a server that does not have their plaintext.
 
