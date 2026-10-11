@@ -1597,6 +1597,7 @@ export class DialogRpc {
             )
           }
         }
+        if (projected && await this._messageHidden(projected.source)) continue
         const tlId = projected?.parts[0]?.tlMessageId
         if (tlId !== undefined) return tlId
       }
