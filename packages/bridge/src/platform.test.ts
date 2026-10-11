@@ -23,6 +23,18 @@ describe('messageMentionsUser', () => {
     expect(messageMentionsUser(message, 'missing')).toBe(false)
   })
 
+  it('honors authoritative Matrix notification targets even without a text range', () => {
+    const message: IMMessage = {
+      id: 'matrix-mention', conversationId: '!room:example.org',
+      senderId: '@alice:example.org', timestamp: 1,
+      content: { parts: [{ type: 'text', text: 'Hello everyone' }] },
+      metadata: { matrixMentions: ['@me:example.org', '@bob:example.org'] },
+    }
+    expect(messageMentionsUser(message, '@me:example.org')).toBe(true)
+    expect(messageMentionsUser(message, '@bob:example.org')).toBe(true)
+    expect(messageMentionsUser(message, '@other:example.org')).toBe(false)
+  })
+
   it('does not infer mentions from plain text alone', () => {
     const message: IMMessage = {
       id: 'plain', conversationId: 'group', senderId: 'alice', timestamp: 1,

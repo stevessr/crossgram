@@ -10,6 +10,7 @@ import type {
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { MatrixClient, type MatrixClientOptions } from './client.js'
+import { matrixMentionUserIds, matrixTextEntities, textContent } from './formatting.js'
 import { countClosedMatrixPoll, type MatrixPollTally } from './poll-results.js'
 import type {
   MatrixDirectAccountData, MatrixEvent, MatrixJoinedRoom, MatrixMediaLocator, MatrixRoomMemberContent,
@@ -225,7 +226,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     for (let index = 0; index < content.parts.length; index++) {
       const part = content.parts[index]!
       if (part.type === 'text') {
-        const matrixContent = textContent(part.text, content.replyToId)
+        const matrixContent = textContent(part.text, content.replyToId, part.entities)
         sourceIds.push(await this.client.sendEvent(conversation.id, 'm.room.message', matrixContent))
         parts.push({ type: 'text', text: part.text, entities: part.entities })
       } else if (part.type === 'media') {
@@ -391,10 +392,12 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       throw new Error('Matrix edits currently support exactly one text part')
     }
     const body = content.parts[0].text
+    const entities = content.parts[0].entities
     const replacement: MatrixRoomMessageContent = {
-      msgtype: 'm.text',
-      body: `* ${body}`,
-      'm.new_content': { msgtype: 'm.text', body },
+      ...textContent(`* ${body}`, undefined, entities?.map((entity) => ({
+        ...entity, offset: entity.offset + 2,
+      }))),
+      'm.new_content': textContent(body, undefined, entities),
       'm.relates_to': { rel_type: 'm.replace', event_id: target.targetId },
     }
     await this.client.sendEvent(target.conversationId, 'm.room.message', replacement)
@@ -650,6 +653,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       : pollEnd ? [{ type: 'text' as const, text: matrixEventText(event.content) || '投票已结束' }]
         : matrixMessageParts(content)
     if (!parts.length) return
+    const mentionIds = matrixMentionUserIds(content)
     const messageId = relation?.rel_type === 'm.replace' && relation.event_id ? relation.event_id : event.event_id
     const pollKey = `${roomId}\0${messageId}`
     if (pollStart && parts[0]?.type === 'poll' && this.closedPolls.has(pollKey)) {
@@ -679,6 +683,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
             })) } }
           : {}),
       },
+      ...(mentionIds.length ? { metadata: { matrixMentions: mentionIds } } : {}),
     }
   }
 
@@ -759,7 +764,12 @@ function matrixMessageParts(content: MatrixRoomMessageContent): IMMessage<Matrix
     }]
   }
   if (content.msgtype === 'm.text' || content.msgtype === 'm.notice' || content.msgtype === 'm.emote') {
-    return body ? [{ type: 'text', text: content.msgtype === 'm.emote' ? `* ${body}` : body }] : []
+    if (!body) return []
+    const prefix = content.msgtype === 'm.emote' ? '* ' : ''
+    const entities = matrixTextEntities(content)?.map((entity) => ({
+      ...entity, offset: entity.offset + prefix.length,
+    }))
+    return [{ type: 'text', text: prefix + body, ...(entities ? { entities } : {}) }]
   }
   if (!['m.image', 'm.file', 'm.audio', 'm.video'].includes(content.msgtype ?? '')) return []
   const mxc = content.url
@@ -870,14 +880,6 @@ function matrixPollParts(value: unknown): IMMessage<MatrixMediaLocator>['content
         ? 'disclosed' : 'undisclosed',
     },
   }]
-}
-
-function textContent(body: string, replyToId?: string): MatrixRoomMessageContent {
-  return {
-    msgtype: 'm.text',
-    body,
-    ...(replyToId ? { 'm.relates_to': { 'm.in_reply_to': { event_id: replyToId } } } : {}),
-  }
 }
 
 function mediaContent(
