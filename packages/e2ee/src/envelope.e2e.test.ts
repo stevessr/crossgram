@@ -41,12 +41,12 @@ describe('E2EE untrusted-relay E2E boundaries', () => {
     const replay = new PersistentReplayStore()
     expect(new TextDecoder().decode(await openMessage(
       relay.read(0), 'conversation-123', bobPhone, publicDevice(alice), replay,
-    , { senderAccountId: 'alice', recipientAccountId: 'bob' }))).toBe(plaintext)
+      { senderAccountId: 'alice', recipientAccountId: 'bob' }))).toBe(plaintext)
     await expect(openMessage(relay.read(0), 'conversation-123', bobLaptop, publicDevice(alice), replay, { senderAccountId: 'alice', recipientAccountId: 'bob' }))
       .rejects.toThrow('E2EE_CONTEXT_MISMATCH')
     expect(new TextDecoder().decode(await openMessage(
       relay.read(1), 'conversation-123', bobLaptop, publicDevice(alice), replay,
-    , { senderAccountId: 'alice', recipientAccountId: 'bob' }))).toBe(plaintext)
+      { senderAccountId: 'alice', recipientAccountId: 'bob' }))).toBe(plaintext)
     await expect(openMessage(relay.read(0), 'conversation-123', bobPhone, publicDevice(alice), replay, { senderAccountId: 'alice', recipientAccountId: 'bob' }))
       .rejects.toThrow('E2EE_REPLAY_DETECTED')
   })
