@@ -799,7 +799,7 @@ export class DialogRpc {
       if (req.maxDate > 0 && item.source.timestamp >= req.maxDate) return false
       if (req.maxId > 0 && item.tlId >= req.maxId) return false
       if (req.minId > 0 && item.tlId <= req.minId) return false
-      if (query && !messageText(item.source).toLocaleLowerCase().includes(query)) return false
+      if (query && !searchableMessageText(item.source).toLocaleLowerCase().includes(query)) return false
       return matchesMessageFilter(item, req.filter)
     })
     const start = Math.max(0, req.addOffset)
@@ -852,7 +852,7 @@ export class DialogRpc {
       && (!req.maxDate || item.source.timestamp < req.maxDate)
       && (!req.maxId || item.tlId < req.maxId)
       && (!req.minId || item.tlId > req.minId)
-      && (!q || messageText(item.source).toLocaleLowerCase().includes(q)),
+      && (!q || searchableMessageText(item.source).toLocaleLowerCase().includes(q)),
     )
     const start = Math.max(0, req.addOffset)
     const page = filtered.slice(start, start + clampLimit(req.limit))
@@ -1038,7 +1038,7 @@ export class DialogRpc {
         if (req.maxDate > 0 && item.source.timestamp >= req.maxDate) return false
         if (req.maxId > 0 && item.tlId >= req.maxId) return false
         if (req.minId > 0 && item.tlId <= req.minId) return false
-        if (normalizedQuery && !messageText(item.source).toLocaleLowerCase().includes(normalizedQuery)) return false
+        if (normalizedQuery && !searchableMessageText(item.source).toLocaleLowerCase().includes(normalizedQuery)) return false
         return matchesMessageFilter(item, req.filter)
       }))
       upstreamCursor = upstream.nextCursor
@@ -6352,8 +6352,17 @@ function matchesMessageFilter(item: MaterializedMessage, filter: tl.TypeMessages
   return false
 }
 
+/** Search media filenames without changing Telegram's visible text/caption projection. */
+export function searchableMessageText(message: IMMessage): string {
+  const attachmentNames = message.content.parts.flatMap((part) =>
+    part.type === 'media' && part.media.name ? [part.media.name] : [])
+  return [messageText(message), ...attachmentNames].filter(Boolean).join('\n')
+}
+
 function searchMediaKind(filter: tl.TypeMessagesFilter): 'image' | 'file' | undefined {
-  if (filter._ === 'inputMessagesFilterPhotos' || filter._ === 'inputMessagesFilterGif') return 'image'
+  if (filter._ === 'inputMessagesFilterPhotos') return 'image'
+  // GIFs can be uploaded as either image or file media (e.g. Matrix m.file).
+  // Let matchesMessageFilter inspect MIME types instead of excluding file GIFs.
   if (
     filter._ === 'inputMessagesFilterVideo'
     || filter._ === 'inputMessagesFilterDocument'
