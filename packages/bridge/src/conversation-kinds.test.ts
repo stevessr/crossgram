@@ -294,7 +294,7 @@ describe('conversation kinds', () => {
     const updated = await rpc.updatePinnedMessage({ peer, id: pinnedId, unpin: true })
     expect(updated).toMatchObject({
       _: 'updates', updates: [expect.objectContaining({
-        _: 'updatePinnedMessages', messages: [pinnedId],
+        _: 'updatePinnedChannelMessages', channelId, messages: [pinnedId],
       })],
     })
     expect(() => wireRoundTrip(updated)).not.toThrow()
