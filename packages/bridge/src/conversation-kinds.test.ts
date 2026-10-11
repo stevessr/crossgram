@@ -245,6 +245,67 @@ function roundTrip<T>(object: T): T {
 }
 
 describe('conversation kinds', () => {
+  it('bridges native room pins into Telegram pinned search, channel banner, and unpin updates', async () => {
+    const room = conversations.find((conversation) => conversation.id === 'group')!
+    const pinned = ['message-group']
+    const pinChanges: Array<{ id: string, pinned: boolean }> = []
+    const pinPlatform: IMPlatform = {
+      ...platform,
+      capabilities: {
+        ...platform.capabilities,
+        messageActions: {
+          ...platform.capabilities.messageActions,
+          pin: { read: true, write: true },
+        },
+      },
+      async getPinnedMessageIds() { return [...pinned] },
+      async getMessage(_session, target, id) {
+        return target.id === room.id && id === 'message-group' ? source(room) : null
+      },
+      async setMessagePinned(_session, target, id, value) {
+        if (target.id !== room.id) throw new Error('wrong room')
+        pinChanges.push({ id, pinned: value })
+        if (value && !pinned.includes(id)) pinned.push(id)
+        if (!value) pinned.splice(0, pinned.length, ...pinned.filter((item) => item !== id))
+      },
+    }
+    const { rpc } = await createRpc(pinPlatform)
+    await rpc.getDialogs(dialogsRequest())
+    const channelId = peerTlId(room.id)
+    const peer = { _: 'inputPeerChannel' as const, channelId, accessHash: Long.ONE }
+    const search = () => rpc.search({
+      _: 'messages.search', peer, q: '', filter: { _: 'inputMessagesFilterPinned' },
+      minDate: 0, maxDate: 0, offsetId: 0, addOffset: 0, limit: 20,
+      maxId: 0, minId: 0, hash: Long.ZERO,
+    })
+    const found = await search() as tl.messages.RawMessagesSlice
+    expect(found.count).toBe(1)
+    expect(found.messages).toMatchObject([{ _: 'message', message: room.title }])
+    const pinnedId = found.messages[0]!.id
+    expect(() => wireRoundTrip(found)).not.toThrow()
+
+    const full = await rpc.getFullChannel({
+      _: 'channels.getFullChannel',
+      channel: { _: 'inputChannel', channelId, accessHash: Long.ONE },
+    })
+    expect(full.fullChat).toMatchObject({ _: 'channelFull', pinnedMsgId: pinnedId })
+    expect(() => wireRoundTrip(full)).not.toThrow()
+
+    const updated = await rpc.updatePinnedMessage({ peer, id: pinnedId, unpin: true })
+    expect(updated).toMatchObject({
+      _: 'updates', updates: [expect.objectContaining({
+        _: 'updatePinnedMessages', messages: [pinnedId],
+      })],
+    })
+    expect(() => wireRoundTrip(updated)).not.toThrow()
+    expect(pinChanges).toEqual([{ id: 'message-group', pinned: false }])
+    expect((await search() as tl.messages.RawMessagesSlice).count).toBe(0)
+    expect((await rpc.getFullChannel({
+      _: 'channels.getFullChannel',
+      channel: { _: 'inputChannel', channelId, accessHash: Long.ONE },
+    })).fullChat).not.toHaveProperty('pinnedMsgId', pinnedId)
+  })
+
   it('acknowledges an empty channel deletion without refreshing dialogs or calling the platform', async () => {
     const getDialogs = vi.spyOn(platform, 'getDialogs')
     try {
