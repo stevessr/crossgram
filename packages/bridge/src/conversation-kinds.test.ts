@@ -375,7 +375,8 @@ describe('conversation kinds', () => {
     const history = await rpc.getHistory(historyRequest({
       _: 'inputPeerChannel', channelId: peerTlId(room.id), accessHash: Long.ONE,
     }))
-    const id = history.messages.find((message) => message._ === 'message')?.id
+    const id = ('messages' in history ? history.messages : [])
+      .find((message) => message._ === 'message')?.id
     expect(id).toBeDefined()
     const peer = { _: 'inputPeerChannel' as const, channelId: peerTlId(room.id), accessHash: Long.ONE }
     const response = await rpc.updatePinnedMessageWithDelivery({ peer, id: id! })
