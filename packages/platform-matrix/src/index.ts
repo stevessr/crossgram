@@ -254,7 +254,10 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       // Never delete a distinct newer invitation when this action completes.
       if (this.pendingInvites.get(roomId)?.id === id) this.pendingInvites.delete(roomId)
       this.locallyResolvedInvites.set(roomId, resolved)
-      this.requestPageSnapshot = undefined
+      // Keep the current paginated view stable even when an inline callback
+      // resolves one of its entries between two request-list pages.
+      this.requestPageSnapshot = this.requestPageSnapshot?.map((request) =>
+        request.id === id ? resolved : request)
       return resolved
     } finally {
       this.resolvingInvites.delete(roomId)
