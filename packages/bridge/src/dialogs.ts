@@ -5667,7 +5667,8 @@ export class DialogRpc {
     // Matrix room push rules are per-user. Sync only unmute and indefinite mute:
     // Matrix has no expiry field for a room push rule, so finite Telegram mutes
     // remain local instead of accidentally becoming permanent upstream.
-    if (target.type === 'peer' && this._platform.setConversationNotificationSettings
+    if (target.type === 'peer' && this._conversations.has(target.peerId)
+      && this._platform.setConversationNotificationSettings
       && (req.settings.muteUntil === 0 || req.settings.muteUntil === MUTE_FOREVER)) {
       await this._platform.setConversationNotificationSettings(this._session, { id: target.peerId }, {
         muted: req.settings.muteUntil !== 0,
@@ -5830,7 +5831,8 @@ export class DialogRpc {
       ? qqGroupMsgMaskPolicy(this._conversations.get(target.peerId))
       : undefined
     let merged = policy ? { ...persisted, muteUntil: policy.muteUntil } : persisted
-    if (target.type === 'peer' && this._platform.getConversationNotificationSettings
+    if (target.type === 'peer' && this._conversations.has(target.peerId)
+      && this._platform.getConversationNotificationSettings
       && (persisted.muteUntil === undefined || persisted.muteUntil === 0
         || persisted.muteUntil === MUTE_FOREVER)) {
       try {
