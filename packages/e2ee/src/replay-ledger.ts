@@ -1,20 +1,37 @@
 /**
- * Durable, fail-closed replay ledger for POSIX desktop/dev experiments.
+ * Atomic replay markers for POSIX desktop experiments only.
  *
- * Uses O_EXCL for atomic consumption even across different client processes.
- * Each accepted envelope occupies an empty file; do NOT use for high-volume
- * production messaging. Prefer a transaction-backed durable KV store in the
- * real client. Never mount this directory in the CrossGram relay server.
- *
- * Portability: POSIX directory fsync is needed for crash durability. On
- * unsupported filesystems or Windows this class throws instead of claiming
- * durable delivery.
+ * This is not a scalable production backend: each envelope consumes a file,
+ * markers are never pruned, and the caller must provide a PRIVATE, already
+ * existing, durable root directory owned by the end-user. Never store this on
+ * the CrossGram relay. For production use a local transaction-backed ledger.
  */
 import { constants } from 'node:fs'
-import { mkdir, open } from 'node:fs/promises'
+import { lstat, mkdir, open } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ReplayGuard } from './envelope.js'
 
+async function syncDirectory(directory: string): Promise<void> {
+  const handle = await open(directory, constants.O_RDONLY | constants.O_DIRECTORY)
+  try {
+    await handle.sync()
+  } finally {
+    await handle.close()
+  }
+}
+
+async function privateDirectory(path: string): Promise<void> {
+  const info = await lstat(path)
+  if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077)) {
+    throw new Error('E2EE_REPLAY_DIRECTORY_UNSAFE')
+  }
+}
+
+/**
+ * Marker writes are O_EXCL-atomic across processes. Directory sync is required
+ * to avoid accepting a successfully decrypted message whose marker disappears
+ * after a crash. Fail closed on unsupported OS / filesystem.
+ */
 export class PosixFileReplayGuard implements ReplayGuard {
   constructor(private readonly root: string) {
     if (typeof root !== 'string' || !root.trim()) throw new Error('E2EE_INVALID_REPLAY_PATH')
@@ -23,8 +40,17 @@ export class PosixFileReplayGuard implements ReplayGuard {
   async acceptOnce(messageId: string): Promise<boolean> {
     if (!/^[0-9a-f]{64}$/.test(messageId)) throw new Error('E2EE_INVALID_REPLAY_ID')
     if (process.platform === 'win32') throw new Error('E2EE_REPLAY_BACKEND_UNSUPPORTED')
+    await privateDirectory(this.root)
     const directory = join(this.root, messageId.slice(0, 2))
-    await mkdir(directory, { recursive: true, mode: 0o700 })
+    let newDirectory = false
+    try {
+      await mkdir(directory, { mode: 0o700 })
+      newDirectory = true
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+    }
+    await privateDirectory(directory)
+    if (newDirectory) await syncDirectory(this.root)
     const filename = join(directory, messageId.slice(2))
     let handle
     try {
@@ -33,19 +59,14 @@ export class PosixFileReplayGuard implements ReplayGuard {
       if ((error as NodeJS.ErrnoException).code === 'EEXIST') return false
       throw error
     }
-    // Never erase an already-created replay marker on sync failure: doing so
-    // would allow a retry to decrypt the same ciphertext a second time.
+    // Never erase a created replay marker on sync failures. Retry must fail
+    // closed rather than inadvertently accepting a duplicate ciphertext.
     try {
       await handle.sync()
     } finally {
       await handle.close()
     }
-    const parent = await open(directory, constants.O_RDONLY)
-    try {
-      await parent.sync()
-    } finally {
-      await parent.close()
-    }
+    await syncDirectory(directory)
     return true
   }
 }
