@@ -9,7 +9,7 @@ import type {
   IMTransferOptions, IMUser, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
-import { MatrixClient, type MatrixClientOptions } from './client.js'
+import { MatrixClient, MatrixHttpError, type MatrixClientOptions } from './client.js'
 import { matrixMentionUserIds, matrixTextEntities, textContent } from './formatting.js'
 import type {
   MatrixDirectAccountData, MatrixEvent, MatrixJoinedRoom, MatrixMediaLocator, MatrixRoomMemberContent,
@@ -199,8 +199,11 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     conversation: IMConversationRef,
     messageId: string,
   ): Promise<IMMessage<MatrixMediaLocator> | null> {
-    const event = await this.client.getEvent(conversation.id, messageId)
-    return this.mapTimelineMessage(conversation.id, event) ?? null
+    const event = await this.client.getEvent(conversation.id, messageId).catch((error: unknown) => {
+      if (error instanceof MatrixHttpError && error.status === 404) return null
+      throw error
+    })
+    return event ? this.mapTimelineMessage(conversation.id, event) ?? null : null
   }
 
   async sendMessage(
