@@ -2075,6 +2075,15 @@ describe('conversation kinds', () => {
           })),
         }
       },
+      async getSubdialogs(localSession, parent, query) {
+        const page = await platform.getSubdialogs!(localSession, parent, query)
+        return {
+          ...page,
+          // No preview message has ever existed in this empty child room.
+          dialogs: page.dialogs.map((dialog) => dialog.conversation.id === 'subchannel'
+            ? { ...dialog, lastMessage: undefined } : dialog),
+        }
+      },
       async getHistory(localSession, target, query) {
         if (target.id === 'subchannel') return { messages: [] }
         return platform.getHistory!(localSession, target, query)
