@@ -569,7 +569,8 @@ describe('MatrixPlatform', () => {
       deliveries++
       if (deliveries === 1) throw new Error('temporary delivery failure')
     })
-    await vi.waitFor(() => expect(deliveries).toBe(2))
+    // Production deliberately backs off for 1s after an unsuccessful sync.
+    await vi.waitFor(() => expect(deliveries).toBe(2), { timeout: 4_000 })
     await unsubscribe()
     expect(tokens.slice(0, 3)).toEqual([null, 's0', 's0'])
   })
