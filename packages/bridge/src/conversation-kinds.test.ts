@@ -2133,6 +2133,50 @@ describe('conversation kinds', () => {
     }
   })
 
+  it('searches later lazy Space subdialog pages instead of only the first page', async () => {
+    const parent = conversations.find((item) => item.id === 'parent-channel')!
+    const first = conversations.find((item) => item.id === 'subchannel')!
+    const later: IMConversation = {
+      id: 'space-later', kind: 'channel', title: 'Later Match',
+      parentId: parent.id, spaceId: 'guild',
+    }
+    const pages: Array<string | undefined> = []
+    const selectedPlatform: IMPlatform = {
+      ...platform,
+      async getDialogs() {
+        return { dialogs: [{ conversation: parent, unreadCount: 0, lastMessage: source(parent) }] }
+      },
+      async getSubdialogs(_session, requestedParent, query) {
+        if (requestedParent.id !== parent.id) return { dialogs: [], total: 0 }
+        pages.push(query?.afterId)
+        const index = query?.afterId === first.id ? 1 : 0
+        const selected = [first, later][index]!
+        return {
+          dialogs: [{ conversation: selected, unreadCount: 0, lastMessage: source(selected) }],
+          total: 2,
+          nextCursor: index === 0 ? '1' : undefined,
+        }
+      },
+      async getHistory(localSession, target, query) {
+        if (target.id === later.id) return { messages: [source(later)] }
+        return platform.getHistory!(localSession, target, query)
+      },
+    }
+    const { rpc } = await createRpc(selectedPlatform)
+    const dialogs = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
+    const parentChat = dialogs.chats.find((chat) => chat._ === 'channel' && chat.title === parent.title)
+    if (!parentChat || parentChat._ !== 'channel') throw new Error('Space parent missing')
+    const peer = { _: 'inputPeerChannel' as const, channelId: parentChat.id, accessHash: Long.ZERO }
+    const topics = await rpc.getForumTopics({
+      _: 'messages.getForumTopics', peer, q: 'Later', offsetDate: 0, offsetId: 0, offsetTopic: 0, limit: 100,
+    })
+    expect(topics).toMatchObject({
+      _: 'messages.forumTopics', count: 1, topics: [{ _: 'forumTopic', title: 'Later Match' }],
+    })
+    expect(pages).toEqual([undefined, first.id])
+    expect(() => roundTrip(topics)).not.toThrow()
+  })
+
   it('grants modern Telegram clients writable defaults for ordinary group members', async () => {
     const memberGroup: IMConversation = {
       id: 'member-group', kind: 'group', title: 'Member Group', selfRole: 'member',
