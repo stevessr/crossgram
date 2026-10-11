@@ -990,10 +990,19 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getChannelMessages(req as tl.channels.RawGetMessagesRequest))
   rpc.register('messages.search', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.search(req as tl.messages.RawSearchRequest))
-  rpc.register('messages.updatePinnedMessage', async (rpc, req) =>
-    (await requireBridgeSession(rpc)).dialogs.updatePinnedMessage(
-      req as tl.messages.RawUpdatePinnedMessageRequest,
-    ))
+  rpc.register('messages.updatePinnedMessage', async (rpc, req) => {
+    const state = await requireBridgeSession(rpc)
+    const changed = await state.dialogs.updatePinnedMessage(req as tl.messages.RawUpdatePinnedMessageRequest)
+    // The initiating client receives the response; broadcast to its other
+    // Telegram sessions so they can refresh the pinned banner immediately.
+    if (changed._ === 'updates') {
+      await updates.publishAccountUpdates(
+        state.session, changed.updates,
+        rpc.authKeyId ? authKeyHex(rpc.authKeyId) : undefined,
+      )
+    }
+    return changed
+  })
   rpc.register('messages.getSearchCounters', async (rpc, req) => bareVector(
     await (await requireBridgeSession(rpc)).dialogs.getSearchCounters(
       req as tl.messages.RawGetSearchCountersRequest,
