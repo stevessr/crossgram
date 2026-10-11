@@ -1003,6 +1003,15 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     }
     return changed
   })
+  rpc.register('messages.unpinAllMessages', async (rpc, req) => {
+    const state = await requireBridgeSession(rpc)
+    const { affected, updates: pinnedUpdates } = await state.dialogs.unpinAllMessages(
+      req as tl.messages.RawUnpinAllMessagesRequest,
+    )
+    // AffectedHistory has no embedded updates, so notify all authorized clients.
+    if (pinnedUpdates.length) await updates.publishAccountUpdates(state.session, pinnedUpdates)
+    return affected
+  })
   rpc.register('messages.getSearchCounters', async (rpc, req) => bareVector(
     await (await requireBridgeSession(rpc)).dialogs.getSearchCounters(
       req as tl.messages.RawGetSearchCountersRequest,
