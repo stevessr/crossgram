@@ -60,7 +60,13 @@ messages cannot be searched by a server that does not have their plaintext.
 
 - End-to-end encryption is not implemented. Encrypted events and attachments are
   shown as explicit placeholders instead of exposing ciphertext or silently
-  dropping messages. Use an unencrypted room for full functionality.
+  dropping messages. **Encrypted rooms are read-only for message contents**:
+  CrossGram rejects plaintext text, media/sticker uploads, edits, reactions,
+  and poll votes. Every attempted write verifies current room state; failed
+  state lookups also block sending instead of treating the room as plaintext.
+  Redactions and read markers are still supported. This safety guard is **not**
+  a substitute for Matrix Megolm encryption or device/key verification. Use
+  an unencrypted room for full functionality.
 - Reactions use `m.annotation` events: the adapter can read counts/actors, set
   up to 20 emoji reactions, and emits reaction updates when annotations are
   added or redacted. Homeserver relation pagination is followed before results
