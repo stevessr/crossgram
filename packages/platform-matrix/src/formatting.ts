@@ -140,7 +140,9 @@ function decodeHtml(text: string): string {
       return codePoint > 0 && codePoint <= 0x10ffff
         ? String.fromCodePoint(codePoint) : encoded
     }
-    return ({ amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00a0' }
-      as Record<string, string>)[entity.toLowerCase()] ?? encoded
+    const named: Record<string, string> = {
+      amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\\u00a0',
+    }
+    return named[entity.toLowerCase()] ?? encoded
   })
 }
