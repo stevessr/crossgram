@@ -148,6 +148,43 @@ describe('MatrixClient', () => {
       .toHaveLength(1)
   })
 
+  it('preserves custom push rule tweaks when toggling room mute', async () => {
+    let rule: { actions: Array<string | { set_tweak: string, value: boolean }>, enabled?: boolean } = {
+      actions: ['dont_notify', { set_tweak: 'highlight', value: false }],
+      enabled: true,
+    }
+    const requests: Array<{ method: string, body?: unknown }> = []
+    const client = new MatrixClient({
+      homeserver: 'https://matrix.example.org', accessToken: 'token',
+      fetch: async (_input, init) => {
+        const method = init?.method ?? 'GET'
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined
+        requests.push({ method, body })
+        if (method === 'GET') return Response.json(rule)
+        if (method === 'PUT') {
+          if (body.actions) rule.actions = body.actions
+          if (body.enabled !== undefined) rule.enabled = body.enabled
+          return Response.json({})
+        }
+        return Response.json({})
+      },
+    })
+    const id = '!custom:example.org'
+    await client.setRoomNotificationMuted(id, false)
+    expect(rule.actions).toEqual([
+      'notify', { set_tweak: 'highlight', value: false },
+    ])
+    await client.setRoomNotificationMuted(id, true)
+    expect(rule.actions).toEqual([
+      'dont_notify', { set_tweak: 'highlight', value: false },
+    ])
+    rule.enabled = false
+    await client.setRoomNotificationMuted(id, true)
+    expect(requests.filter((entry) => (entry.body as { enabled?: boolean })?.enabled === true))
+      .toHaveLength(1)
+    expect(rule.enabled).toBe(true)
+  })
+
   it('treats missing pinned state as empty but preserves non-404 errors', async () => {
     const client = new MatrixClient({
       homeserver: 'https://matrix.example.org', accessToken: 'token',
