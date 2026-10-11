@@ -150,7 +150,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       this.pendingInvites.set(roomId, request)
     }
     for (const [roomId, room] of Object.entries(initial.rooms?.join ?? {})) {
-      this.ingestState(roomId, room.state?.events ?? [])
+      this.ingestJoinedRoomState(roomId, room)
       this.updateConversation(roomId, room)
       for (const event of room.timeline?.events ?? []) {
         const relation = event.type === 'm.reaction' ? relationFromValue(event.content['m.relates_to']) : undefined
@@ -190,7 +190,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     this.ingestAccountData(response)
     const dialogs: IMDialog<MatrixMediaLocator>[] = []
     for (const [roomId, room] of Object.entries(response.rooms?.join ?? {})) {
-      this.ingestState(roomId, room.state?.events ?? [])
+      this.ingestJoinedRoomState(roomId, room)
       this.ingestPollClosures(roomId, room.timeline?.events ?? [])
       const conversation = this.updateConversation(roomId, room)
       const lastMessage = [...(room.timeline?.events ?? [])].reverse()
@@ -335,7 +335,10 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       dir: query.after ? 'f' : 'b',
       limit: clampLimit(query.limit),
     })
-    this.ingestState(conversation.id, response.state ?? [])
+    this.ingestState(conversation.id, [
+      ...(response.state ?? []),
+      ...(response.chunk ?? []).filter((event) => event.state_key !== undefined),
+    ])
     this.ingestPollClosures(conversation.id, response.chunk)
     // Only a few closed polls per page are expanded; never fetch relations
     // for every message in a long history request.
@@ -408,7 +411,10 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
             ...(query.fromUserId ? { senders: [query.fromUserId] } : {}),
           },
         })
-        this.ingestState(conversation.id, response.state ?? [])
+        this.ingestState(conversation.id, [
+      ...(response.state ?? []),
+      ...(response.chunk ?? []).filter((event) => event.state_key !== undefined),
+    ])
         events = response.chunk
         nextCursor = response.end
       }
@@ -892,12 +898,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         this.pendingInvites.delete(roomId)
         this.locallyResolvedInvites.delete(roomId)
       }
-      const stateEvents = [
-        ...(room.state?.events ?? []),
-        ...(room.timeline?.events ?? []).filter((event) => event.state_key !== undefined),
-      ]
-      const stateChanged = stateEvents.length > 0
-      this.ingestState(roomId, stateEvents)
+      const stateChanged = this.ingestJoinedRoomState(roomId, room)
       const conversation = this.updateConversation(roomId, room)
       if (stateChanged) await handler({ type: 'conversation', conversation })
       for (const event of room.timeline?.events ?? []) {
@@ -1027,6 +1028,16 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       const parent = matrixReference(event.content)
       if (parent) this.rememberPollClosure(`${roomId}\0${parent}`)
     }
+  }
+
+  /** Initial snapshots can include an encryption upgrade in the timeline. */
+  private ingestJoinedRoomState(roomId: string, room: MatrixJoinedRoom): boolean {
+    const events = [
+      ...(room.state?.events ?? []),
+      ...(room.timeline?.events ?? []).filter((event) => event.state_key !== undefined),
+    ]
+    this.ingestState(roomId, events)
+    return events.length > 0
   }
 
   private ingestState(roomId: string, events: MatrixEvent[]): void {
