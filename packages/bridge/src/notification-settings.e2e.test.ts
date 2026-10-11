@@ -517,6 +517,74 @@ describe('notification settings RPC e2e', () => {
     maskFailure = undefined
   })
 
+  it('reads and reverse-syncs Matrix per-room notification state without changing QQ masks', async () => {
+    const ctx = new Context()
+    const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
+    await Promise.all(fibers)
+    await new Promise(resolve => setTimeout(resolve, 25))
+    defineModels(ctx)
+    await ctx.database.prepared()
+    disposals.push(async () => {
+      for (const fiber of fibers.reverse()) await Promise.resolve((fiber as any).dispose?.())
+    })
+
+    let muted = true
+    let rejectWrite = false
+    const nativeUpdates: boolean[] = []
+    const matrixRoom: IMConversation = { id: '!room:example.org', kind: 'group', title: 'Matrix room' }
+    const targetPlatform: IMPlatform = {
+      ...platform,
+      async getDialogs() { return { dialogs: [{ conversation: matrixRoom, unreadCount: 0 }] } },
+      async getConversationNotificationSettings() { return { muted } },
+      async setConversationNotificationSettings(_session, _conversation, value) {
+        if (rejectWrite) throw new Error('Matrix homeserver unavailable')
+        muted = value.muted
+        nativeUpdates.push(muted)
+      },
+    }
+    const settings = new NotificationSettingsStore(ctx.database, true)
+    const dialogs = createDialog(settings, targetPlatform)
+    await dialogs.getDialogs({
+      _: 'messages.getDialogs', offsetDate: 0, offsetId: 0,
+      offsetPeer: { _: 'inputPeerEmpty' }, limit: 100, hash: Long.ZERO,
+    })
+    const peer = {
+      _: 'inputNotifyPeer' as const,
+      peer: {
+        _: 'inputPeerChannel' as const,
+        channelId: stableId('peer:!room:example.org'), accessHash: Long.ONE,
+      },
+    }
+    const harness = rpcHarnessFor(dialogs)
+    await expect(roundTripRpc(harness, { _: 'account.getNotifySettings', peer }))
+      .resolves.toMatchObject({ muteUntil: MUTE_FOREVER })
+    await expect(roundTripRpc(harness, {
+      _: 'account.updateNotifySettings', peer,
+      settings: { _: 'inputPeerNotifySettings', muteUntil: 0 },
+    })).resolves.toEqual({ _: 'boolTrue' })
+    expect(nativeUpdates).toEqual([false])
+    await expect(roundTripRpc(harness, { _: 'account.getNotifySettings', peer }))
+      .resolves.toMatchObject({ muteUntil: 0 })
+
+    // A finite-duration mute is Telegram-local: Matrix push rules cannot expire.
+    await expect(roundTripRpc(harness, {
+      _: 'account.updateNotifySettings', peer,
+      settings: { _: 'inputPeerNotifySettings', muteUntil: 2000000000 },
+    })).resolves.toEqual({ _: 'boolTrue' })
+    expect(nativeUpdates).toEqual([false])
+    await expect(roundTripRpc(harness, { _: 'account.getNotifySettings', peer }))
+      .resolves.toMatchObject({ muteUntil: 2000000000 })
+
+    rejectWrite = true
+    await expect(dialogs.updateNotifySettings({
+      _: 'account.updateNotifySettings', peer,
+      settings: { _: 'inputPeerNotifySettings', muteUntil: MUTE_FOREVER },
+    })).rejects.toThrow('Matrix homeserver unavailable')
+    // Failed native writes do not commit a conflicting local forever-mute.
+    await expect(roundTripRpc(harness, { _: 'account.getNotifySettings', peer }))
+      .resolves.toMatchObject({ muteUntil: 2000000000 })
+  })
+
   it('keeps peers muteable when they never materialized a conversation', async () => {
     const ctx = new Context()
     const fibers = [ctx.plugin(Database), ctx.plugin(SQLiteDriver, { path: ':memory:' })]
