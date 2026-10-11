@@ -22,7 +22,8 @@ async function syncDirectory(directory: string): Promise<void> {
 
 async function privateDirectory(path: string): Promise<void> {
   const info = await lstat(path)
-  if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077)) {
+  if (!info.isDirectory() || info.isSymbolicLink() || (info.mode & 0o077)
+      || (typeof process.getuid === 'function' && info.uid !== process.getuid())) {
     throw new Error('E2EE_REPLAY_DIRECTORY_UNSAFE')
   }
 }
