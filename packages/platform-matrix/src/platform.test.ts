@@ -292,6 +292,29 @@ describe('MatrixPlatform', () => {
     ]))
   })
 
+  it('recognizes a fresh re-invitation when Matrix supplies a new event ID', async () => {
+    let revision = '$first-invite'
+    const fetch = routeFetch((url) => {
+      if (url.pathname.endsWith('/sync')) return json({
+        next_batch: 's1', rooms: { invite: { '!room:example.org': { invite_state: { events: [
+          event('m.room.member', { membership: 'invite' }, {
+            id: revision, stateKey: '@me:example.org', sender: '@alice:example.org',
+          }),
+        ] } } } },
+      })
+      if (url.pathname.endsWith('/leave')) return json({})
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+    const [oldInvite] = (await platform.getRequests(session)).requests
+    await expect(platform.resolveRequest(session, oldInvite!.id, 'reject'))
+      .resolves.toMatchObject({ state: 'rejected' })
+    revision = '$second-invite'
+    const [newInvite] = (await platform.getRequests(session)).requests
+    expect(newInvite).toMatchObject({ state: 'pending', group: { id: '!room:example.org' } })
+    expect(newInvite?.id).not.toBe(oldInvite?.id)
+  })
+
   it('serializes conflicting decisions and ignores stale invited-room snapshots', async () => {
     const join = Promise.withResolvers<Response>()
     const actions: string[] = []
