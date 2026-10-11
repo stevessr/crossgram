@@ -78,7 +78,7 @@ it('isolates downstream keys, pushes only to the matching key and restores stick
   expect(clients).toHaveLength(3)
   const key = createHash('sha256').update(rpc().authKeyId!).digest('hex')
   expect((await store.load(key))?.phone).toBe('15551234567')
-  expect((await stat(join(store.directory, `${key}.json`))).mode & 0o777).toBe(0o600)
+  if (process.platform !== 'win32') expect((await stat(join(store.directory, `${key}.json`))).mode & 0o777).toBe(0o600)
 })
 it('rejects non-allowlisted numbers, cross-account switching, migration/QR and repeated code requests', async () => {
   const { gateway, dependencies } = await setup()
@@ -105,8 +105,10 @@ it('coalesces concurrent selection for one key and refuses unsafe storage', asyn
   const { gateway, dependencies, store } = await setup()
   await Promise.allSettled([gateway.route(rpc(), send()), gateway.route(rpc(), send())])
   expect(dependencies.createUpstream).toHaveBeenCalledOnce()
-  await chmod(store.directory, 0o755)
-  await expect(store.init()).rejects.toThrow('0700')
+  if (process.platform !== 'win32') {
+    await chmod(store.directory, 0o755)
+    await expect(store.init()).rejects.toThrow('0700')
+  }
 })
 
 it('issues opaque single-use DC tickets, imports real authorization and rejects replay/wrong DC', async () => {

@@ -188,6 +188,14 @@ export class MessageStore {
     return row ? requestFromRow(row) : undefined
   }
 
+  /** Read pending requests so a platform's authoritative snapshot can reconcile missed terminal events. */
+  async listPendingRequests(platformSessionId: string): Promise<IMRequest[]> {
+    const rows = await this._database.get('mtproto_im_request', {
+      platformSessionId, state: 'pending',
+    })
+    return rows.map(requestFromRow)
+  }
+
   async upsertUsers(session: PlatformSession, users: readonly IMUser[]): Promise<IMUserRow[]> {
     if (!users.length) return []
     return this._write(() => this._database.withTransaction(async (database) => {

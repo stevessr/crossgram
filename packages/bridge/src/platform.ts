@@ -383,6 +383,7 @@ export type IMMessagePart<TMediaLocator = unknown> =
   | { type: 'media', media: IMMedia<TMediaLocator> }
   | { type: 'sticker', sticker: import('./sticker-provider.js').IMSticker }
   | { type: 'card', card: IMMessageCard }
+  | { type: 'poll', poll: IMMessagePoll }
   | { type: 'message-bundle', bundle: IMMessageBundle }
 
 /** Platform share metadata projected as Telegram's native WebPage preview. */
@@ -393,6 +394,22 @@ export interface IMMessageCard {
   source?: string
   url?: string
   thumbnailUrl?: string
+  /** WGS84 coordinates when a location can be projected as native Telegram geo media. */
+  latitude?: number
+  longitude?: number
+}
+
+/** Read-only poll metadata; adapters can retain choices without pretending voting is supported. */
+export interface IMMessagePoll {
+  question: string
+  answers: Array<{ id: string, text: string }>
+  kind: 'disclosed' | 'undisclosed'
+  maxSelections: number
+  /** True once a verified closing event has been observed. */
+  closed?: boolean
+  /** Only set after exhausting Matrix reference relations; never use m.poll.results hints as authoritative. */
+  counts?: Record<string, number>
+  totalVoters?: number
 }
 
 export type IMMessageInputPart =
@@ -1086,7 +1103,21 @@ export function messageText(message: IMProjectableMessage<unknown>): string {
 
 export function messagePartText(part: IMMessagePart<unknown>): string {
   if (part.type === 'text') return part.text
+  if (part.type === 'poll') {
+    const poll = part.poll
+    return [
+      `🗳️ ${poll.question}`,
+      ...poll.answers.map((answer, index) => {
+        const votes = poll.closed ? poll.counts?.[answer.id] : undefined
+        return `${index + 1}. ${answer.text}${votes === undefined ? '' : ` — ${votes} 票`}`
+      }),
+      ...(poll.maxSelections > 1 ? [`最多选择 ${poll.maxSelections} 项`] : []),
+      ...(poll.closed ? [poll.totalVoters === undefined
+        ? '投票已结束' : `投票已结束 · ${poll.totalVoters} 人有效投票`] : []),
+    ].join('\n').slice(0, 4_000)
+  }
   if (part.type !== 'card') return ''
+  if (part.card.kind === 'location') return part.card.title.trim() || '位置'
   const label = cardKindLabel(part.card.kind)
   const source = part.card.source?.trim()
   return source ? `${label} · ${source}` : label

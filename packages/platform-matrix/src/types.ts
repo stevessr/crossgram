@@ -21,27 +21,48 @@ export interface MatrixEvent<T = Record<string, unknown>> {
     age?: number
     redacted_because?: MatrixEvent
     'm.relations'?: {
-      'm.annotation'?: { chunk?: MatrixAnnotation[] }
+      'm.annotation'?: MatrixAnnotation[]
     }
   }
 }
 
 export interface MatrixAnnotation {
-  type: 'm.reaction'
   key: string
-  count: number
-  senders?: string[]
+  count?: number
 }
 
+export interface MatrixRelationsResponse {
+  chunk: MatrixEvent[]
+  next_batch?: string
+  prev_batch?: string
+}
+
+
+export type MatrixFormattedEntity =
+  | { type: 'bold' | 'italic' | 'underline' | 'strikethrough' | 'code' | 'pre' | 'blockquote', offset: number, length: number, language?: string }
+  | { type: 'text-link', offset: number, length: number, url: string }
+
+export interface MatrixFormattedText {
+  text: string
+  entities: MatrixFormattedEntity[]
+}
 export interface MatrixRoomMemberContent {
   membership?: 'invite' | 'join' | 'knock' | 'leave' | 'ban'
   displayname?: string
   avatar_url?: string
+  reason?: string
 }
 
 export interface MatrixRoomMessageContent {
   msgtype?: string
   body?: string
+  /** RFC 5870 geo URI for m.location room messages. */
+  geo_uri?: string
+  /** MSC3488 extensible location content. */
+  'm.location'?: { uri?: string, description?: string }
+  'org.matrix.msc3488.location'?: { uri?: string, description?: string }
+  'm.text'?: string | Array<{ body?: string, mimetype?: string }>
+  'org.matrix.msc1767.text'?: string
   formatted_body?: string
   format?: string
   'm.mentions'?: { user_ids?: string[], room?: boolean }
@@ -65,6 +86,7 @@ export interface MatrixRoomMessageContent {
   'm.relates_to'?: {
     rel_type?: string
     event_id?: string
+    key?: string
     'm.in_reply_to'?: { event_id?: string }
   }
   'm.new_content'?: MatrixRoomMessageContent
@@ -74,6 +96,7 @@ export interface MatrixSyncResponse {
   next_batch: string
   rooms?: {
     join?: Record<string, MatrixJoinedRoom>
+    invite?: Record<string, MatrixInvitedRoom>
     leave?: Record<string, MatrixLeftRoom>
   }
   account_data?: { events?: MatrixEvent[] }
@@ -92,6 +115,11 @@ export interface MatrixJoinedRoom {
   }
 }
 
+/** Invited rooms contain stripped state rather than a joined-room timeline. */
+export interface MatrixInvitedRoom {
+  invite_state?: { events?: MatrixEvent[] }
+}
+
 export interface MatrixLeftRoom {
   state?: { events?: MatrixEvent[] }
   timeline?: { events?: MatrixEvent[] }
@@ -102,6 +130,11 @@ export interface MatrixMessagesResponse {
   end?: string
   chunk: MatrixEvent[]
   state?: MatrixEvent[]
+}
+
+export interface MatrixRelationsResponse {
+  chunk: MatrixEvent[]
+  next_batch?: string
 }
 
 export interface MatrixEventContextResponse {

@@ -20,6 +20,27 @@ describe('MatrixClient', () => {
     expect(fetch).toHaveBeenCalledOnce()
   })
 
+  it('fetches typed Matrix relations with encoded IDs and pagination', async () => {
+    let request: URL | undefined
+    const client = new MatrixClient({
+      homeserver: 'https://matrix.example.org',
+      accessToken: 'token',
+      fetch: async (input) => {
+        request = new URL(String(input))
+        return Response.json({ chunk: [], next_batch: 'page-2' })
+      },
+    })
+
+    await expect(client.getRelations('!room:example.org', '$event/with space', 'm.annotation', {
+      from: 'page token', limit: 50,
+    })).resolves.toEqual({ chunk: [], next_batch: 'page-2' })
+    expect(request?.pathname).toBe(
+      '/_matrix/client/v1/rooms/!room%3Aexample.org/relations/%24event%2Fwith%20space/m.annotation',
+    )
+    expect(request?.searchParams.get('from')).toBe('page token')
+    expect(request?.searchParams.get('limit')).toBe('50')
+  })
+
   it('surfaces structured Matrix errors', async () => {
     const client = new MatrixClient({
       homeserver: 'https://matrix.example.org',

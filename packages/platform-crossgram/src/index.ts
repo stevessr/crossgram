@@ -1404,7 +1404,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
         })
       const parts: IMMessageInput['parts'] = source.content.parts.map((part) => {
         if (part.type === 'text') return { ...part }
-        if (part.type === 'card') return { type: 'text' as const, text: messagePartText(part) }
+        if (part.type === 'card' || part.type === 'poll') return { type: 'text' as const, text: messagePartText(part) }
         if (part.type === 'message-bundle') return { type: 'text' as const, text: part.bundle.title }
         if (part.type === 'sticker') return {
           type: 'sticker' as const,

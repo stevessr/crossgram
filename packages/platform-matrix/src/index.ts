@@ -5,16 +5,23 @@ import zhCN from './locales/zh-CN.yml'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialog,
   IMDialogPage, IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia,
-  IMMessage, IMMessageInput, IMMessagePinMutation, IMMessageSearchPage, IMMessageSearchQuery, IMMessageTarget, IMPageQuery, IMPlatform, IMReadTarget,
-  IMTransferOptions, IMUser, PlatformCapabilities, PlatformSession, Unsubscribe,
+  IMInlineKeyboardButton, IMMessage, IMMessageInput, IMMessagePinMutation, IMMessageSearchPage, IMMessageSearchQuery, IMMessageTarget, IMPageQuery, IMPlatform, IMReadTarget,
+  IMRequest, IMRequestAction, IMRequestPage, IMRequestQuery,
+  IMReactionActorPage, IMReactionActorPageRequest, IMReactionContext, IMReactionDefinition, IMReactionTarget,
+  IMStickerSendPlan, IMTransferOptions, IMUser, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { MatrixClient, MatrixHttpError, type MatrixClientOptions } from './client.js'
 import { matrixMentionUserIds, matrixTextEntities, textContent } from './formatting.js'
+import { countClosedMatrixPoll, type MatrixPollTally } from './poll-results.js'
 import type {
-  MatrixDirectAccountData, MatrixEvent, MatrixJoinedRoom, MatrixMediaLocator, MatrixRoomMemberContent,
-  MatrixRoomMessageContent, MatrixSyncResponse,
+  MatrixDirectAccountData, MatrixEvent, MatrixInvitedRoom, MatrixJoinedRoom, MatrixMediaLocator, MatrixRoomMemberContent,
+  MatrixAnnotation, MatrixRoomMessageContent, MatrixSyncResponse,
 } from './types.js'
+import { isRecord } from './guards.js'
+
+const STANDARD_REACTIONS = ['👍', '👎', '❤️', '😂', '😮', '😢', '😡', '🔥', '🎉', '👏', '🤔'] as const
+const MAX_SELECTED_REACTIONS = 20
 
 export interface Config {
   homeserver: string
@@ -73,6 +80,8 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       forward: { mode: 'unsupported', preservesAuthor: false },
       pin: { read: true, write: true },
     },
+    stickers: { native: false, upload: true, formats: ['static', 'animated'] },
+    reactions: { read: true, write: true, events: true, actorList: true, maxSelected: 20 },
     notifications: { read: true, mute: true },
   }
 
@@ -84,6 +93,17 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   private readonly roomState = new Map<string, Map<string, MatrixEvent>>()
   private readonly conversations = new Map<string, IMConversation<MatrixMediaLocator>>()
   private readonly directRoomIds = new Set<string>()
+  /** The live invitation index also authorizes accept/reject actions by opaque request ID. */
+  private readonly pendingInvites = new Map<string, IMRequest<MatrixMediaLocator>>()
+  /** A successful local action must not be undone by an old /sync snapshot. */
+  private readonly locallyResolvedInvites = new Map<string, IMRequest<MatrixMediaLocator>>()
+  private readonly resolvingInvites = new Set<string>()
+  /** Freeze a paginated request listing: each page must refer to the same /sync snapshot. */
+  private requestPageSnapshot?: IMRequest<MatrixMediaLocator>[]
+  /** Poll closures observed in sync/history, scoped to the room to avoid cross-room event collisions. */
+  private readonly closedPolls = new Set<string>()
+  private readonly pollTallies = new Map<string, MatrixPollTally>()
+  private readonly reactionEventTargets = new Map<string, string>()
   private readonly pinMutations = new Map<string, Promise<void>>()
   /** Local state snapshots suppress our own /sync echoes without masking external changes. */
   private readonly pinSnapshots = new Map<string, string[]>()
@@ -116,9 +136,23 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     const controller = new AbortController()
     const initial = await this.client.sync({ timeout: 0, fullState: true, signal: controller.signal })
     this.ingestAccountData(initial)
+    for (const [roomId, room] of Object.entries(initial.rooms?.invite ?? {})) {
+      const request = this.mapRoomInvite(roomId, room, userId)
+      if (!request) continue
+      const resolved = this.locallyResolvedInvites.get(roomId)
+      if (resolved?.id === request.id) continue
+      if (resolved) this.locallyResolvedInvites.delete(roomId)
+      this.pendingInvites.set(roomId, request)
+    }
     for (const [roomId, room] of Object.entries(initial.rooms?.join ?? {})) {
       this.ingestState(roomId, room.state?.events ?? [])
       this.updateConversation(roomId, room)
+      for (const event of room.timeline?.events ?? []) {
+        const relation = event.type === 'm.reaction' ? relationFromValue(event.content['m.relates_to']) : undefined
+        if (event.event_id && relation?.rel_type === 'm.annotation' && relation.event_id) {
+          this.rememberReaction(event.event_id, relation.event_id)
+        }
+      }
       this.pinSnapshots.set(roomId, this.cachedPinnedIds(roomId))
     }
     let since = initial.next_batch
@@ -131,8 +165,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
             signal: controller.signal,
           })
           await this.dispatchSync(response, userId, handler)
-          // Advance only after successful event publication. If the handler
-          // fails, retry the same token rather than losing the state change.
+          // Only advance the token after the bridge has durably handled the batch.
           since = response.next_batch
         } catch (error) {
           if (controller.signal.aborted) return
@@ -154,6 +187,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     const dialogs: IMDialog<MatrixMediaLocator>[] = []
     for (const [roomId, room] of Object.entries(response.rooms?.join ?? {})) {
       this.ingestState(roomId, room.state?.events ?? [])
+      this.ingestPollClosures(roomId, room.timeline?.events ?? [])
       const conversation = this.updateConversation(roomId, room)
       const lastMessage = [...(room.timeline?.events ?? [])].reverse()
         .map((event) => this.mapTimelineMessage(roomId, event))
@@ -175,6 +209,113 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     }
   }
 
+  async getRequests(
+    _session: PlatformSession,
+    query: IMRequestQuery = {},
+  ): Promise<IMRequestPage<MatrixMediaLocator>> {
+    if (query.kind && query.kind !== 'group-join') return { requests: [] }
+    const start = requestPageStart(query.cursor)
+    if (!query.cursor || !this.requestPageSnapshot) {
+      const userId = await this.getAccountUserId()
+      const snapshot = await this.client.sync({ timeout: 0, fullState: true })
+      const requests: IMRequest<MatrixMediaLocator>[] = []
+      const seen = new Set<string>()
+      for (const [roomId, room] of Object.entries(snapshot.rooms?.invite ?? {})) {
+        const request = this.mapRoomInvite(roomId, room, userId)
+        if (!request) continue
+        seen.add(roomId)
+        const locallyResolved = this.locallyResolvedInvites.get(roomId)
+        if (locallyResolved && locallyResolved.id === request.id) {
+          // An upstream snapshot may temporarily lag a successful join/leave.
+          requests.push(locallyResolved)
+          continue
+        }
+        if (locallyResolved) {
+          // A newer invitation replaced an already handled one before its
+          // terminal result could be recovered by the bridge.
+          requests.push(locallyResolved)
+          this.locallyResolvedInvites.delete(roomId)
+        }
+        const previous = this.pendingInvites.get(roomId)
+        if (previous && previous.id !== request.id) {
+          requests.push({ ...previous, state: 'rejected' })
+        }
+        requests.push(request)
+        this.pendingInvites.set(roomId, request)
+      }
+      // A fresh full_state sync is an authoritative list of outstanding
+      // invitations; emit terminal states for invites no longer present.
+      for (const [roomId, request] of this.pendingInvites) {
+        if (seen.has(roomId)) continue
+        requests.push({
+          ...request,
+          state: snapshot.rooms?.join?.[roomId] ? 'accepted' : 'rejected',
+        })
+        this.pendingInvites.delete(roomId)
+      }
+      for (const [roomId, resolved] of this.locallyResolvedInvites) {
+        if (seen.has(roomId)) continue
+        // Reconcile the terminal state once even if an out-of-band /sync
+        // snapshot has already removed the invite. The bridge may not have
+        // persisted the preceding inline button callback yet.
+        requests.push(resolved)
+        this.locallyResolvedInvites.delete(roomId)
+      }
+      requests.sort((a, b) =>
+        Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0) || a.id.localeCompare(b.id))
+      this.requestPageSnapshot = requests
+    }
+    const requests = this.requestPageSnapshot
+    const limit = clampLimit(query.limit)
+    const page = requests.slice(start, start + limit)
+    return {
+      requests: page,
+      nextCursor: start + page.length < requests.length ? String(start + page.length) : undefined,
+    }
+  }
+
+  async resolveRequest(
+    _session: PlatformSession,
+    id: string,
+    action: IMRequestAction,
+  ): Promise<IMRequest<MatrixMediaLocator>> {
+    const pending = [...this.pendingInvites.values()].find((request) => request.id === id)
+    if (!pending) {
+      // A remote join/leave can succeed before the bridge persists the
+      // terminal inbox update. Allow the same callback to retry without
+      // issuing a second remote operation.
+      const resolved = [...this.locallyResolvedInvites.values()].find((request) => request.id === id)
+      if (resolved && resolved.state === (action === 'accept' ? 'accepted' : 'rejected')) return resolved
+      throw new Error(`Unknown or no longer pending Matrix room invitation: ${id}`)
+    }
+    const roomId = pending.group!.id
+    if (this.resolvingInvites.has(roomId)) {
+      throw new Error(`Matrix room invitation resolution is already in progress: ${roomId}`)
+    }
+    this.resolvingInvites.add(roomId)
+    try {
+      if (action === 'accept') {
+        await this.client.joinRoom(roomId)
+      } else {
+        await this.client.leaveRoom(roomId)
+      }
+      const resolved: IMRequest<MatrixMediaLocator> = {
+        ...pending, state: action === 'accept' ? 'accepted' : 'rejected',
+      }
+      // A concurrent sync may already have replaced the room's invitation.
+      // Never delete a distinct newer invitation when this action completes.
+      if (this.pendingInvites.get(roomId)?.id === id) this.pendingInvites.delete(roomId)
+      this.locallyResolvedInvites.set(roomId, resolved)
+      // Keep the current paginated view stable even when an inline callback
+      // resolves one of its entries between two request-list pages.
+      this.requestPageSnapshot = this.requestPageSnapshot?.map((request) =>
+        request.id === id ? resolved : request)
+      return resolved
+    } finally {
+      this.resolvingInvites.delete(roomId)
+    }
+  }
+
   async getHistory(
     _session: PlatformSession,
     conversation: IMConversationRef,
@@ -191,6 +332,16 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       limit: clampLimit(query.limit),
     })
     this.ingestState(conversation.id, response.state ?? [])
+    this.ingestPollClosures(conversation.id, response.chunk)
+    // Only a few closed polls per page are expanded; never fetch relations
+    // for every message in a long history request.
+    await Promise.all(response.chunk.filter((event) => isMatrixPollStart(event.type)
+      && event.event_id && this.closedPolls.has(`${conversation.id}\0${event.event_id}`))
+      .slice(0, 3).map(async (event) => {
+        const pollPart = matrixPollParts(event.content).find((part) => part.type === 'poll')
+        if (pollPart?.type !== 'poll') return
+        await this.loadPollTally(conversation.id, event.event_id!, pollPart.poll).catch(() => undefined)
+      }))
     return {
       messages: response.chunk.flatMap((event) => {
         const message = this.mapTimelineMessage(conversation.id, event)
@@ -349,7 +500,25 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
           },
         })
       } else {
-        throw new Error('Matrix native stickers are not supported')
+        const sticker = part.sticker
+        if (sticker.type !== 'upload') throw new Error('Matrix cannot send native sticker references')
+        if (sticker.format === 'video') throw new Error('Matrix sticker events do not support video stickers')
+        let transferredBytes = 0
+        const mxc = await this.client.upload(sticker.source.stream({ signal: options.signal }), {
+          filename: `${sticker.stickerId}.${mediaExtension(sticker.mimeType)}`,
+          contentType: sticker.mimeType,
+          signal: options.signal,
+          onChunk: async (size) => {
+            transferredBytes += size
+            await options.onProgress?.({ phase: 'upload', mediaIndex: index, transferredBytes, totalBytes: sticker.source.size })
+          },
+        })
+        sourceIds.push(await this.client.sendEvent(conversation.id, 'm.sticker', stickerContent(sticker, mxc, content.replyToId)))
+        parts.push({ type: 'media', media: {
+          id: mxc, kind: sticker.mimeType.startsWith('image/') ? 'image' : 'file',
+          name: `${sticker.stickerId}.${mediaExtension(sticker.mimeType)}`, mimeType: sticker.mimeType,
+          size: sticker.source.size, width: sticker.width, height: sticker.height, locator: { mxc },
+        } })
       }
     }
     if (!sourceIds.length) throw new Error('Matrix cannot send an empty message')
@@ -365,6 +534,113 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     }
   }
 
+  /**
+   * Telegram's ordinary poll RPC is intentionally not advertised. Single-choice
+   * Matrix polls use the bridge's callback keyboard instead, with native
+   * MSC3381 response events sent under the current Matrix account.
+   */
+  async clickInlineButton(
+    _session: PlatformSession,
+    target: { conversationId: string, messageId: string },
+    button: Extract<IMInlineKeyboardButton, { type: 'callback' }>,
+  ): Promise<{ message?: string, alert?: boolean }> {
+    const match = /^matrix-poll-vote:(0|[1-9]\d?)$/.exec(button.data)
+    if (!match) return { message: '无效的投票选项', alert: true }
+    const start = await this.client.getEvent(target.conversationId, target.messageId)
+    if (!isMatrixPollStart(start.type) || start.unsigned?.redacted_because) {
+      return { message: '投票不存在或已经撤回', alert: true }
+    }
+    const part = matrixPollParts(start.content).find((part) => part.type === 'poll')
+    if (part?.type !== 'poll' || part.poll.maxSelections !== 1) {
+      return { message: '此投票不支持单选快捷提交', alert: true }
+    }
+    const option = part.poll.answers[Number(match[1])]
+    if (!option) return { message: '投票选项已失效', alert: true }
+    const pollKey = `${target.conversationId}\0${target.messageId}`
+    // Matrix does not reject late votes automatically. Fail closed when the
+    // relation list is incomplete or the homeserver cannot verify closure.
+    const seen = new Set<string>()
+    let from: string | undefined
+    let exhausted = false
+    for (let page = 0; page < 100; page++) {
+      const relations = await this.client.getRelations(target.conversationId, target.messageId, {
+        from, limit: 100,
+      }).catch(() => undefined)
+      if (!relations || !Array.isArray(relations.chunk)) {
+        return { message: '无法验证 Matrix 投票状态，请稍后重试', alert: true }
+      }
+      if (relations.chunk.some((event) =>
+        isMatrixPollEnd(event.type) && !event.unsigned?.redacted_because
+        && matrixReference(event.content) === target.messageId)) {
+        this.rememberPollClosure(pollKey)
+        return { message: '投票已经结束', alert: true }
+      }
+      if (!relations.next_batch) {
+        exhausted = true
+        break
+      }
+      if (seen.has(relations.next_batch)) break
+      seen.add(relations.next_batch)
+      from = relations.next_batch
+    }
+    if (!exhausted) return { message: '暂时无法确认投票状态，请稍后重试', alert: true }
+    // A previously observed end event may have been redacted since the last
+    // sync. Treat the server's current relations as authoritative.
+    this.closedPolls.delete(pollKey)
+
+    const unstable = start.type === 'org.matrix.msc3381.poll.start'
+    await this.client.sendEvent(target.conversationId,
+      unstable ? 'org.matrix.msc3381.poll.response' : 'm.poll.response', {
+        'm.relates_to': { rel_type: 'm.reference', event_id: target.messageId },
+        ...(unstable
+          ? { 'org.matrix.msc3381.poll.response': { answers: [option.id] } }
+          : { 'm.selections': [option.id], 'm.poll.response': { answers: [option.id] } }),
+      })
+    return { message: '投票已提交，可再次选择修改投票' }
+  }
+
+  /** Collect every relation page before publishing counts: a partial page is misleading. */
+  private async loadPollTally(
+    roomId: string,
+    pollId: string,
+    poll: import('@mtproto-relay/bridge').IMMessagePoll,
+  ): Promise<void> {
+    const key = `${roomId}\0${pollId}`
+    const relations: MatrixEvent[] = []
+    const seen = new Set<string>()
+    let from: string | undefined
+    let exhausted = false
+    for (let page = 0; page < 100; page++) {
+      const response = await this.client.getRelations(roomId, pollId, { from, limit: 100 })
+      if (!Array.isArray(response.chunk)) return
+      relations.push(...response.chunk)
+      if (!response.next_batch) {
+        exhausted = true
+        break
+      }
+      if (seen.has(response.next_batch)) break
+      seen.add(response.next_batch)
+      from = response.next_batch
+    }
+    if (!exhausted) return
+    const tally = countClosedMatrixPoll(pollId, poll, relations)
+    if (!tally) return
+    this.pollTallies.delete(key)
+    this.pollTallies.set(key, tally)
+    if (this.pollTallies.size > 2_000) {
+      const oldest = this.pollTallies.keys().next().value
+      if (oldest !== undefined) this.pollTallies.delete(oldest)
+    }
+  }
+
+  private rememberPollClosure(key: string): void {
+    this.closedPolls.add(key)
+    if (this.closedPolls.size > 2_000) {
+      const oldest = this.closedPolls.values().next().value
+      if (oldest !== undefined) this.closedPolls.delete(oldest)
+    }
+  }
+
   async editMessage(
     session: PlatformSession,
     target: IMMessageTarget,
@@ -373,13 +649,18 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     if (content.parts.length !== 1 || content.parts[0]?.type !== 'text') {
       throw new Error('Matrix edits currently support exactly one text part')
     }
-    const body = content.parts[0].text
-    const entities = content.parts[0].entities
+    const text = content.parts[0]
+    const originalEvent = await this.client.getEvent(target.conversationId, target.targetId)
+    if (originalEvent.type !== 'm.room.message') throw new Error(`Matrix cannot edit event type ${originalEvent.type}`)
+    const raw = matrixRoomMessageContent(originalEvent.content)
+    const original = raw['m.new_content'] ?? raw
+    const originalReplyTo = (original['m.relates_to'] ?? raw['m.relates_to'])?.['m.in_reply_to']?.event_id
+    const newContent = formattedContent(original, text.text, text.entities)
+    if (originalReplyTo) newContent['m.relates_to'] = { 'm.in_reply_to': { event_id: originalReplyTo } }
+    const fallback = formattedContent(newContent, `* ${text.text}`, text.entities?.map((entity) => ({ ...entity, offset: entity.offset + 2 })))
     const replacement: MatrixRoomMessageContent = {
-      ...textContent(`* ${body}`, undefined, entities?.map((entity) => ({
-        ...entity, offset: entity.offset + 2,
-      }))),
-      'm.new_content': textContent(body, undefined, entities),
+      ...fallback,
+      'm.new_content': newContent,
       'm.relates_to': { rel_type: 'm.replace', event_id: target.targetId },
     }
     await this.client.sendEvent(target.conversationId, 'm.room.message', replacement)
@@ -390,7 +671,8 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       senderId: session.userId,
       timestamp: Math.floor(Date.now() / 1000),
       outgoing: true,
-      content: { parts: [{ type: 'text', text: body, entities: content.parts[0].entities }] },
+      replyToId: originalReplyTo,
+      content: { parts: matrixMessageParts(newContent) },
     }
   }
 
@@ -404,6 +686,71 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
 
   async markRead(_session: PlatformSession, target: IMReadTarget): Promise<void> {
     await this.client.markRead(target.conversationId, target.messageId)
+  }
+
+  async getAvailableReactions(_session: PlatformSession, target: IMReactionTarget): Promise<IMReactionContext> {
+    const userId = await this.getAccountUserId()
+    if (!target.targetId && !target.messageId) return reactionContext([], userId)
+    return reactionContext(await this.loadReactionEvents(target.conversationId, target.targetId ?? target.messageId!), userId)
+  }
+
+  async getMessageReactions(_session: PlatformSession, target: IMMessageTarget): Promise<IMReactionContext> {
+    const userId = await this.getAccountUserId()
+    return reactionContext(await this.loadReactionEvents(target.conversationId, target.targetId), userId)
+  }
+
+  async setMessageReactions(session: PlatformSession, target: IMMessageTarget, reactionKeys: readonly string[]): Promise<IMReactionContext> {
+    const userId = await this.getAccountUserId()
+    if (reactionKeys.length > MAX_SELECTED_REACTIONS) throw new Error(`Matrix supports at most ${MAX_SELECTED_REACTIONS} selected reactions`)
+    const requested = new Set(reactionKeys)
+    if ([...requested].some((key) => !reactionDefinition(key))) throw new Error('Matrix reactions must be emoji keys')
+    const existing = await this.loadReactionEvents(target.conversationId, target.targetId)
+    const selected = new Set<string>()
+    for (const event of existing) {
+      const relation = relationFromValue(event.content['m.relates_to'])
+      if (event.sender !== userId || relation?.rel_type !== 'm.annotation' || !relation.key) continue
+      if (requested.has(relation.key) && !selected.has(relation.key)) selected.add(relation.key)
+      else if (event.event_id) await this.client.redactEvent(target.conversationId, event.event_id)
+    }
+    for (const key of requested) if (!selected.has(key)) await this.client.sendEvent(target.conversationId, 'm.reaction', {
+      'm.relates_to': { rel_type: 'm.annotation', event_id: target.targetId, key },
+    })
+    return this.getMessageReactions(session, target)
+  }
+
+  async getMessageReactionActors(_session: PlatformSession, target: IMMessageTarget, request: IMReactionActorPageRequest): Promise<IMReactionActorPage> {
+    const userId = await this.getAccountUserId()
+    const events = await this.loadReactionEvents(target.conversationId, target.targetId)
+    const actors = events.flatMap((event) => {
+      const relation = relationFromValue(event.content['m.relates_to'])
+      if (!event.sender || relation?.rel_type !== 'm.annotation' || !relation.key || (request.reactionKey && request.reactionKey !== relation.key)) return []
+      return [{ reactionKey: relation.key, actor: { userId: event.sender, timestamp: matrixTimestamp(event) } }]
+    }).sort((a, b) => (b.actor.timestamp ?? 0) - (a.actor.timestamp ?? 0))
+    const offset = request.offset === undefined ? 0 : Number(request.offset)
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error(`invalid Matrix reaction offset: ${request.offset}`)
+    const limit = Math.max(0, Math.min(Math.trunc(request.limit), 1_000))
+    const page = actors.slice(offset, offset + limit)
+    return { context: reactionContext(events, userId), actors: page, nextOffset: offset + page.length < actors.length ? String(offset + page.length) : undefined }
+  }
+
+  private async loadReactionEvents(roomId: string, targetId: string): Promise<MatrixEvent[]> {
+    const events: MatrixEvent[] = [], cursors = new Set<string>()
+    let from: string | undefined
+    do {
+      const page = await this.client.getRelations(roomId, targetId, 'm.annotation', { from, limit: 100 })
+      for (const event of page.chunk) {
+        if (event.type !== 'm.reaction' || event.unsigned?.redacted_because) continue
+        const relation = relationFromValue(event.content['m.relates_to'])
+        if (relation?.rel_type === 'm.annotation' && relation.event_id === targetId && relation.key) {
+          events.push(event)
+          if (event.event_id) this.rememberReaction(event.event_id, targetId)
+        }
+      }
+      if (!page.next_batch || cursors.has(page.next_batch)) break
+      from = page.next_batch
+      cursors.add(from)
+    } while (true)
+    return events
   }
 
   async getPinnedMessageIds(_session: PlatformSession, conversation: IMConversationRef): Promise<string[]> {
@@ -539,7 +886,32 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     handler: (event: IMEvent<MatrixMediaLocator>) => void | Promise<void>,
   ): Promise<void> {
     this.ingestAccountData(response)
+    for (const [roomId, room] of Object.entries(response.rooms?.invite ?? {})) {
+      const request = this.mapRoomInvite(roomId, room, userId)
+      if (!request) continue
+      const locallyResolved = this.locallyResolvedInvites.get(roomId)
+      if (locallyResolved?.id === request.id) continue
+      if (locallyResolved) {
+        await handler({ type: 'request', request: locallyResolved })
+        this.locallyResolvedInvites.delete(roomId)
+      }
+      const previous = this.pendingInvites.get(roomId)
+      if (previous && previous.id !== request.id && previous.id !== locallyResolved?.id) {
+        await handler({ type: 'request', request: { ...previous, state: 'rejected' } })
+      }
+      if (!previous || JSON.stringify(previous) !== JSON.stringify(request)) {
+        await handler({ type: 'request', request })
+      }
+      this.pendingInvites.set(roomId, request)
+    }
     for (const [roomId, room] of Object.entries(response.rooms?.join ?? {})) {
+      const invite = this.pendingInvites.get(roomId)
+      const settled = this.locallyResolvedInvites.get(roomId)
+      if (invite || settled) {
+        await handler({ type: 'request', request: { ...(invite ?? settled!), state: 'accepted' } })
+        this.pendingInvites.delete(roomId)
+        this.locallyResolvedInvites.delete(roomId)
+      }
       const stateEvents = [
         ...(room.state?.events ?? []),
         ...(room.timeline?.events ?? []).filter((event) => event.state_key !== undefined),
@@ -575,13 +947,22 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         if (!event.event_id || event.state_key !== undefined) continue
         const redacts = event.redacts ?? (event.content as { redacts?: string }).redacts
         if (event.type === 'm.room.redaction' && redacts) {
-          await handler({
-            type: 'message-delete',
-            eventId: event.event_id,
-            conversation,
-            messageIds: [redacts],
-            timestamp: matrixTimestamp(event),
-          })
+          const reactionTargetId = this.reactionEventTargets.get(redacts)
+          if (reactionTargetId) {
+            this.reactionEventTargets.delete(redacts)
+            await handler({ type: 'message-reactions', eventId: event.event_id, conversation,
+              target: { conversationId: roomId, messageId: reactionTargetId, targetId: reactionTargetId },
+              context: reactionContext(await this.loadReactionEvents(roomId, reactionTargetId), userId), timestamp: matrixTimestamp(event) })
+          } else await handler({ type: 'message-delete', eventId: event.event_id, conversation, messageIds: [redacts], timestamp: matrixTimestamp(event) })
+          continue
+        }
+        if (event.type === 'm.reaction') {
+          const relation = relationFromValue(event.content['m.relates_to'])
+          if (relation?.rel_type !== 'm.annotation' || !relation.event_id || !relation.key) continue
+          this.rememberReaction(event.event_id, relation.event_id)
+          await handler({ type: 'message-reactions', eventId: event.event_id, conversation,
+            target: { conversationId: roomId, messageId: relation.event_id, targetId: relation.event_id },
+            context: reactionContext(await this.loadReactionEvents(roomId, relation.event_id), userId), timestamp: matrixTimestamp(event) })
           continue
         }
         const message = this.mapTimelineMessage(roomId, event)
@@ -592,10 +973,81 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         } else {
           await handler({ type: 'message', conversation, message })
         }
+        if (isMatrixPollEnd(event.type) && relation?.rel_type === 'm.reference' && relation.event_id) {
+          // Refresh the parent poll so Telegram removes its voting keyboard.
+          // A missing/redacted parent must not block the Matrix sync loop.
+          const original = await this.client.getEvent(roomId, relation.event_id).catch(() => undefined)
+          const pollPart = original && matrixPollParts(original.content).find((part) => part.type === 'poll')
+          if (pollPart?.type === 'poll') {
+            await this.loadPollTally(roomId, relation.event_id, pollPart.poll).catch(() => undefined)
+          }
+          const closed = original && this.mapTimelineMessage(roomId, original)
+          if (closed?.content.parts.some((part) => part.type === 'poll')) {
+            await handler({
+              type: 'message-edit', eventId: `matrix-poll-end:${event.event_id}`,
+              conversation, message: closed,
+            })
+          }
+        }
       }
       const receipt = room.ephemeral?.events?.find((event) => event.type === 'm.receipt')
       const receiptEventId = receipt && latestReadReceipt(receipt.content, userId)
       if (receiptEventId) await handler({ type: 'read', conversationId: roomId, upToMessageId: receiptEventId })
+    }
+    for (const roomId of Object.keys(response.rooms?.leave ?? {})) {
+      const invite = this.pendingInvites.get(roomId)
+      const settled = this.locallyResolvedInvites.get(roomId)
+      if (invite || settled) {
+        await handler({ type: 'request', request: { ...(invite ?? settled!), state: 'rejected' } })
+        this.pendingInvites.delete(roomId)
+        this.locallyResolvedInvites.delete(roomId)
+      }
+    }
+  }
+
+  /** Matrix invites have stripped state, not the full state of joined rooms. */
+  private mapRoomInvite(
+    roomId: string,
+    room: MatrixInvitedRoom,
+    userId: string,
+  ): IMRequest<MatrixMediaLocator> | undefined {
+    const events = room.invite_state?.events ?? []
+    const membership = [...events].reverse().find((event) =>
+      event.type === 'm.room.member'
+      && event.state_key === userId
+      && (event.content as MatrixRoomMemberContent).membership === 'invite')
+    if (!membership?.sender) return
+    const findState = (type: string, stateKey: string) => events.find((event) =>
+      event.type === type && event.state_key === stateKey)?.content
+    const name = findState('m.room.name', '') as { name?: string } | undefined
+    const alias = findState('m.room.canonical_alias', '') as { alias?: string } | undefined
+    const avatar = findState('m.room.avatar', '') as { url?: string } | undefined
+    const create = findState('m.room.create', '') as { type?: string } | undefined
+    const inviter = findState('m.room.member', membership.sender) as MatrixRoomMemberContent | undefined
+    const reason = (membership.content as MatrixRoomMemberContent).reason
+    return {
+      id: `matrix:invite:${encodeURIComponent(roomId)}:${encodeURIComponent(membership.event_id ?? String(membership.origin_server_ts ?? membership.sender))}`,
+      kind: 'group-join',
+      state: 'pending',
+      requester: this.mapUser(membership.sender, inviter),
+      group: {
+        id: roomId,
+        kind: create?.type === 'm.space' ? 'channel' : 'group',
+        title: name?.name || alias?.alias || roomId,
+        avatar: avatar?.url ? avatarMedia(roomId, avatar.url) : undefined,
+        metadata: { matrixRoomId: roomId, matrixRoomInvite: true },
+      },
+      message: reason,
+      createdAt: membership.origin_server_ts,
+      metadata: { matrixRoomInvite: true, matrixRoomId: roomId },
+    }
+  }
+
+  private rememberReaction(eventId: string, targetId: string): void {
+    this.reactionEventTargets.set(eventId, targetId)
+    if (this.reactionEventTargets.size > 10_000) {
+      const oldest = this.reactionEventTargets.keys().next().value
+      if (oldest) this.reactionEventTargets.delete(oldest)
     }
   }
 
@@ -609,6 +1061,14 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     this.directRoomIds.clear()
     for (const roomIds of Object.values(direct)) {
       for (const roomId of roomIds) this.directRoomIds.add(roomId)
+    }
+  }
+
+  private ingestPollClosures(roomId: string, events: readonly MatrixEvent[]): void {
+    for (const event of events) {
+      if (!isMatrixPollEnd(event.type) || event.unsigned?.redacted_because) continue
+      const parent = matrixReference(event.content)
+      if (parent) this.rememberPollClosure(`${roomId}\0${parent}`)
     }
   }
 
@@ -678,14 +1138,34 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         metadata: { matrixEncrypted: true },
       }
     }
-    if (event.type !== 'm.room.message') return
-    const raw = event.content as MatrixRoomMessageContent
+    const pollStart = isMatrixPollStart(event.type)
+    const pollEnd = isMatrixPollEnd(event.type)
+    if (event.unsigned?.redacted_because && (pollStart || pollEnd)) return
+    const location = event.type === 'm.location' || event.type === 'org.matrix.msc3488.location'
+    // Poll responses do not have a text fallback and must not appear as separate chat messages.
+    if (!pollStart && !pollEnd && !location && event.type !== 'm.room.message' && event.type !== 'm.sticker') return
+    const raw = matrixObject(event.content) as MatrixRoomMessageContent | undefined
+    if (!raw) return
     const relation = raw['m.relates_to']
+    if (pollEnd && !event.unsigned?.redacted_because
+      && relation?.rel_type === 'm.reference' && relation.event_id) {
+      this.rememberPollClosure(`${roomId}\0${relation.event_id}`)
+    }
     const content = relation?.rel_type === 'm.replace' && raw['m.new_content'] ? raw['m.new_content'] : raw
-    const parts = matrixMessageParts(content)
+    const parts: IMMessage<MatrixMediaLocator>['content']['parts'] = pollStart ? matrixPollParts(content)
+      : pollEnd ? [{ type: 'text' as const, text: matrixEventText(event.content) || '投票已结束' }]
+        : matrixMessageParts(content)
     if (!parts.length) return
     const mentionIds = matrixMentionUserIds(content)
     const messageId = relation?.rel_type === 'm.replace' && relation.event_id ? relation.event_id : event.event_id
+    const pollKey = `${roomId}\0${messageId}`
+    if (pollStart && parts[0]?.type === 'poll' && this.closedPolls.has(pollKey)) {
+      const tally = this.pollTallies.get(pollKey)
+      parts[0] = { type: 'poll', poll: {
+        ...parts[0].poll, closed: true,
+        ...(tally ? { counts: { ...tally.counts }, totalVoters: tally.totalVoters } : {}),
+      } }
+    }
     return {
       id: messageId,
       sourceIds: [messageId],
@@ -694,9 +1174,23 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       sender: this.memberUser(roomId, event.sender),
       timestamp: matrixTimestamp(event),
       outgoing: event.sender === this.accountUserId,
-      replyToId: content['m.relates_to']?.['m.in_reply_to']?.event_id,
-      content: { parts },
-      ...(mentionIds.length ? { metadata: { matrixMentions: mentionIds } } : {}),
+      replyToId: pollEnd && relation?.rel_type === 'm.reference'
+        ? relation.event_id
+        : content['m.relates_to']?.['m.in_reply_to']?.event_id,
+      content: {
+        parts,
+        ...(pollStart && parts[0]?.type === 'poll' && parts[0].poll.maxSelections === 1
+          && !this.closedPolls.has(`${roomId}\0${messageId}`)
+          ? { inlineKeyboard: { rows: parts[0].poll.answers.map((answer, index) => ({
+              buttons: [{ type: 'callback' as const, text: answer.text.slice(0, 60), data: `matrix-poll-vote:${index}` }],
+            })) } }
+          : {}),
+      },
+      ...((mentionIds.length || event.unsigned?.['m.relations']?.['m.annotation']?.length) ? { metadata: {
+        ...(mentionIds.length ? { matrixMentions: mentionIds } : {}),
+        ...(event.unsigned?.['m.relations']?.['m.annotation']?.length
+          ? { reactionContext: JSON.parse(JSON.stringify(bundledReactionContext(event.unsigned['m.relations']['m.annotation']!))) as never } : {}),
+      } } : {}),
     }
   }
 
@@ -765,6 +1259,39 @@ function samePinnedIds(a: readonly string[], b: readonly string[]): boolean {
 
 function matrixMessageParts(content: MatrixRoomMessageContent): IMMessage<MatrixMediaLocator>['content']['parts'] {
   const body = content.body ?? ''
+  if (content.msgtype === 'm.sticker') {
+    const mxc = content.url ?? content.file?.url
+    if (!mxc) return body ? [{ type: 'text', text: body }] : []
+    const mimeType = content.info?.mimetype ?? 'image/webp'
+    return [{ type: 'media', media: {
+      id: mxc, kind: mimeType.startsWith('image/') ? 'image' : 'file',
+      name: looksLikeFilename(body) ? body : `sticker.${mediaExtension(mimeType)}`,
+      mimeType, size: content.info?.size, width: content.info?.w, height: content.info?.h, locator: { mxc },
+    } }]
+  }
+  const structured = matrixObject(content['m.location'])
+    ?? matrixObject(content['org.matrix.msc3488.location'])
+  if (content.msgtype === 'm.location' || structured) {
+    const coordinates = parseMatrixGeoUri(structured?.uri) ?? parseMatrixGeoUri(content.geo_uri)
+    const title = (typeof structured?.description === 'string' && structured.description.trim())
+      || body.trim() || matrixEventText(content).trim() || '位置'
+    if (!coordinates) {
+      return [{ type: 'text', text: title }]
+    }
+    const { latitude, longitude } = coordinates
+    return [{
+      type: 'card',
+      card: {
+        kind: 'location',
+        title,
+        description: `${latitude}, ${longitude}`,
+        source: 'Matrix',
+        latitude,
+        longitude,
+        url: `https://www.openstreetmap.org/?mlat=${latitude}&mlon=${longitude}`,
+      },
+    }]
+  }
   if (content.msgtype === 'm.text' || content.msgtype === 'm.notice' || content.msgtype === 'm.emote') {
     if (!body) return []
     const prefix = content.msgtype === 'm.emote' ? '* ' : ''
@@ -800,6 +1327,137 @@ function matrixMessageParts(content: MatrixRoomMessageContent): IMMessage<Matrix
         height: info.thumbnail_info.h ?? 0,
       } : undefined,
       locator: { mxc },
+    },
+  }]
+}
+
+function formattedContent(base: MatrixRoomMessageContent, body: string, entities?: readonly { type: string, offset: number, length: number, url?: string, language?: string }[]): MatrixRoomMessageContent {
+  const content = { ...base, ...textContent(body, undefined, entities as never), msgtype: base.msgtype ?? 'm.text' }
+  delete content['m.relates_to']; delete content['m.new_content']
+  return content
+}
+function stickerContent(sticker: Extract<IMStickerSendPlan, { type: 'upload' }>, mxc: string, replyToId?: string): MatrixRoomMessageContent {
+  return { body: sticker.emoji?.[0] || sticker.stickerId, url: mxc, info: { mimetype: sticker.mimeType, size: sticker.source.size, w: sticker.width, h: sticker.height }, ...(replyToId ? { 'm.relates_to': { 'm.in_reply_to': { event_id: replyToId } } } : {}) }
+}
+function mediaExtension(mime: string): string {
+  return ({ 'image/apng': 'apng', 'image/gif': 'gif', 'image/png': 'png', 'image/webp': 'webp', 'application/x-tgsticker': 'tgs' } as Record<string, string>)[mime.toLowerCase()] ?? 'bin'
+}
+function looksLikeFilename(value: string): boolean { return /^[^/\\\r\n]{1,200}\.(?:apng|avif|bmp|gif|jpe?g|png|svg|webp|aac|m4a|mp3|ogg|wav|webm|mp4|mov|pdf|txt|zip|docx?|xlsx?|pptx?)$/iu.test(value) }
+function relationFromValue(value: unknown): MatrixRoomMessageContent['m.relates_to'] | undefined {
+  if (!isRecord(value)) return
+  const reply = value['m.in_reply_to']
+  return { rel_type: typeof value.rel_type === 'string' ? value.rel_type : undefined, event_id: typeof value.event_id === 'string' ? value.event_id : undefined, key: typeof value.key === 'string' ? value.key : undefined,
+    'm.in_reply_to': isRecord(reply) && typeof reply.event_id === 'string' ? { event_id: reply.event_id } : undefined }
+}
+function matrixRoomMessageContent(value: unknown): MatrixRoomMessageContent {
+  if (!isRecord(value)) return {}
+  const info = isRecord(value.info) ? value.info : {}
+  const file = isRecord(value.file) && typeof value.file.url === 'string' ? { url: value.file.url } : undefined
+  return { ...value, info: { mimetype: typeof info.mimetype === 'string' ? info.mimetype : undefined, size: typeof info.size === 'number' ? info.size : undefined, w: typeof info.w === 'number' ? info.w : undefined, h: typeof info.h === 'number' ? info.h : undefined }, file, 'm.relates_to': relationFromValue(value['m.relates_to']), 'm.new_content': isRecord(value['m.new_content']) ? matrixRoomMessageContent(value['m.new_content']) : undefined } as MatrixRoomMessageContent
+}
+function reactionDefinition(key: string): IMReactionDefinition | undefined {
+  return /\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(key) && key.length <= 32 && !/[\s\r\n]/u.test(key) ? { key, presentation: { type: 'emoji', emoticon: key } } : undefined
+}
+function reactionDefinitions(keys: Iterable<string>): IMReactionDefinition[] {
+  const all = new Map<string, IMReactionDefinition>()
+  for (const key of STANDARD_REACTIONS) all.set(key, reactionDefinition(key)!)
+  for (const key of keys) { const definition = reactionDefinition(key); if (definition) all.set(key, definition) }
+  return [...all.values()]
+}
+function reactionContext(events: readonly MatrixEvent[], userId: string): IMReactionContext {
+  const grouped = new Map<string, { count: number, actors: Array<{ userId: string, timestamp: number }>, selectedAt?: number }>()
+  for (const event of events) {
+    const relation = relationFromValue(event.content['m.relates_to'])
+    if (!event.sender || relation?.rel_type !== 'm.annotation' || !relation.key) continue
+    const group = grouped.get(relation.key) ?? { count: 0, actors: [] }; grouped.set(relation.key, group)
+    const timestamp = matrixTimestamp(event); group.count++; group.actors.push({ userId: event.sender, timestamp })
+    if (event.sender === userId) group.selectedAt = Math.max(group.selectedAt ?? 0, timestamp)
+  }
+  const selected = [...grouped].filter(([, x]) => x.selectedAt !== undefined).sort((a,b) => a[1].selectedAt! - b[1].selectedAt!)
+  return { available: reactionDefinitions(grouped.keys()), maxSelected: MAX_SELECTED_REACTIONS, reactions: [...grouped].flatMap(([key, group]) => reactionDefinition(key) ? [{ key, count: group.count, selected: group.selectedAt !== undefined, selectedOrder: group.selectedAt === undefined ? undefined : selected.findIndex(([k]) => k === key) + 1, recentActors: group.actors.sort((a,b) => b.timestamp-a.timestamp).slice(0,3) }] : []) }
+}
+function bundledReactionContext(annotations: readonly MatrixAnnotation[]): IMReactionContext {
+  const reactions = annotations.flatMap((item) => typeof item.count === 'number' && reactionDefinition(item.key)
+    ? [{ key: item.key, count: item.count }] : [])
+  return { available: reactionDefinitions(annotations.map((item) => item.key)), reactions, maxSelected: MAX_SELECTED_REACTIONS }
+}
+
+function isMatrixPollStart(type: string): boolean {
+  return type === 'm.poll.start' || type === 'org.matrix.msc3381.poll.start'
+}
+
+function isMatrixPollEnd(type: string): boolean {
+  return type === 'm.poll.end' || type === 'org.matrix.msc3381.poll.end'
+}
+
+function matrixReference(content: unknown): string | undefined {
+  const relation = matrixObject(matrixObject(content)?.['m.relates_to'])
+  return relation?.rel_type === 'm.reference' && typeof relation.event_id === 'string'
+    ? relation.event_id : undefined
+}
+
+/** Parse only RFC 5870 point coordinates; malformed or out-of-range locations stay textual. */
+function parseMatrixGeoUri(uri: unknown): { latitude: number, longitude: number } | undefined {
+  if (typeof uri !== 'string') return
+  const match = /^geo:([+-]?\d+(?:\.\d+)?),([+-]?\d+(?:\.\d+)?)(?:,[+-]?\d+(?:\.\d+)?)?(?:;[^?#]*)?$/i.exec(uri)
+  if (!match) return
+  const latitude = Number(match[1])
+  const longitude = Number(match[2])
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)
+    || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return
+  return { latitude, longitude }
+}
+
+function matrixObject(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown> : undefined
+}
+
+/** Both stable MSC3381 m.text arrays and legacy single-text payloads. */
+function matrixEventText(value: unknown): string {
+  const object = matrixObject(value)
+  if (!object) return ''
+  const rich = object['m.text']
+  if (typeof rich === 'string') return rich
+  if (Array.isArray(rich)) {
+    const block = rich.map(matrixObject).find((item) => item?.mimetype === 'text/plain')
+      ?? rich.map(matrixObject).find((item) => typeof item?.body === 'string')
+    if (typeof block?.body === 'string') return block.body
+  }
+  if (typeof object['org.matrix.msc1767.text'] === 'string') return object['org.matrix.msc1767.text']
+  return typeof object.body === 'string' ? object.body : ''
+}
+
+/** Preserve structured poll questions and option IDs, with a plain-text fallback. */
+function matrixPollParts(value: unknown): IMMessage<MatrixMediaLocator>['content']['parts'] {
+  const content = matrixObject(value)
+  const poll = matrixObject(content?.['m.poll.start'])
+    ?? matrixObject(content?.['m.poll'])
+    ?? matrixObject(content?.['org.matrix.msc3381.poll.start'])
+  const fallback = matrixEventText(content)
+  if (!poll) return [{ type: 'text', text: fallback || '[无法识别的 Matrix 投票]' }]
+  const question = matrixEventText(poll.question).trim()
+  const options = Array.isArray(poll.answers) ? poll.answers.slice(0, 20) : []
+  const seen = new Set<string>()
+  const answers = options.flatMap((value) => {
+    const answer = matrixObject(value)
+    const id = answer?.['m.id'] ?? answer?.id
+    const text = matrixEventText(answer).trim()
+    if (typeof id !== 'string' || !id || !text || seen.has(id)) return []
+    seen.add(id)
+    return [{ id, text }]
+  })
+  if (!question || !answers.length) return [{ type: 'text', text: fallback || question || '[无法解析的 Matrix 投票]' }]
+  const max = poll.max_selections
+  const maxSelections = typeof max === 'number' && Number.isSafeInteger(max) && max > 0
+    ? Math.min(max, answers.length) : 1
+  return [{
+    type: 'poll',
+    poll: {
+      question, answers, maxSelections,
+      kind: poll.kind === 'm.disclosed' || poll.kind === 'm.poll.disclosed'
+        || poll.kind === 'org.matrix.msc3381.poll.disclosed'
+        ? 'disclosed' : 'undisclosed',
     },
   }]
 }
@@ -859,6 +1517,13 @@ function latestReadReceipt(content: unknown, userId: string): string | undefined
     if (!latest || ts >= latest.ts) latest = { eventId, ts }
   }
   return latest?.eventId
+}
+
+function requestPageStart(cursor?: string): number {
+  if (!cursor) return 0
+  const value = Number(cursor)
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error(`invalid Matrix request cursor: ${cursor}`)
+  return value
 }
 
 function pageStart(items: Array<{ conversation: { id: string } }>, query: IMPageQuery): number {
