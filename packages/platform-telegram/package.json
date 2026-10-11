@@ -1,0 +1,24 @@
+{
+  "name": "@mtproto-relay/platform-telegram",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./src/index.ts",
+  "cordis": {},
+  "peerDependencies": {
+    "cordis": "^4.0.0-rc.5"
+  },
+  "dependencies": {
+    "@mtcute/node": "^0.32.1",
+    "@mtproto-relay/bridge": "workspace:*",
+    "long": "^5.3.2",
+    "schemastery": "^3.18.0"
+  },
+  "scripts": {
+    "login": "tsx src/login.ts"
+  },
+  "devDependencies": {
+    "@fuman/utils": "^0.0.21",
+    "vitest": "^4.1.10"
+  }
+}
