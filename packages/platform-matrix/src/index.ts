@@ -780,6 +780,13 @@ function latestReadReceipt(content: unknown, userId: string): string | undefined
   return latest?.eventId
 }
 
+function requestPageStart(cursor?: string): number {
+  if (!cursor) return 0
+  const value = Number(cursor)
+  if (!Number.isSafeInteger(value) || value < 0) throw new Error(`invalid Matrix request cursor: ${cursor}`)
+  return value
+}
+
 function pageStart(items: Array<{ conversation: { id: string } }>, query: IMPageQuery): number {
   if (query.afterId) {
     const index = items.findIndex((item) => item.conversation.id === query.afterId)
