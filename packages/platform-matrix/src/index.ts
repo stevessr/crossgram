@@ -287,8 +287,6 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     const option = part.poll.answers[Number(match[1])]
     if (!option) return { message: '投票选项已失效', alert: true }
     const pollKey = `${target.conversationId}\0${target.messageId}`
-    if (this.closedPolls.has(pollKey)) return { message: '投票已经结束', alert: true }
-
     // Matrix does not reject late votes automatically. Fail closed when the
     // relation list is incomplete or the homeserver cannot verify closure.
     const seen = new Set<string>()
@@ -297,7 +295,10 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     for (let page = 0; page < 100; page++) {
       const relations = await this.client.getRelations(target.conversationId, target.messageId, {
         from, limit: 100,
-      })
+      }).catch(() => undefined)
+      if (!relations || !Array.isArray(relations.chunk)) {
+        return { message: '无法验证 Matrix 投票状态，请稍后重试', alert: true }
+      }
       if (relations.chunk.some((event) =>
         isMatrixPollEnd(event.type) && !event.unsigned?.redacted_because
         && matrixReference(event.content) === target.messageId)) {
@@ -313,6 +314,9 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       from = relations.next_batch
     }
     if (!exhausted) return { message: '暂时无法确认投票状态，请稍后重试', alert: true }
+    // A previously observed end event may have been redacted since the last
+    // sync. Treat the server's current relations as authoritative.
+    this.closedPolls.delete(pollKey)
 
     const unstable = start.type === 'org.matrix.msc3381.poll.start'
     await this.client.sendEvent(target.conversationId,
@@ -578,13 +582,15 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     }
     const pollStart = isMatrixPollStart(event.type)
     const pollEnd = isMatrixPollEnd(event.type)
+    if (event.unsigned?.redacted_because && (pollStart || pollEnd)) return
     const location = event.type === 'm.location' || event.type === 'org.matrix.msc3488.location'
     // Poll responses do not have a text fallback and must not appear as separate chat messages.
     if (!pollStart && !pollEnd && !location && event.type !== 'm.room.message') return
     const raw = matrixObject(event.content) as MatrixRoomMessageContent | undefined
     if (!raw) return
     const relation = raw['m.relates_to']
-    if (pollEnd && relation?.rel_type === 'm.reference' && relation.event_id) {
+    if (pollEnd && !event.unsigned?.redacted_because
+      && relation?.rel_type === 'm.reference' && relation.event_id) {
       this.rememberPollClosure(`${roomId}\0${relation.event_id}`)
     }
     const content = relation?.rel_type === 'm.replace' && raw['m.new_content'] ? raw['m.new_content'] : raw
