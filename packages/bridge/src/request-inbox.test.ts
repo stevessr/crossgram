@@ -121,7 +121,7 @@ describe('Matrix room invitation inbox', () => {
     })
     expect(message.content.parts).toEqual([{
       type: 'text',
-      text: 'Matrix 房间邀请\\n邀请人：Alice\\n邀请房间：Development\\n邀请说明：无\\n状态：待处理',
+      text: 'Matrix 房间邀请\n邀请人：Alice\n邀请房间：Development\n邀请说明：无\n状态：待处理',
     }])
     expect(message.content.inlineKeyboard?.rows[0]?.buttons.map((button) => button.text))
       .toEqual(['接受', '拒绝'])
@@ -136,7 +136,7 @@ describe('Matrix room invitation inbox', () => {
     expect(accepted.content.inlineKeyboard).toBeUndefined()
     expect(accepted.content.parts).toEqual([{
       type: 'text',
-      text: 'Matrix 房间邀请\\n邀请人：Alice\\n邀请房间：Development\\n邀请说明：无\\n状态：已接受',
+      text: 'Matrix 房间邀请\n邀请人：Alice\n邀请房间：Development\n邀请说明：无\n状态：已接受',
     }])
   })
 })
