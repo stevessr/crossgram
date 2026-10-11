@@ -102,18 +102,31 @@ export class MatrixClient {
   async setRoomNotificationMuted(roomId: string, muted: boolean): Promise<void> {
     const rule = await this.getRoomPushRule(roomId)
     const currentlyMuted = Boolean(rule?.enabled !== false && rule?.actions.includes('dont_notify'))
+    const path = `/_matrix/client/v3/pushrules/global/room/${segment(roomId)}`
     if (muted) {
       if (currentlyMuted) return
-      await this.request(`/_matrix/client/v3/pushrules/global/room/${segment(roomId)}`, {
-        method: 'PUT', body: { actions: ['dont_notify'] },
+      // Preserve existing per-room tweaks instead of discarding custom rules.
+      const tweaks = rule?.actions.filter((action) => typeof action !== 'string') ?? []
+      await this.request(path, {
+        method: 'PUT', body: { actions: ['dont_notify', ...tweaks] },
       })
+      if (rule?.enabled === false) {
+        await this.request(`${path}/enabled`, { method: 'PUT', body: { enabled: true } })
+      }
     } else if (rule && currentlyMuted) {
-      await this.request(`/_matrix/client/v3/pushrules/global/room/${segment(roomId)}`, { method: 'DELETE' })
+      const preserved = rule.actions.filter((action) => action !== 'dont_notify' && action !== 'notify')
+      if (preserved.length) {
+        await this.request(path, { method: 'PUT', body: { actions: ['notify', ...preserved] } })
+      } else {
+        await this.request(path, { method: 'DELETE' })
+      }
     }
   }
 
-  private async getRoomPushRule(roomId: string): Promise<{ actions: string[], enabled?: boolean } | null> {
-    return this.request<{ actions: string[], enabled?: boolean }>(
+  private async getRoomPushRule(roomId: string): Promise<{
+    actions: Array<string | Record<string, unknown>>, enabled?: boolean
+  } | null> {
+    return this.request<{ actions: Array<string | Record<string, unknown>>, enabled?: boolean }>(
       `/_matrix/client/v3/pushrules/global/room/${segment(roomId)}`,
     ).catch((error: unknown) => {
       if (error instanceof MatrixHttpError && error.status === 404) return null
