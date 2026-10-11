@@ -87,15 +87,14 @@ export class MemoryEncryptedMailbox {
     const id = deliveryId(authenticatedSender.accountId, recipient.accountId, envelope)
     const replayKey = JSON.stringify([key, id])
     if (this.tombstones.has(replayKey)) return { id, duplicate: true }
-    let queue = this.pending.get(key)
-    if (!queue) {
-      if (this.pending.size >= MAX_DEVICES) throw new Error('E2EE_MAILBOX_FULL')
-      queue = new Map()
-      this.pending.set(key, queue)
-    }
-    if (queue.size >= MAX_PENDING_PER_DEVICE || this.tombstones.size >= MAX_TOMBSTONES) {
+    const current = this.pending.get(key)
+    if ((current?.size ?? 0) >= MAX_PENDING_PER_DEVICE
+      || this.tombstones.size >= MAX_TOMBSTONES
+      || (!current && this.pending.size >= MAX_DEVICES)) {
       throw new Error('E2EE_MAILBOX_FULL')
     }
+    const queue = current ?? new Map<string, Pending>()
+    if (!current) this.pending.set(key, queue)
     const expiresAt = now + this.ttlMs
     queue.set(id, {
       delivery: {
