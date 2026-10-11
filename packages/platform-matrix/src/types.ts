@@ -21,18 +21,31 @@ export interface MatrixEvent<T = Record<string, unknown>> {
     age?: number
     redacted_because?: MatrixEvent
     'm.relations'?: {
-      'm.annotation'?: { chunk?: MatrixAnnotation[] }
+      'm.annotation'?: MatrixAnnotation[]
     }
   }
 }
 
 export interface MatrixAnnotation {
-  type: 'm.reaction'
   key: string
-  count: number
-  senders?: string[]
+  count?: number
 }
 
+export interface MatrixRelationsResponse {
+  chunk: MatrixEvent[]
+  next_batch?: string
+  prev_batch?: string
+}
+
+
+export type MatrixFormattedEntity =
+  | { type: 'bold' | 'italic' | 'underline' | 'strikethrough' | 'code' | 'pre' | 'blockquote', offset: number, length: number, language?: string }
+  | { type: 'text-link', offset: number, length: number, url: string }
+
+export interface MatrixFormattedText {
+  text: string
+  entities: MatrixFormattedEntity[]
+}
 export interface MatrixRoomMemberContent {
   membership?: 'invite' | 'join' | 'knock' | 'leave' | 'ban'
   displayname?: string
@@ -73,6 +86,7 @@ export interface MatrixRoomMessageContent {
   'm.relates_to'?: {
     rel_type?: string
     event_id?: string
+    key?: string
     'm.in_reply_to'?: { event_id?: string }
   }
   'm.new_content'?: MatrixRoomMessageContent

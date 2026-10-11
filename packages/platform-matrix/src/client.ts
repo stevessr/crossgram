@@ -127,8 +127,15 @@ export class MatrixClient {
   }
 
   /** Matrix /relations may be paginated: callers must follow next_batch before allowing a vote. */
-  getRelations(roomId: string, eventId: string, options: { from?: string, limit?: number } = {}): Promise<MatrixRelationsResponse> {
-    return this.request(`/_matrix/client/v1/rooms/${segment(roomId)}/relations/${segment(eventId)}/m.reference`, {
+  getRelations(
+    roomId: string,
+    eventId: string,
+    relTypeOrOptions: string | { from?: string, limit?: number } = {},
+    pagination: { from?: string, limit?: number } = {},
+  ): Promise<MatrixRelationsResponse> {
+    const relType = typeof relTypeOrOptions === 'string' ? relTypeOrOptions : 'm.reference'
+    const options = typeof relTypeOrOptions === 'string' ? pagination : relTypeOrOptions
+    return this.request(`/_matrix/client/v1/rooms/${segment(roomId)}/relations/${segment(eventId)}/${segment(relType)}`, {
       query: { from: options.from, limit: options.limit ?? 100 },
     })
   }

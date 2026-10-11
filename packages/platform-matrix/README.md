@@ -62,12 +62,20 @@ messages cannot be searched by a server that does not have their plaintext.
 - End-to-end encryption is not implemented. Encrypted events and attachments are
   shown as explicit placeholders instead of exposing ciphertext or silently
   dropping messages. Use an unencrypted room for full functionality.
-- Matrix reactions and stickers are not exposed yet.
+- Reactions use `m.annotation` events: the adapter can read counts/actors, set
+  up to 20 emoji reactions, and emits reaction updates when annotations are
+  added or redacted. Homeserver relation pagination is followed before results
+  are returned.
+- Uploaded static and animated (non-video) stickers are sent as `m.sticker`
+  events and projected as media. Native sticker references and video stickers
+  cannot be sent. Received sticker events are exposed as media.
 - Telegram native poll RPCs, multiselect voting, creating polls from Telegram,
   and sending Telegram locations back to Matrix are not implemented.
 - Poll counts may lag late federation/redaction events until the poll is
   reloaded; the adapter does not provide continuous authoritative tally sync.
-- Edits currently accept a single text part. Matrix forwarding is not supported.
+- Edits accept one text part and preserve existing media metadata, reply context,
+  and formatted entities when the original event is available. Matrix forwarding
+  is not supported.
 - Only joined Matrix rooms are exposed as Space children. Links to rooms not
   joined by this account are not yet shown (room previews/join flows are unavailable).
 - Matrix permits rooms to have several parents, while the bridge has a single

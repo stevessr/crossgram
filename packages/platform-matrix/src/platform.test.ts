@@ -28,6 +28,26 @@ const roomState = [
 ]
 
 describe('MatrixPlatform', () => {
+  it('reads and synchronizes Matrix annotation reactions using the typed relations endpoint', async () => {
+    const calls: string[] = []
+    const fetch = routeFetch((url, init) => {
+      calls.push(`${url.pathname}${url.search}`)
+      if (url.pathname.endsWith('/account/whoami')) return json({ user_id: '@me:example.org' })
+      if (url.pathname.endsWith('/m.annotation')) return json({ chunk: [
+        event('m.reaction', { 'm.relates_to': { rel_type: 'm.annotation', event_id: '$target', key: '🔥' } }, { id: '$reaction', sender: '@alice:example.org', ts: 5_000 }),
+      ] })
+      if (url.pathname.includes('/send/m.reaction/')) return json({ event_id: '$mine' })
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch)
+    const context = await platform.getMessageReactions(session, { conversationId: '!room:example.org', messageId: '$target', targetId: '$target' })
+    expect(context.reactions).toMatchObject([{ key: '🔥', count: 1, selected: false }])
+    expect(calls.find((call) => call.includes('/relations/'))).toContain('/relations/%24target/m.annotation?')
+    await platform.setMessageReactions(session, { conversationId: '!room:example.org', messageId: '$target', targetId: '$target' }, ['🔥'])
+    expect(calls.some((call) => call.includes('/send/m.reaction/'))).toBe(true)
+    await platform.stop()
+  })
+
   it('maps account profiles, direct rooms, state, unread counts, and media timelines', async () => {
     const fetch = routeFetch((url) => {
       if (url.pathname.endsWith('/account/whoami')) return json({ user_id: '@me:example.org' })
@@ -126,6 +146,7 @@ describe('MatrixPlatform', () => {
       requests.push({ path: `${url.pathname}${url.search}`, method: init?.method ?? 'GET', body })
       if (url.pathname.endsWith('/upload')) return json({ content_uri: 'mxc://example.org/uploaded' })
       if (url.pathname.includes('/send/')) return json({ event_id: `$sent-${++sent}` })
+      if (url.pathname.includes('/event/')) return json({ type: 'm.room.message', content: { msgtype: 'm.file', body: 'original.txt', url: 'mxc://example.org/original', filename: 'original.txt', info: { mimetype: 'text/plain', size: 9 } } })
       if (url.pathname.includes('/redact/')) return json({ event_id: '$redaction' })
       if (url.pathname.endsWith('/read_markers')) return json({})
       if (url.pathname.includes('/download/')) return new Response(new Uint8Array([1, 2, 3, 4, 5]))
@@ -164,7 +185,8 @@ describe('MatrixPlatform', () => {
     expect(requests.find((request) => request.path.includes('/send/') &&
       (request.body as { 'm.relates_to'?: { rel_type?: string } } | undefined)
         ?.['m.relates_to']?.rel_type === 'm.replace')?.body).toMatchObject({
-        'm.new_content': { body: 'edited' }, 'm.relates_to': { event_id: '$physical' },
+        'm.new_content': { msgtype: 'm.file', body: 'edited', url: 'mxc://example.org/original', filename: 'original.txt' },
+        'm.relates_to': { event_id: '$physical' },
       })
 
     await platform.deleteMessages(session, { id: '!room:example.org' }, ['$one', '$one', '$two'])
@@ -187,6 +209,7 @@ describe('MatrixPlatform', () => {
         outgoing.push(JSON.parse(String(init?.body)) as MatrixRoomMessageContent)
         return json({ event_id: '$sent-' + outgoing.length })
       }
+      if (url.pathname.includes('/event/')) return json({ type: 'm.room.message', content: { msgtype: 'm.text', body: 'before' } })
       if (url.pathname.endsWith('/messages')) return json({
         end: 'next', chunk: [
           event('m.room.message', {
@@ -519,6 +542,366 @@ describe('MatrixPlatform', () => {
       value.type === 'conversation' && value.conversation.id === child)
     expect(root).toMatchObject({ conversation: { metadata: { hasSubchannels: false } } })
     expect(updatedChild).toMatchObject({ conversation: { kind: 'group', parentId: undefined } })
+  })
+  it('shows Matrix invites in the request inbox, paginates them, and accepts or rejects rooms', async () => {
+    const actions: Array<{ path: string, method: string }> = []
+    const invite = (roomId: string, inviter: string, title: string) => ({
+      invite_state: { events: [
+        event('m.room.name', { name: title }, { stateKey: '' }),
+        event('m.room.avatar', { url: 'mxc://example.org/invite-avatar' }, { stateKey: '' }),
+        event('m.room.member', { membership: 'join', displayname: 'Inviter' }, {
+          stateKey: inviter, sender: inviter,
+        }),
+        event('m.room.member', { membership: 'invite', reason: 'Welcome!' }, {
+          id: `$invite-${title}`, stateKey: '@me:example.org', sender: inviter, ts: 123_000,
+        }),
+      ] },
+    })
+    const fetch = routeFetch((url, init) => {
+      if (url.pathname.endsWith('/sync')) return json({
+        next_batch: 'initial',
+        rooms: { invite: {
+          '!alpha:example.org': invite('!alpha:example.org', '@alice:example.org', 'Alpha'),
+          '!beta:example.org': invite('!beta:example.org', '@bob:example.org', 'Beta'),
+        } },
+      } satisfies MatrixSyncResponse)
+      if (/\/(join|leave)$/.test(url.pathname)) {
+        actions.push({ path: url.pathname, method: init?.method ?? 'GET' })
+        return json({})
+      }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+    const first = await platform.getRequests(session, { kind: 'group-join', limit: 1 })
+    expect(first.requests).toHaveLength(1)
+    expect(first.nextCursor).toBe('1')
+    const second = await platform.getRequests(session, { kind: 'group-join', limit: 1, cursor: first.nextCursor })
+    expect(second.requests).toHaveLength(1)
+    expect(second.nextCursor).toBeUndefined()
+    expect(await platform.getRequests(session, { kind: 'friend' })).toEqual({ requests: [] })
+    await expect(platform.getRequests(session, { cursor: '-1' })).rejects.toThrow(/invalid Matrix request cursor/)
+    const requests = [...first.requests, ...second.requests]
+    expect(requests.map((request) => request.group?.title)).toEqual(['Alpha', 'Beta'])
+    expect(requests[0]).toMatchObject({
+      kind: 'group-join', state: 'pending',
+      requester: { id: '@alice:example.org', firstName: 'Inviter' },
+      group: {
+        id: '!alpha:example.org', kind: 'group',
+        avatar: { locator: { mxc: 'mxc://example.org/invite-avatar' } },
+      },
+      message: 'Welcome!', createdAt: 123_000,
+      metadata: { matrixRoomInvite: true, matrixRoomId: '!alpha:example.org' },
+    })
+    expect((await platform.getDialogs(session)).total).toBe(0)
+    const accepted = await platform.resolveRequest(session, requests[0]!.id, 'accept')
+    const rejected = await platform.resolveRequest(session, requests[1]!.id, 'reject')
+    expect(accepted.state).toBe('accepted')
+    expect(rejected.state).toBe('rejected')
+    expect(actions).toEqual([
+      { path: '/_matrix/client/v3/rooms/!alpha%3Aexample.org/join', method: 'POST' },
+      { path: '/_matrix/client/v3/rooms/!beta%3Aexample.org/leave', method: 'POST' },
+    ])
+    await expect(platform.resolveRequest(session, requests[0]!.id, 'accept'))
+      .resolves.toMatchObject({ state: 'accepted' })
+    expect(actions).toHaveLength(2)
+  })
+
+  it('uses one stable sync snapshot across request-list pages', async () => {
+    let syncs = 0
+    const invitation = (room: string) => ({ invite_state: { events: [
+      event('m.room.member', { membership: 'invite' }, {
+        id: `$invite-${room}`, stateKey: '@me:example.org', sender: '@alice:example.org',
+      }),
+    ] } })
+    const fetch = routeFetch((url) => {
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      syncs++
+      if (syncs === 1) return json({ next_batch: 's1', rooms: { invite: {
+        '!a:example.org': invitation('a'), '!b:example.org': invitation('b'),
+      } } })
+      return json({ next_batch: 's2', rooms: { invite: { '!c:example.org': invitation('c') } } })
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+    const first = await platform.getRequests(session, { limit: 1 })
+    const second = await platform.getRequests(session, { limit: 1, cursor: first.nextCursor })
+    expect(syncs).toBe(1)
+    expect([first.requests[0]?.group?.id, second.requests[0]?.group?.id]).toEqual([
+      '!a:example.org', '!b:example.org',
+    ])
+    const refreshed = await platform.getRequests(session)
+    expect(syncs).toBe(2)
+    expect(refreshed.requests).toEqual(expect.arrayContaining([
+      expect.objectContaining({ state: 'pending', group: expect.objectContaining({ id: '!c:example.org' }) }),
+      expect.objectContaining({ state: 'rejected', group: expect.objectContaining({ id: '!a:example.org' }) }),
+      expect.objectContaining({ state: 'rejected', group: expect.objectContaining({ id: '!b:example.org' }) }),
+    ]))
+  })
+
+  it('recognizes a fresh re-invitation when Matrix supplies a new event ID', async () => {
+    let revision = '$first-invite'
+    const fetch = routeFetch((url) => {
+      if (url.pathname.endsWith('/sync')) return json({
+        next_batch: 's1', rooms: { invite: { '!room:example.org': { invite_state: { events: [
+          event('m.room.member', { membership: 'invite' }, {
+            id: revision, stateKey: '@me:example.org', sender: '@alice:example.org',
+          }),
+        ] } } } },
+      })
+      if (url.pathname.endsWith('/leave')) return json({})
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+    const [oldInvite] = (await platform.getRequests(session)).requests
+    await expect(platform.resolveRequest(session, oldInvite!.id, 'reject'))
+      .resolves.toMatchObject({ state: 'rejected' })
+    revision = '$second-invite'
+    const replacements = (await platform.getRequests(session)).requests
+    const newInvite = replacements.find((request) => request.state === 'pending')
+    expect(newInvite).toMatchObject({ state: 'pending', group: { id: '!room:example.org' } })
+    expect(newInvite?.id).not.toBe(oldInvite?.id)
+    expect(replacements.find((request) => request.id === oldInvite?.id)?.state).toBe('rejected')
+  })
+
+  it('reconciles a superseded pending invite before publishing the replacement', async () => {
+    let revision = '$old'
+    const fetch = routeFetch((url) => {
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      return json({ next_batch: 's1', rooms: { invite: {
+        '!room:example.org': { invite_state: { events: [
+          event('m.room.member', { membership: 'invite' }, {
+            id: revision, stateKey: '@me:example.org', sender: '@alice:example.org',
+          }),
+        ] } },
+      } } })
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+    const previous = (await platform.getRequests(session)).requests[0]!
+    revision = '$new'
+    const current = (await platform.getRequests(session)).requests
+    expect(current.find((request) => request.id === previous.id)?.state).toBe('rejected')
+    expect(current.find((request) => request.id !== previous.id)?.state).toBe('pending')
+  })
+
+  it('serializes conflicting decisions and ignores stale invited-room snapshots', async () => {
+    const join = Promise.withResolvers<Response>()
+    const actions: string[] = []
+    const fetch = routeFetch((url) => {
+      if (url.pathname.endsWith('/sync')) return json({
+        next_batch: 's1', rooms: { invite: { '!room:example.org': { invite_state: { events: [
+          event('m.room.member', { membership: 'invite' }, {
+            stateKey: '@me:example.org', sender: '@alice:example.org', id: '$invite',
+          }),
+        ] } } } },
+      })
+      if (url.pathname.endsWith('/join')) {
+        actions.push('join')
+        return join.promise
+      }
+      if (url.pathname.endsWith('/leave')) {
+        actions.push('leave')
+        return json({})
+      }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+    const original = (await platform.getRequests(session)).requests[0]!
+    const accepting = platform.resolveRequest(session, original.id, 'accept')
+    await expect(platform.resolveRequest(session, original.id, 'reject'))
+      .rejects.toThrow(/already in progress/)
+    join.resolve(json({ room_id: '!room:example.org' }))
+    expect((await accepting).state).toBe('accepted')
+    const later = await platform.getRequests(session)
+    expect(later.requests).toHaveLength(1)
+    expect(later.requests[0]).toMatchObject({ id: original.id, state: 'accepted' })
+    await expect(platform.resolveRequest(session, original.id, 'reject'))
+      .rejects.toThrow(/no longer pending/)
+    expect(actions).toEqual(['join'])
+  })
+
+  it('emits the terminal request again after a successful API action', async () => {
+    let sync = 0
+    let joins = 0
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      const url = new URL(String(input))
+      if (url.pathname.endsWith('/join')) {
+        joins++
+        return json({ room_id: '!room:example.org' })
+      }
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      sync++
+      if (sync <= 2) return json({
+        next_batch: `s${sync}`, rooms: { invite: { '!room:example.org': { invite_state: { events: [
+          event('m.room.member', { membership: 'invite' }, {
+            stateKey: '@me:example.org', sender: '@alice:example.org', id: '$invite',
+          }),
+        ] } } } },
+      })
+      if (sync === 3) return json({
+        next_batch: 's3', rooms: { join: { '!room:example.org': {} } },
+      })
+      return pendingUntilAbort(init?.signal)
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org', syncTimeoutMs: 50 })
+    const request = (await platform.getRequests(session)).requests[0]!
+    await platform.resolveRequest(session, request.id, 'accept')
+    await expect(platform.resolveRequest(session, request.id, 'accept'))
+      .resolves.toMatchObject({ state: 'accepted' })
+    expect(joins).toBe(1)
+    const events: IMEvent[] = []
+    const unsubscribe = await platform.subscribe(session, (value) => { events.push(value) })
+    await vi.waitFor(() => expect(events.some((value) =>
+      value.type === 'request' && value.request.state === 'accepted')).toBe(true))
+    await unsubscribe()
+    const terminal = events.find((value) => value.type === 'request')
+    expect(terminal).toMatchObject({ request: { id: request.id, state: 'accepted' } })
+    expect(joins).toBe(1)
+  })
+
+  it('keeps an invitation pending when an accept operation fails', async () => {
+    let attempts = 0
+    const fetch = routeFetch((url) => {
+      if (url.pathname.endsWith('/sync')) return json({
+        next_batch: 's1', rooms: { invite: { '!room:example.org': { invite_state: { events: [
+          event('m.room.member', { membership: 'invite' }, {
+            stateKey: '@me:example.org', sender: '@alice:example.org',
+          }),
+        ] } } } },
+      })
+      if (url.pathname.endsWith('/join')) {
+        attempts++
+        return json({ errcode: 'M_FORBIDDEN', error: 'not allowed' }, { status: 403 })
+      }
+      if (url.pathname.endsWith('/leave')) return json({})
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+    const { requests: [request] } = await platform.getRequests(session)
+    await expect(platform.resolveRequest(session, request!.id, 'accept')).rejects.toThrow('not allowed')
+    await expect(platform.resolveRequest(session, request!.id, 'accept')).rejects.toThrow('not allowed')
+    expect(attempts).toBe(2)
+    await expect(platform.resolveRequest(session, request!.id, 'reject'))
+      .resolves.toMatchObject({ state: 'rejected' })
+  })
+
+  it('emits new invites and resolves remotely joined or withdrawn invites', async () => {
+    let sync = 0
+    const membership = (roomId: string, sender: string) => ({
+      [roomId]: { invite_state: { events: [
+        event('m.room.name', { name: 'Invitation' }, { stateKey: '' }),
+        event('m.room.member', { membership: 'invite' }, {
+          stateKey: '@me:example.org', sender, id: `$invite-${roomId}`,
+        }),
+      ] } },
+    })
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      const url = new URL(String(input))
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      sync++
+      if (sync === 1) return json({
+        next_batch: 's0', rooms: { invite: membership('!old:example.org', '@alice:example.org') },
+      })
+      if (sync === 2) return json({
+        next_batch: 's1', rooms: { invite: membership('!new:example.org', '@bob:example.org') },
+      })
+      if (sync === 3) return json({
+        next_batch: 's2', rooms: { join: { '!old:example.org': {} }, leave: { '!new:example.org': {} } },
+      })
+      return pendingUntilAbort(init?.signal)
+    })
+    const platform = createPlatform(fetch, { syncTimeoutMs: 50, userId: '@me:example.org' })
+    const requests: Array<{ state: string, roomId?: string }> = []
+    const unsubscribe = await platform.subscribe(session, (value) => {
+      if (value.type === 'request') {
+        requests.push({ state: value.request.state, roomId: value.request.group?.id })
+      }
+    })
+    await vi.waitFor(() => expect(requests).toHaveLength(3))
+    await unsubscribe()
+    expect(requests).toEqual([
+      { state: 'pending', roomId: '!new:example.org' },
+      { state: 'accepted', roomId: '!old:example.org' },
+      { state: 'rejected', roomId: '!new:example.org' },
+    ])
+  })
+
+  it('retries the same sync token if an invitation event cannot be delivered', async () => {
+    let sync = 0
+    const tokens: Array<string | null> = []
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      const url = new URL(String(input))
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      tokens.push(url.searchParams.get('since'))
+      sync++
+      if (sync === 1) return json({ next_batch: 's0' })
+      if (sync <= 3) return json({
+        next_batch: 's1',
+        rooms: { invite: { '!retry:example.org': { invite_state: { events: [
+          event('m.room.member', { membership: 'invite' }, {
+            stateKey: '@me:example.org', sender: '@alice:example.org', id: '$retry',
+          }),
+        ] } } } },
+      })
+      return pendingUntilAbort(init?.signal)
+    })
+    const platform = createPlatform(fetch, { syncTimeoutMs: 50, userId: '@me:example.org' })
+    let deliveries = 0
+    const unsubscribe = await platform.subscribe(session, (event) => {
+      if (event.type !== 'request') return
+      deliveries++
+      if (deliveries === 1) throw new Error('temporary delivery failure')
+    })
+    // Production deliberately backs off for 1s after an unsuccessful sync.
+    await vi.waitFor(() => expect(deliveries).toBe(2), { timeout: 4_000 })
+    await unsubscribe()
+    expect(tokens.slice(0, 3)).toEqual([null, 's0', 's0'])
+  })
+
+  it('subscribes from an initial token and emits messages, edits, redactions, receipts, and conversation changes', async () => {
+    let sync = 0
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      const url = new URL(String(input))
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      sync++
+      if (sync === 1) return json({
+        next_batch: 's0', rooms: { join: { '!room:example.org': { state: { events: roomState } } } },
+      })
+      if (sync === 2) {
+        expect(url.searchParams.get('since')).toBe('s0')
+        return json({
+          next_batch: 's1', rooms: { join: { '!room:example.org': {
+            state: { events: [event('m.room.name', { name: 'Renamed' }, { stateKey: '' })] },
+            timeline: { events: [
+              event('m.room.message', { msgtype: 'm.text', body: 'new' }, {
+                id: '$new', sender: '@alice:example.org', ts: 10_000,
+              }),
+              event('m.room.message', {
+                msgtype: 'm.text', body: '* fixed',
+                'm.new_content': { msgtype: 'm.text', body: 'fixed' },
+                'm.relates_to': { rel_type: 'm.replace', event_id: '$new' },
+              }, { id: '$edit', sender: '@alice:example.org', ts: 11_000 }),
+              event('m.room.redaction', {}, { id: '$redact', sender: '@me:example.org', ts: 12_000, redacts: '$old' }),
+            ] },
+            ephemeral: { events: [{
+              type: 'm.receipt', content: { '$new': { 'm.read': { '@me:example.org': { ts: 13_000 } } } },
+            }] },
+          } } },
+        })
+      }
+      return pendingUntilAbort(init?.signal)
+    })
+    const platform = createPlatform(fetch, { syncTimeoutMs: 50, userId: '@me:example.org' })
+    const events: IMEvent[] = []
+    const unsubscribe = await platform.subscribe(session, (value) => { events.push(value) })
+    await vi.waitFor(() => expect(events).toHaveLength(5))
+    await unsubscribe()
+
+    expect(events.map((value) => value.type)).toEqual([
+      'conversation', 'message', 'message-edit', 'message-delete', 'read',
+    ])
+    expect(events[0]).toMatchObject({ conversation: { title: 'Renamed' } })
+    expect(events[2]).toMatchObject({ eventId: '$edit', message: { id: '$new', content: { parts: [{ text: 'fixed' }] } } })
+    expect(events[3]).toMatchObject({ messageIds: ['$old'] })
+    expect(events[4]).toMatchObject({ upToMessageId: '$new' })
   })
   it('shows Matrix invites in the request inbox, paginates them, and accepts or rejects rooms', async () => {
     const actions: Array<{ path: string, method: string }> = []
