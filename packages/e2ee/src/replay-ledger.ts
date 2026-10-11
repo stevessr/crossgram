@@ -43,15 +43,15 @@ export class PosixFileReplayGuard implements ReplayGuard {
     if (process.platform === 'win32') throw new Error('E2EE_REPLAY_BACKEND_UNSUPPORTED')
     await privateDirectory(this.root)
     const directory = join(this.root, messageId.slice(0, 2))
-    let newDirectory = false
     try {
       await mkdir(directory, { mode: 0o700 })
-      newDirectory = true
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
     }
     await privateDirectory(directory)
-    if (newDirectory) await syncDirectory(this.root)
+    // Even when another process created the bucket, sync the root: otherwise
+    // it could still be uncommitted when we accept a replay marker.
+    await syncDirectory(this.root)
     const filename = join(directory, messageId.slice(2))
     let handle
     try {
