@@ -506,10 +506,11 @@ describe('MatrixPlatform', () => {
     await vi.waitFor(() => expect(events).toHaveLength(3))
     await unsubscribe()
     expect(events.map((event) => event.type)).toEqual(['message', 'message', 'message-edit'])
-    if (events[0].type !== 'message' || events[2].type !== 'message-edit') throw new Error('wrong event types')
-    expect(events[0].message.content.inlineKeyboard?.rows).toHaveLength(1)
-    expect(events[2].message).toMatchObject({ id: '$poll' })
-    expect(events[2].message.content.inlineKeyboard).toBeUndefined()
+    const opened = events[0], closed = events[2]
+    if (opened?.type !== 'message' || closed?.type !== 'message-edit') throw new Error('wrong event types')
+    expect(opened.message.content.inlineKeyboard?.rows).toHaveLength(1)
+    expect(closed.message).toMatchObject({ id: '$poll' })
+    expect(closed.message.content.inlineKeyboard).toBeUndefined()
   })
 
   it('parses valid geo URIs into map cards and preserves malformed locations as text', async () => {
