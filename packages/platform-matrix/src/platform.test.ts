@@ -191,6 +191,7 @@ describe('MatrixPlatform', () => {
     const platform = createPlatform(fetch, { userId: '@me:example.org' })
     await platform.getDialogs(session)
     const members = await platform.getConversationMembers(session, { id: '!room:example.org' })
+    expect((await platform.getDialogs(session)).dialogs[0]?.conversation.selfPermissions?.pinMessages).toBe(false)
 
     expect(members.total).toBe(2)
     expect(members.members.find((item) => item.user.id === '@alice:example.org')).toMatchObject({
