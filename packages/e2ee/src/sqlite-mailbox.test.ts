@@ -62,7 +62,7 @@ describe('SQLite encrypted mailbox prototype', () => {
       const recipient = generateDeviceIdentity(bob.deviceId)
       const first = sealMessage(new Uint8Array([1]), 'room:secret', sender, publicDevice(recipient), { senderAccountId: 'alice', recipientAccountId: 'bob' })
       await expect(db.publish({ accountId: 'stranger', deviceId: alice.deviceId }, bob, first))
-        .rejects.toThrow('E2EE_MAILBOX_UNAUTHORIZED')
+        .rejects.toThrow('E2EE_MAILBOX_DEVICE_MISMATCH')
       await expect(db.publish(alice, { accountId: 'bob', deviceId: 'other' }, first))
         .rejects.toThrow('E2EE_MAILBOX_DEVICE_MISMATCH')
       await expect(db.publish(alice, bob, { ...first, conversationId: 'forbidden' }))
