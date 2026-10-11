@@ -75,7 +75,7 @@ describe('opaque E2EE mailbox transport', () => {
     await expect(relay.publish(mallory, bobPhone, envelope))
       .rejects.toThrow('E2EE_MAILBOX_DEVICE_MISMATCH')
     await expect(relay.publish({ accountId: 'other', deviceId: alice.deviceId }, bobPhone, envelope))
-      .rejects.toThrow('E2EE_MAILBOX_UNAUTHORIZED')
+      .rejects.toThrow('E2EE_MAILBOX_DEVICE_MISMATCH')
     await expect(relay.publish(alice, bobPhone, { ...envelope, conversationId: 'unknown' }))
       .rejects.toThrow('E2EE_MAILBOX_UNAUTHORIZED')
     expect(await relay.list(bobPhone)).toEqual([])
