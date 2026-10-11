@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { messageMentionsUser, type IMEvent, type PlatformSession } from '@mtproto-relay/bridge'
-import { MatrixPlatform } from './index.js'
+import { MatrixEncryptionRequiredError, MatrixPlatform } from './index.js'
 import type { MatrixRoomMessageContent, MatrixSyncResponse } from './types.js'
 
 const session: PlatformSession = {
@@ -28,6 +28,79 @@ const roomState = [
 ]
 
 describe('MatrixPlatform', () => {
+  it('blocks encrypted-room plaintext text, media, edits, reactions and poll votes before sending', async () => {
+    const paths: string[] = []
+    let sourceRead = false
+    const fetch = routeFetch((url) => {
+      paths.push(url.pathname)
+      if (url.pathname.endsWith('/state/m.room.encryption')) {
+        return json({ algorithm: 'm.megolm.v1.aes-sha2' })
+      }
+      throw new Error('plaintext request escaped guard: ' + url.pathname)
+    })
+    const platform = new MatrixPlatform({
+      homeserver: 'https://matrix.example.org', accessToken: 'token', fetch,
+      userId: '@me:example.org',
+    })
+    const room = '!private:example.org'
+    const expected = { code: 'MATRIX_E2EE_REQUIRED', roomId: room }
+    await expect(platform.sendMessage(session, { id: room }, {
+      parts: [{ type: 'text', text: 'secret' }],
+    })).rejects.toMatchObject(expected)
+    await expect(platform.sendMessage(session, { id: room }, {
+      parts: [{ type: 'media', media: {
+        kind: 'file', name: 'private.txt', mimeType: 'text/plain',
+        source: { size: 4, async *stream() { sourceRead = true; yield new Uint8Array([1, 2, 3, 4]) } },
+      } }],
+    })).rejects.toBeInstanceOf(MatrixEncryptionRequiredError)
+    await expect(platform.editMessage(session, {
+      conversationId: room, messageId: '$original', targetId: '$original',
+    }, { parts: [{ type: 'text', text: 'edited secret' }] })).rejects.toMatchObject(expected)
+    await expect(platform.setMessageReactions(session, {
+      conversationId: room, messageId: '$original', targetId: '$original',
+    }, ['👍'])).rejects.toMatchObject(expected)
+    await expect(platform.clickInlineButton(session, {
+      conversationId: room, messageId: '$poll',
+    }, { type: 'callback', text: 'Yes', data: 'matrix-poll-vote:0' })).rejects.toMatchObject(expected)
+
+    expect(sourceRead).toBe(false)
+    // The positive encryption observation is retained without further network calls.
+    expect(paths).toEqual(['/_matrix/client/v3/rooms/!private%3Aexample.org/state/m.room.encryption'])
+  })
+
+  it('fails closed when the encryption-state probe cannot be trusted', async () => {
+    const paths: string[] = []
+    const platform = new MatrixPlatform({
+      homeserver: 'https://matrix.example.org', accessToken: 'token',
+      fetch: routeFetch((url) => {
+        paths.push(url.pathname)
+        return json({ errcode: 'M_FORBIDDEN' }, { status: 403 })
+      }),
+    })
+    await expect(platform.sendMessage(session, { id: '!room:example.org' }, {
+      parts: [{ type: 'text', text: 'must not leak' }],
+    })).rejects.toMatchObject({ status: 403, errcode: 'M_FORBIDDEN' })
+    expect(paths).toEqual(['/_matrix/client/v3/rooms/!room%3Aexample.org/state/m.room.encryption'])
+  })
+
+  it('retains encryption state learned from sync even if later probes would say not found', async () => {
+    const paths: string[] = []
+    const platform = createPlatform(routeFetch((url) => {
+      paths.push(url.pathname)
+      if (url.pathname.endsWith('/sync')) return json({
+        next_batch: 's1', rooms: { join: {
+          '!room:example.org': { state: { events: roomState }, timeline: { events: [] } },
+        } },
+      })
+      throw new Error('unexpected: ' + url.pathname)
+    }), { userId: '@me:example.org' })
+    await platform.getDialogs(session)
+    await expect(platform.sendMessage(session, { id: '!room:example.org' }, {
+      parts: [{ type: 'text', text: 'not cleartext' }],
+    })).rejects.toBeInstanceOf(MatrixEncryptionRequiredError)
+    expect(paths).toEqual(['/_matrix/client/v3/sync'])
+  })
+
   it('reads and synchronizes Matrix annotation reactions using the typed relations endpoint', async () => {
     const calls: string[] = []
     const fetch = routeFetch((url, init) => {
@@ -1009,8 +1082,16 @@ describe('MatrixPlatform', () => {
 })
 
 function createPlatform(fetch: typeof globalThis.fetch, extra: Record<string, unknown> = {}) {
+  // Existing platform fixtures model unencrypted rooms unless a test opts into
+  // the real HTTP encryption probe using the MatrixPlatform constructor.
+  const unencryptedFixture: typeof globalThis.fetch = (input, init) => {
+    if (new URL(String(input)).pathname.endsWith('/state/m.room.encryption')) {
+      return Promise.resolve(json({ errcode: 'M_NOT_FOUND' }, { status: 404 }))
+    }
+    return fetch(input, init)
+  }
   return new MatrixPlatform({
-    homeserver: 'https://matrix.example.org', accessToken: 'token', fetch,
+    homeserver: 'https://matrix.example.org', accessToken: 'token', fetch: unencryptedFixture,
     ...extra,
   })
 }
