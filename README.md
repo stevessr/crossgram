@@ -72,6 +72,9 @@ QQ 适配器的源码位于 `packages/platform-crossgram`。适配器通过 HTTP
 
 所有适配器都不支持 Secret Chat、Stories、Premium、红包和转账。群公告既不显示也不能管理。Matrix 适配器不解密端到端加密事件，这类事件显示为占位消息；配置与限制见 [Matrix 适配器文档](packages/platform-matrix/README.md)。
 
+> [!NOTE]
+> 仓库有一个**尚未接入客户端或消息 RPC 的实验性 E2EE 密文信封基础组件**，具体安全边界与后续计划参见 [E2EE 设计说明](docs/E2EE.zh.md)。该原型不代表 QQ、Discord、Matrix 或 Telegram Secret Chat 已支持端到端加密。
+
 ### 微信
 
 微信适配器连接 Windows 上的 ComWeChat。适配器通过 `endpoint` 调用 ComWeChat 的 HTTP API，并在本机 `callbackPort` 端口上监听 ComWeChat 推送的消息回调。适配器只提供接收能力：账号资料、联系人会话、群成员和实时文字消息可以同步，媒体消息显示为文字说明，发送消息和历史消息不可用。部署方式和安全注意事项见 [微信适配器文档](packages/platform-wechat/README.md)。
