@@ -23,6 +23,7 @@ interface SqliteDeliveryRow {
   envelope_json: string
 }
 const MAX_PENDING_PER_DEVICE = 100
+const MAX_TOTAL_TOMBSTONES = 50_000
 const MAX_DELIVERY_IDS = 100
 const DEFAULT_TTL_MS = 7 * 86400 * 1000
 
@@ -104,6 +105,10 @@ export class SqliteEncryptedMailbox {
         WHERE recipient_account = ? AND recipient_device = ?
       `).get(recipient.accountId, recipient.deviceId) as { count: number }
       if (countRow.count >= MAX_PENDING_PER_DEVICE) throw new Error('E2EE_MAILBOX_FULL')
+      const tombstones = this.db.prepare(
+        'SELECT COUNT(*) AS count FROM e2ee_delivery_tombstone',
+      ).get() as { count: number }
+      if (tombstones.count >= MAX_TOTAL_TOMBSTONES) throw new Error('E2EE_MAILBOX_FULL')
       this.db.prepare(`
         INSERT INTO e2ee_delivery_tombstone (id, expires_at) VALUES (?, ?)
       `).run(id, now + this.ttlMs)
