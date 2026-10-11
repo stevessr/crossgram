@@ -267,7 +267,13 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         messages.push(message)
       }
 
-      if (!nextCursor || nextCursor === cursor || messages.length >= limit) break
+      // A non-advancing token would make the bridge replay the same page up
+      // to 100 times. Treat a stalled cursor as exhausted instead.
+      if (nextCursor === cursor) {
+        nextCursor = undefined
+        break
+      }
+      if (!nextCursor || messages.length >= limit) break
       cursor = nextCursor
     }
     return {
