@@ -308,6 +308,36 @@ describe('MatrixPlatform', () => {
     ])
   })
 
+  it('maps Matrix poll replacement edits from m.new_content and preserves the source ID', async () => {
+    const fetch = routeFetch((url) => {
+      if (!url.pathname.endsWith('/messages')) throw new Error(`unexpected request: ${url}`)
+      return json({ chunk: [
+        event('m.poll.start', {
+          'm.text': [{ body: '* Old question' }],
+          'm.poll': { kind: 'm.undisclosed', question: { 'm.text': [{ body: 'Old question' }] },
+            answers: [{ 'm.id': 'old', 'm.text': [{ body: 'Old answer' }] }] },
+          'm.new_content': {
+            'm.text': [{ body: 'Updated question and answers' }],
+            'm.poll': {
+              kind: 'm.poll.disclosed', question: { 'm.text': [{ body: 'Updated question' }] },
+              answers: [{ 'm.id': 'new', 'm.text': [{ body: 'Updated answer' }] }],
+            },
+          },
+          'm.relates_to': { rel_type: 'm.replace', event_id: '$original-poll' },
+        }, { id: '$poll-edit', sender: '@alice:example.org', ts: 8_000 }),
+      ] })
+    })
+    const page = await createPlatform(fetch).getHistory(session, { id: '!room:example.org' })
+    expect(page.messages).toHaveLength(1)
+    expect(page.messages[0]).toMatchObject({
+      id: '$original-poll', sourceIds: ['$original-poll'],
+      content: { parts: [{ type: 'poll', poll: {
+        question: 'Updated question', kind: 'disclosed', maxSelections: 1,
+        answers: [{ id: 'new', text: 'Updated answer' }],
+      } }] },
+    })
+  })
+
   it('parses valid geo URIs into map cards and preserves malformed locations as text', async () => {
     const fetch = routeFetch((url) => {
       if (!url.pathname.endsWith('/messages')) throw new Error(`unexpected request: ${url}`)
