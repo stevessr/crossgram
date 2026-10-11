@@ -675,7 +675,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         ...(pollStart && parts[0]?.type === 'poll' && parts[0].poll.maxSelections === 1
           && !this.closedPolls.has(`${roomId}\0${messageId}`)
           ? { inlineKeyboard: { rows: parts[0].poll.answers.map((answer, index) => ({
-              buttons: [{ type: 'callback' as const, text: answer.text.slice(0, 128), data: `matrix-poll-vote:${index}` }],
+              buttons: [{ type: 'callback' as const, text: answer.text.slice(0, 60), data: `matrix-poll-vote:${index}` }],
             })) } }
           : {}),
       },
@@ -845,7 +845,7 @@ function matrixPollParts(value: unknown): IMMessage<MatrixMediaLocator>['content
     ?? matrixObject(content?.['m.poll'])
     ?? matrixObject(content?.['org.matrix.msc3381.poll.start'])
   const fallback = matrixEventText(content)
-  if (!poll) return fallback ? [{ type: 'text', text: fallback }] : []
+  if (!poll) return [{ type: 'text', text: fallback || '[无法识别的 Matrix 投票]' }]
   const question = matrixEventText(poll.question).trim()
   const options = Array.isArray(poll.answers) ? poll.answers.slice(0, 20) : []
   const seen = new Set<string>()
@@ -857,7 +857,7 @@ function matrixPollParts(value: unknown): IMMessage<MatrixMediaLocator>['content
     seen.add(id)
     return [{ id, text }]
   })
-  if (!question || !answers.length) return fallback ? [{ type: 'text', text: fallback }] : []
+  if (!question || !answers.length) return [{ type: 'text', text: fallback || question || '[无法解析的 Matrix 投票]' }]
   const max = poll.max_selections
   const maxSelections = typeof max === 'number' && Number.isSafeInteger(max) && max > 0
     ? Math.min(max, answers.length) : 1
