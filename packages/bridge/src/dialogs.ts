@@ -6084,7 +6084,9 @@ function matchesMessageFilter(item: MaterializedMessage, filter: tl.TypeMessages
 }
 
 function searchMediaKind(filter: tl.TypeMessagesFilter): 'image' | 'file' | undefined {
-  if (filter._ === 'inputMessagesFilterPhotos' || filter._ === 'inputMessagesFilterGif') return 'image'
+  if (filter._ === 'inputMessagesFilterPhotos') return 'image'
+  // GIFs can be uploaded as either image or file media (e.g. Matrix m.file).
+  // Let matchesMessageFilter inspect MIME types instead of excluding file GIFs.
   if (
     filter._ === 'inputMessagesFilterVideo'
     || filter._ === 'inputMessagesFilterDocument'
