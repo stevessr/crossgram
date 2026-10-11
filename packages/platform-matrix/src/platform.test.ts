@@ -260,6 +260,73 @@ describe('MatrixPlatform', () => {
       .rejects.toThrow(/no longer pending/)
   })
 
+  it('uses one stable sync snapshot across request-list pages', async () => {
+    let syncs = 0
+    const invitation = (room: string) => ({ invite_state: { events: [
+      event('m.room.member', { membership: 'invite' }, {
+        id: `$invite-${room}`, stateKey: '@me:example.org', sender: '@alice:example.org',
+      }),
+    ] } })
+    const fetch = routeFetch((url) => {
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      syncs++
+      if (syncs === 1) return json({ next_batch: 's1', rooms: { invite: {
+        '!a:example.org': invitation('a'), '!b:example.org': invitation('b'),
+      } } })
+      return json({ next_batch: 's2', rooms: { invite: { '!c:example.org': invitation('c') } } })
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+    const first = await platform.getRequests(session, { limit: 1 })
+    const second = await platform.getRequests(session, { limit: 1, cursor: first.nextCursor })
+    expect(syncs).toBe(1)
+    expect([first.requests[0]?.group?.id, second.requests[0]?.group?.id]).toEqual([
+      '!a:example.org', '!b:example.org',
+    ])
+    const refreshed = await platform.getRequests(session)
+    expect(syncs).toBe(2)
+    expect(refreshed.requests).toEqual(expect.arrayContaining([
+      expect.objectContaining({ state: 'pending', group: expect.objectContaining({ id: '!c:example.org' }) }),
+      expect.objectContaining({ state: 'rejected', group: expect.objectContaining({ id: '!a:example.org' }) }),
+      expect.objectContaining({ state: 'rejected', group: expect.objectContaining({ id: '!b:example.org' }) }),
+    ]))
+  })
+
+  it('serializes conflicting decisions and ignores stale invited-room snapshots', async () => {
+    const join = Promise.withResolvers<Response>()
+    const actions: string[] = []
+    const fetch = routeFetch((url) => {
+      if (url.pathname.endsWith('/sync')) return json({
+        next_batch: 's1', rooms: { invite: { '!room:example.org': { invite_state: { events: [
+          event('m.room.member', { membership: 'invite' }, {
+            stateKey: '@me:example.org', sender: '@alice:example.org', id: '$invite',
+          }),
+        ] } } } },
+      })
+      if (url.pathname.endsWith('/join')) {
+        actions.push('join')
+        return join.promise
+      }
+      if (url.pathname.endsWith('/leave')) {
+        actions.push('leave')
+        return json({})
+      }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+    const original = (await platform.getRequests(session)).requests[0]!
+    const accepting = platform.resolveRequest(session, original.id, 'accept')
+    await expect(platform.resolveRequest(session, original.id, 'reject'))
+      .rejects.toThrow(/already in progress/)
+    join.resolve(json({ room_id: '!room:example.org' }))
+    expect((await accepting).state).toBe('accepted')
+    const later = await platform.getRequests(session)
+    expect(later.requests).toHaveLength(1)
+    expect(later.requests[0]).toMatchObject({ id: original.id, state: 'accepted' })
+    await expect(platform.resolveRequest(session, original.id, 'reject'))
+      .rejects.toThrow(/no longer pending/)
+    expect(actions).toEqual(['join'])
+  })
+
   it('keeps an invitation pending when an accept operation fails', async () => {
     let attempts = 0
     const fetch = routeFetch((url) => {
