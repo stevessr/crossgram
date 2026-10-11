@@ -3,8 +3,8 @@
   "version": "0.0.0-experimental",
   "private": true,
   "type": "module",
-  "main": "./src/envelope.ts",
+  "main": "./src/index.ts",
   "exports": {
-    ".": "./src/envelope.ts"
+    ".": "./src/index.ts"
   }
 }
