@@ -24,7 +24,10 @@ export class WebSocketBridge extends Duplex implements ServerTransportSocket {
     this._ws.on('message', (data: Buffer, isBinary: boolean) => {
       if (this._ended || !isBinary) return
       // ws reuses the buffer after the listener returns; copy for async decode.
-      if (!this.push(new Uint8Array(data))) this._ws.pause()
+      // Some runtimes (notably Bun's Node-compatible HTTP upgrade path) expose
+      // a WebSocket without ws's pause()/resume() flow-control helpers. The
+      // stream remains usable without those optional backpressure controls.
+      if (!this.push(new Uint8Array(data))) this._ws.pause?.()
     })
     this._ws.on('close', () => this._endStream())
     this._ws.on('error', () => this._endStream())
@@ -56,7 +59,7 @@ export class WebSocketBridge extends Duplex implements ServerTransportSocket {
   }
 
   override _read(): void {
-    this._ws.resume()
+    this._ws.resume?.()
   }
 
   // TCP-only tunables; WebSocket framing has no equivalent.
