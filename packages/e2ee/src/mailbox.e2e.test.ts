@@ -4,7 +4,7 @@ import {
   MemoryReplayGuard, generateDeviceIdentity, openMessage, publicDevice, sealMessage,
 } from './envelope.js'
 import {
-  MemoryDevicePinStore, bundleFingerprint, exportDeviceBundle, openFromPinnedDevice,
+  MemoryDevicePinStore, accountDeviceFingerprint, bundleFingerprint, exportDeviceBundle, openFromPinnedDevice,
   sealToPinnedDevices, verifyAndPinDevice,
 } from './devices.js'
 
@@ -21,10 +21,10 @@ describe('opaque E2EE mailbox transport', () => {
     const receiverPins = new MemoryDevicePinStore()
     const senderPins = new MemoryDevicePinStore()
     const senderBundle = exportDeviceBundle(sender)
-    await verifyAndPinDevice(senderPins, 'alice', senderBundle, bundleFingerprint(senderBundle))
+    await verifyAndPinDevice(senderPins, 'alice', senderBundle, accountDeviceFingerprint('alice', senderBundle))
     for (const receiver of [receiverPhone, receiverLaptop]) {
       const bundle = exportDeviceBundle(receiver)
-      await verifyAndPinDevice(receiverPins, 'bob', bundle, bundleFingerprint(bundle))
+      await verifyAndPinDevice(receiverPins, 'bob', bundle, accountDeviceFingerprint('bob', bundle))
     }
     let time = 12345
     const relay = new MemoryEncryptedMailbox(async (from, to, conversation) =>
