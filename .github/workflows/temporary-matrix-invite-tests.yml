@@ -1,0 +1,94 @@
+# TEMPORARY: Matrix room invitation PR #2 verification.
+# Remove this file before merging into main.
+name: temporary-matrix-invite-tests
+
+on:
+  push:
+    branches:
+      - feat/matrix-room-invite-inbox
+  pull_request:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/temporary-matrix-invite-tests.yml'
+      - 'packages/platform-matrix/**'
+      - 'packages/bridge/**'
+      - 'vitest.config.mts'
+      - 'vitest.mtproto-e2e.config.mts'
+      - 'package.json'
+      - 'yarn.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: matrix-invite-pr2-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  invite-unit:
+    name: Invitation + bridge unit (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    timeout-minutes: 25
+    env:
+      HUSKY: '0'
+    steps:
+      - name: Check out
+        uses: actions/checkout@v6
+      - name: Set up Node.js 24
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Install immutable dependencies
+        run: yarn install --immutable
+        env:
+          YARN_ENABLE_SCRIPTS: 'true'
+      - name: Matrix client and invitation adapter unit tests
+        run: yarn vitest run --config vitest.config.mts packages/platform-matrix/src/client.test.ts packages/platform-matrix/src/platform.test.ts --maxWorkers=2
+      - name: Bridge request inbox and reconciliation tests
+        run: yarn vitest run --config vitest.config.mts packages/bridge/src/request-inbox.test.ts packages/bridge/src/platform-manager.test.ts --maxWorkers=2
+
+  invite-e2e:
+    name: Matrix invitation HTTP/proxy E2E
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HUSKY: '0'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: corepack enable
+      - name: Install immutable dependencies
+        run: yarn install --immutable
+        env:
+          YARN_ENABLE_SCRIPTS: 'true'
+      - name: Run Matrix adapter E2E tests
+        run: yarn vitest run --config vitest.mtproto-e2e.config.mts packages/platform-matrix/src/e2e.test.ts --maxWorkers=1
+
+  typecheck:
+    name: TypeScript monorepo typecheck
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      HUSKY: '0'
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - run: corepack enable
+      - name: Install immutable dependencies
+        run: yarn install --immutable
+        env:
+          YARN_ENABLE_SCRIPTS: 'true'
+      - name: Check TypeScript
+        run: yarn typecheck
