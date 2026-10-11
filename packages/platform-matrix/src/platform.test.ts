@@ -327,6 +327,37 @@ describe('MatrixPlatform', () => {
     ])
   })
 
+  it('retries the same sync token if an invitation event cannot be delivered', async () => {
+    let sync = 0
+    const tokens: Array<string | null> = []
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      const url = new URL(String(input))
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      tokens.push(url.searchParams.get('since'))
+      sync++
+      if (sync === 1) return json({ next_batch: 's0' })
+      if (sync <= 3) return json({
+        next_batch: 's1',
+        rooms: { invite: { '!retry:example.org': { invite_state: { events: [
+          event('m.room.member', { membership: 'invite' }, {
+            stateKey: '@me:example.org', sender: '@alice:example.org', id: '$retry',
+          }),
+        ] } } } },
+      })
+      return pendingUntilAbort(init?.signal)
+    })
+    const platform = createPlatform(fetch, { syncTimeoutMs: 50, userId: '@me:example.org' })
+    let deliveries = 0
+    const unsubscribe = await platform.subscribe(session, (event) => {
+      if (event.type !== 'request') return
+      deliveries++
+      if (deliveries === 1) throw new Error('temporary delivery failure')
+    })
+    await vi.waitFor(() => expect(deliveries).toBe(2))
+    await unsubscribe()
+    expect(tokens.slice(0, 3)).toEqual([null, 's0', 's0'])
+  })
+
   it('subscribes from an initial token and emits messages, edits, redactions, receipts, and conversation changes', async () => {
     let sync = 0
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
