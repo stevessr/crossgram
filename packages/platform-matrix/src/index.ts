@@ -264,13 +264,11 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
           || (query.maxTimestamp !== undefined && message.timestamp > query.maxTimestamp)) continue
         if (query.mediaKind && !message.content.parts.some((part) =>
           part.type === 'media' && part.media.kind === query.mediaKind)) continue
-        // A filter-only scan still needs to satisfy text filtering if the
-        // homeserver omitted a content type it cannot index.
         seen.add(message.id)
         messages.push(message)
       }
 
-      if (!nextCursor || nextCursor === cursor || messages.length >= limit || !events.length) break
+      if (!nextCursor || nextCursor === cursor || messages.length >= limit) break
       cursor = nextCursor
     }
     return {
