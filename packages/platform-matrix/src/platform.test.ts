@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { IMEvent, PlatformSession } from '@mtproto-relay/bridge'
+import { messageMentionsUser, type IMEvent, type PlatformSession } from '@mtproto-relay/bridge'
 import { MatrixPlatform } from './index.js'
-import type { MatrixSyncResponse } from './types.js'
+import type { MatrixRoomMessageContent, MatrixSyncResponse } from './types.js'
 
 const session: PlatformSession = {
   platformSessionId: 'matrix-session',
@@ -178,6 +178,70 @@ describe('MatrixPlatform', () => {
       id: 'media', kind: 'file', size: 5, locator: { mxc: 'mxc://example.org/file' },
     }, { offset: 1, limit: 3 })) chunks.push(...chunk)
     expect(chunks).toEqual([2, 3, 4])
+  })
+
+  it('sends mention metadata over Matrix HTTP, preserves edits, and reads notification targets', async () => {
+    const outgoing: MatrixRoomMessageContent[] = []
+    const fetch = routeFetch((url, init) => {
+      if (url.pathname.includes('/send/m.room.message/')) {
+        outgoing.push(JSON.parse(String(init?.body)) as MatrixRoomMessageContent)
+        return json({ event_id: '$sent-' + outgoing.length })
+      }
+      if (url.pathname.endsWith('/messages')) return json({
+        end: 'next', chunk: [
+          event('m.room.message', {
+            msgtype: 'm.text', body: 'hi 👋 @Alice',
+            format: 'org.matrix.custom.html',
+            formatted_body: 'hi 👋 <a href="https://matrix.to/#/%40alice%3Aexample.org">@Alice</a>',
+            'm.mentions': { user_ids: ['@alice:example.org', '@me:example.org'] },
+          }, { id: '$incoming', sender: '@bob:example.org', ts: 3_000 }),
+          event('m.room.message', {
+            msgtype: 'm.text', body: 'plain @Alice',
+          }, { id: '$no-mentions', sender: '@bob:example.org', ts: 2_000 }),
+        ],
+      })
+      throw new Error('unexpected request: ' + url)
+    })
+    const platform = createPlatform(fetch)
+    const body = 'hi 👋 @Alice'
+    const mention = {
+      type: 'mention' as const, offset: body.indexOf('@Alice'), length: 6,
+      userId: '@alice:example.org',
+    }
+    await platform.sendMessage(session, { id: '!room:example.org' }, {
+      replyToId: '$reply',
+      parts: [{ type: 'text', text: body, entities: [mention] }],
+    })
+    expect(outgoing[0]).toMatchObject({
+      body,
+      format: 'org.matrix.custom.html',
+      'm.mentions': { user_ids: ['@alice:example.org'] },
+      'm.relates_to': { 'm.in_reply_to': { event_id: '$reply' } },
+    })
+    expect(outgoing[0]?.formatted_body).toContain('matrix.to/#/%40alice%3Aexample.org')
+
+    await platform.editMessage(session, {
+      conversationId: '!room:example.org', messageId: '$original', targetId: '$original',
+    }, { parts: [{ type: 'text', text: body, entities: [mention] }] })
+    expect(outgoing[1]).toMatchObject({
+      body: '* ' + body,
+      'm.mentions': { user_ids: ['@alice:example.org'] },
+      'm.new_content': {
+        body, 'm.mentions': { user_ids: ['@alice:example.org'] },
+      },
+      'm.relates_to': { rel_type: 'm.replace', event_id: '$original' },
+    })
+
+    const history = await platform.getHistory(session, { id: '!room:example.org' })
+    expect(history.messages[0]?.content.parts).toEqual([{
+      type: 'text', text: body, entities: [mention],
+    }])
+    expect(history.messages[0]?.metadata).toEqual({
+      matrixMentions: ['@alice:example.org', '@me:example.org'],
+    })
+    expect(messageMentionsUser(history.messages[0]!, '@me:example.org')).toBe(true)
+    expect(history.messages[1]?.content.parts).toEqual([{ type: 'text', text: 'plain @Alice' }])
+    expect(messageMentionsUser(history.messages[1]!, '@alice:example.org')).toBe(false)
   })
 
   it('maps members and Matrix power levels to bridge roles and permissions', async () => {
