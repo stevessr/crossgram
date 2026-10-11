@@ -7,7 +7,7 @@ import {
   serviceActionText, telegramMessageId, telegramReplyToMessageId,
   type IMConversation, type IMConversationMember, type IMConversationPermissions, type IMDialog, type IMDialogPage,
   type IMMedia, type IMMediaInput, type IMMediaUploadProbe,
-  type IMEvent, type IMMessage, type IMMessageInput, type IMMessageServiceAction, type IMPlatform, type IMReactionActor, type IMReactionContext,
+  type IMEvent, type IMMessage, type IMMessageInput, type IMMessagePinMutation, type IMMessageServiceAction, type IMPlatform, type IMReactionActor, type IMReactionContext,
   type IMReactionDefinition, type IMReactionSummary, type IMServiceMember, type IMTextEntity, type IMTransferProgress, type IMUser,
   type IMProjectableMessage, type IMConversationMemberModeration, type JsonValue, type PlatformSession,
 } from './platform.js'
@@ -1169,13 +1169,19 @@ export class DialogRpc {
     if (!projected) throw new RpcError(400, 'MSG_ID_INVALID')
     const ordinal = projected.parts.find((part) => part.tlMessageId === req.id)?.ordinal ?? 0
     const nativeId = projected.source.sourceIds?.[ordinal] ?? projected.source.id
+    let mutation: void | IMMessagePinMutation
     try {
-      await this._platform.setMessagePinned(this._session, conversation, nativeId, !req.unpin)
+      mutation = await this._platform.setMessagePinned(this._session, conversation, nativeId, !req.unpin)
     } catch (error) {
       this._throwMessageAction(error, 'CHAT_ADMIN_REQUIRED')
     }
     const now = Math.floor(Date.now() / 1000)
-    const published = await this._publishPinEvent(conversation, req.unpin ? [nativeId] : [], now)
+    if (mutation?.changed === false) {
+      // A repeated pin/unpin request made no native state change, so it must
+      // not allocate a new Telegram PTS or announce a phantom state update.
+      return { response: this._updates(conversation, [], now), published: true }
+    }
+    const published = await this._publishPinEvent(conversation, req.unpin ? [nativeId] : [], now, mutation)
     if (published) return { response: published, published: true }
 
     const pts = await this._reservePts(1, now, conversation)
@@ -1239,9 +1245,10 @@ export class DialogRpc {
       if (projected) tlIds.push(...projected.parts.map((part) => part.tlMessageId))
     }
 
+    let mutation: void | IMMessagePinMutation
     try {
       if (this._platform.clearPinnedMessages) {
-        await this._platform.clearPinnedMessages(this._session, conversation)
+        mutation = await this._platform.clearPinnedMessages(this._session, conversation)
       } else {
         for (const id of nativeIds) {
           await this._platform.setMessagePinned!(this._session, conversation, id, false)
@@ -1251,8 +1258,17 @@ export class DialogRpc {
       this._throwMessageAction(error, 'CHAT_ADMIN_REQUIRED')
     }
     const now = Math.floor(Date.now() / 1000)
+    if (mutation?.changed === false) {
+      const pts = conversation.kind === 'direct'
+        ? (await this._store.getUpdateState(this._session.platformSessionId)).pts
+        : await this._channelPts(conversation)
+      return {
+        affected: { _: 'messages.affectedHistory', pts, ptsCount: 0, offset: 0 },
+        updates: [], published: true,
+      }
+    }
     const published = await this._publishPinEvent(
-      conversation, nativeIds, now, { deliveredViaRpc: true },
+      conversation, nativeIds, now, mutation, { deliveredViaRpc: true },
     )
     if (published) {
       const pinUpdates = published.updates.filter((item) =>
@@ -1293,13 +1309,17 @@ export class DialogRpc {
     conversation: IMConversation,
     removedMessageIds: string[],
     timestamp: number,
+    mutation?: void | IMMessagePinMutation,
     options: PlatformEventDeliveryOptions = this._localDelivery(),
   ): Promise<tl.RawUpdates | undefined> {
     if (!this._onLocalEvent || !this._platform.getPinnedMessageIds) return
-    const pinnedMessageIds = await this._platform.getPinnedMessageIds(this._session, conversation)
+    const pinnedMessageIds = mutation?.pinnedMessageIds
+      ?? await this._platform.getPinnedMessageIds(this._session, conversation)
     const event: IMEvent = {
       type: 'message-pins',
-      eventId: `relay-pin:${conversation.id}:${Date.now()}:${Math.random()}`,
+      // Matrix returns the very same ID in /sync. Both paths now reuse one
+      // durable delivery key, even if the echo races with the originating RPC.
+      eventId: mutation?.eventId ?? `relay-pin:${conversation.id}:${Date.now()}:${Math.random()}`,
       conversation, pinnedMessageIds, removedMessageIds, timestamp,
     }
     const published = await this._onLocalEvent(this._session, event, options)
