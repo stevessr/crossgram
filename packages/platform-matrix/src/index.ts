@@ -235,7 +235,14 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     action: IMRequestAction,
   ): Promise<IMRequest<MatrixMediaLocator>> {
     const pending = [...this.pendingInvites.values()].find((request) => request.id === id)
-    if (!pending) throw new Error(`Unknown or no longer pending Matrix room invitation: ${id}`)
+    if (!pending) {
+      // A remote join/leave can succeed before the bridge persists the
+      // terminal inbox update. Allow the same callback to retry without
+      // issuing a second remote operation.
+      const resolved = [...this.locallyResolvedInvites.values()].find((request) => request.id === id)
+      if (resolved && resolved.state === (action === 'accept' ? 'accepted' : 'rejected')) return resolved
+      throw new Error(`Unknown or no longer pending Matrix room invitation: ${id}`)
+    }
     const roomId = pending.group!.id
     if (this.resolvingInvites.has(roomId)) {
       throw new Error(`Matrix room invitation resolution is already in progress: ${roomId}`)
@@ -498,11 +505,12 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     }
     for (const [roomId, room] of Object.entries(response.rooms?.join ?? {})) {
       const invite = this.pendingInvites.get(roomId)
-      if (invite) {
-        await handler({ type: 'request', request: { ...invite, state: 'accepted' } })
+      const settled = this.locallyResolvedInvites.get(roomId)
+      if (invite || settled) {
+        await handler({ type: 'request', request: { ...(invite ?? settled!), state: 'accepted' } })
         this.pendingInvites.delete(roomId)
+        this.locallyResolvedInvites.delete(roomId)
       }
-      this.locallyResolvedInvites.delete(roomId)
       const stateEvents = [
         ...(room.state?.events ?? []),
         ...(room.timeline?.events ?? []).filter((event) => event.state_key !== undefined),
@@ -539,11 +547,12 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     }
     for (const roomId of Object.keys(response.rooms?.leave ?? {})) {
       const invite = this.pendingInvites.get(roomId)
-      if (invite) {
-        await handler({ type: 'request', request: { ...invite, state: 'rejected' } })
+      const settled = this.locallyResolvedInvites.get(roomId)
+      if (invite || settled) {
+        await handler({ type: 'request', request: { ...(invite ?? settled!), state: 'rejected' } })
         this.pendingInvites.delete(roomId)
+        this.locallyResolvedInvites.delete(roomId)
       }
-      this.locallyResolvedInvites.delete(roomId)
     }
   }
 
