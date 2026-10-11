@@ -646,7 +646,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       this.rememberPollClosure(`${roomId}\0${relation.event_id}`)
     }
     const content = relation?.rel_type === 'm.replace' && raw['m.new_content'] ? raw['m.new_content'] : raw
-    const parts = pollStart ? matrixPollParts(content)
+    const parts: IMMessage<MatrixMediaLocator>['content']['parts'] = pollStart ? matrixPollParts(content)
       : pollEnd ? [{ type: 'text' as const, text: matrixEventText(event.content) || '投票已结束' }]
         : matrixMessageParts(content)
     if (!parts.length) return
