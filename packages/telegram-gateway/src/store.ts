@@ -87,15 +87,24 @@ export class RouteStore {
   async importTicket(token: Uint8Array, userId: string, dcId?: number): Promise<ExportTicket> {
     if (token.length !== 32) throw new Error('Invalid gateway authorization token')
     const key = createHash('sha256').update(token).digest('hex')
-    const value = await this.readTicket(key)
-    if (value.expiresAt < Date.now() || value.userId !== userId || (dcId !== undefined && value.dcId !== dcId) || !await this.load(value.parent)) {
-      throw new Error('Invalid or expired gateway authorization token')
+    // Moving an open ticket file does not serialize concurrent claimers on
+    // every Windows filesystem. O_EXCL ('wx') does, across processes as well
+    // as within one process. Keep the lock through validation and consumption.
+    const lockPath = this.path(key, 'claim')
+    const lock = await open(lockPath, 'wx', 0o600)
+    try {
+      const value = await this.readTicket(key)
+      if (value.expiresAt < Date.now() || value.userId !== userId || (dcId !== undefined && value.dcId !== dcId) || !await this.load(value.parent)) {
+        throw new Error('Invalid or expired gateway authorization token')
+      }
+      const claimed = this.path(key, `${randomUUID()}.claimed`)
+      await rename(this.path(key, 'ticket'), claimed)
+      await rm(claimed, { force: true })
+      return value
+    } finally {
+      await lock.close()
+      await rm(lockPath, { force: true })
     }
-    // Atomic claim: only one concurrent importer can consume this token.
-    const claimed = this.path(key, `${randomUUID()}.claimed`)
-    await rename(this.path(key, 'ticket'), claimed)
-    await rm(claimed, { force: true })
-    return value
   }
   async sessionPath(key: string): Promise<string> {
     const path = this.path(key, 'sqlite')
