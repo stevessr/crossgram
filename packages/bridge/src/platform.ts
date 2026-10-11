@@ -746,6 +746,15 @@ export interface IMTransferOptions {
   onProgress?: (progress: IMTransferProgress) => void | Promise<void>
 }
 
+export interface IMMessagePinMutation {
+  /** False means the upstream pin state already matched the request. */
+  changed: boolean
+  /** Reused by the live /sync echo and local MTProto RPC delivery. */
+  eventId?: string
+  /** Exact state written; avoids a second read racing with another room update. */
+  pinnedMessageIds?: string[]
+}
+
 export type IMMessageSendRejectionReason = 'permission-denied' | 'platform-rejected'
 
 /** A platform permanently rejected a send that must not be retried unchanged. */
@@ -941,18 +950,20 @@ export interface IMPlatform<TMediaLocator = unknown> {
     session: PlatformSession,
     conversation: IMConversationRef,
   ): Promise<string[]>
+  /** A native pin-state write can return its Matrix state event ID for durable deduplication. */
+  // Adapters without native state event IDs may keep returning void.
   /** Add or remove one upstream pinned event without overwriting other pins. */
   setMessagePinned?(
     session: PlatformSession,
     conversation: IMConversationRef,
     messageId: string,
     pinned: boolean,
-  ): Promise<void>
+  ): Promise<void | IMMessagePinMutation>
   /** Clear all upstream pinned messages as one operation when supported. */
   clearPinnedMessages?(
     session: PlatformSession,
     conversation: IMConversationRef,
-  ): Promise<void>
+  ): Promise<void | IMMessagePinMutation>
   /** Read notification overrides belonging to the current platform account. */
   getConversationNotificationSettings?(
     session: PlatformSession,
