@@ -45,6 +45,10 @@ multiple ordered Matrix events and retained as one logical bridge message.
   be needed for full multi-level navigation.
 - Full room-state snapshots are shared briefly between root-dialog and child-page
   requests to avoid refetching the complete `/sync` response for every page.
+- Full-state snapshots retry when an incremental sync changed the hierarchy in
+  flight; stale snapshots cannot overwrite newer parent/child links.
+- Forum topic IDs remain stable within a running bridge session when an empty
+  Matrix child receives its first message.
 
 ## Tests
 
