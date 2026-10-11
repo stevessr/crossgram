@@ -126,6 +126,44 @@ describe('MatrixClient', () => {
     expect(paths[2]).toMatch(/\/redact\/%24event%2Fwith%2Fslash\//)
   })
 
+  it('distinguishes missing encryption state from encrypted rooms', async () => {
+    const requests: string[] = []
+    let encrypted = false
+    const client = new MatrixClient({
+      homeserver: 'https://matrix.example.org', accessToken: 'secret',
+      fetch: async (input) => {
+        const url = new URL(String(input))
+        requests.push(url.pathname)
+        if (encrypted) return Response.json({ algorithm: 'm.megolm.v1.aes-sha2' })
+        return Response.json({ errcode: 'M_NOT_FOUND' }, { status: 404 })
+      },
+    })
+
+    await expect(client.hasRoomEncryption('!room:example.org')).resolves.toBe(false)
+    encrypted = true
+    await expect(client.hasRoomEncryption('!room:example.org')).resolves.toBe(true)
+    expect(requests).toEqual([
+      '/_matrix/client/v3/rooms/!room%3Aexample.org/state/m.room.encryption',
+      '/_matrix/client/v3/rooms/!room%3Aexample.org/state/m.room.encryption',
+    ])
+  })
+
+  it('fails closed on unauthorized or ambiguous encryption-state probes', async () => {
+    for (const [status, errcode] of [[403, 'M_FORBIDDEN'], [404, 'M_UNRECOGNIZED'], [500, 'M_UNKNOWN']] as const) {
+      const client = new MatrixClient({
+        homeserver: 'https://matrix.example.org', accessToken: 'secret',
+        fetch: async () => Response.json({ errcode }, { status }),
+      })
+      await expect(client.hasRoomEncryption('!room:example.org'))
+        .rejects.toMatchObject({ status, errcode })
+    }
+    const client = new MatrixClient({
+      homeserver: 'https://matrix.example.org', accessToken: 'secret',
+      fetch: async () => { throw new Error('network unavailable') },
+    })
+    await expect(client.hasRoomEncryption('!room:example.org')).rejects.toThrow('network unavailable')
+  })
+
   it('validates Matrix content URIs', () => {
     expect(parseMxc('mxc://example.org/a/b')).toEqual({ serverName: 'example.org', mediaId: 'a/b' })
     expect(() => parseMxc('https://example.org/a')).toThrow(/invalid Matrix content URI/)
