@@ -513,6 +513,43 @@ describe('MatrixPlatform', () => {
     expect(closed.message.content.inlineKeyboard).toBeUndefined()
   })
 
+
+  it('backfills verified counts for a closed poll in Matrix history', async () => {
+    const poll = event('m.poll.start', {
+      'm.poll.start': {
+        kind: 'm.poll.undisclosed',
+        question: { 'm.text': [{ body: 'Best fruit?' }] },
+        answers: [{ 'm.id': 'apple', 'm.text': [{ body: 'Apple' }] },
+          { 'm.id': 'pear', 'm.text': [{ body: 'Pear' }] }],
+      },
+    }, { id: '$poll', sender: '@alice:example.org', ts: 1_000 })
+    const end = event('m.poll.end', {
+      'm.relates_to': { rel_type: 'm.reference', event_id: '$poll' },
+      'm.text': [{ body: 'Voting closed' }],
+      'm.poll.results': { apple: 9999 },
+    }, { id: '$end', sender: '@alice:example.org', ts: 5_000 })
+    const response = (id: string, sender: string, selection: string) =>
+      event('m.poll.response', {
+        'm.relates_to': { rel_type: 'm.reference', event_id: '$poll' },
+        'm.selections': [selection],
+      }, { id, sender, ts: 4_000 })
+    const fetch = routeFetch((url) => {
+      if (url.pathname.endsWith('/messages')) return json({ chunk: [poll, end] })
+      if (url.pathname.includes('/relations/')) return json({
+        chunk: [response('$vote1', '@bob:example.org', 'apple'),
+          response('$vote2', '@carol:example.org', 'pear'), end],
+      })
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch)
+    const messages = (await platform.getHistory(session, { id: '!room:example.org' })).messages
+    expect(messages[0]).toMatchObject({ content: { parts: [{ type: 'poll', poll: {
+      question: 'Best fruit?', closed: true, totalVoters: 2,
+      counts: { apple: 1, pear: 1 },
+    } }] } })
+    expect(messages[0].content.inlineKeyboard).toBeUndefined()
+  })
+
   it('parses valid geo URIs into map cards and preserves malformed locations as text', async () => {
     const fetch = routeFetch((url) => {
       if (!url.pathname.endsWith('/messages')) throw new Error(`unexpected request: ${url}`)
