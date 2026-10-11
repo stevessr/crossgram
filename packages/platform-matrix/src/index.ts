@@ -5,7 +5,7 @@ import zhCN from './locales/zh-CN.yml'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialog,
   IMDialogPage, IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia,
-  IMMessage, IMMessageInput, IMMessageTarget, IMPageQuery, IMPlatform, IMReadTarget,
+  IMMessage, IMMessageInput, IMMessageSearchPage, IMMessageSearchQuery, IMMessageTarget, IMPageQuery, IMPlatform, IMReadTarget,
   IMTransferOptions, IMUser, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
@@ -53,6 +53,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   readonly platformKind = 'matrix'
   readonly capabilities: PlatformCapabilities = {
     history: true,
+    search: true,
     readState: { markRead: true, events: true },
     send: {
       text: true,
@@ -187,6 +188,95 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         return message ? [message] : []
       }),
       nextCursor: response.end,
+    }
+  }
+
+  async searchMessages(
+    _session: PlatformSession,
+    conversation: IMConversationRef,
+    query: IMMessageSearchQuery,
+  ): Promise<IMMessageSearchPage<MatrixMediaLocator>> {
+    const limit = clampLimit(query.limit)
+    if (!limit || (query.minTimestamp !== undefined && query.maxTimestamp !== undefined
+      && query.minTimestamp > query.maxTimestamp)) return { messages: [] }
+
+    const term = query.query.trim()
+    const hasFilters = query.fromUserId !== undefined || query.minTimestamp !== undefined
+      || query.maxTimestamp !== undefined || query.mediaKind !== undefined
+    // The Matrix full-text endpoint requires a non-empty search term. For
+    // filter-only searches, paginate room history instead of sending an invalid
+    // /search request. An empty, unfiltered search is not a history request.
+    if (!term && !hasFilters) return { messages: [] }
+
+    const messages: IMMessage<MatrixMediaLocator>[] = []
+    const seen = new Set<string>()
+    let cursor = query.cursor
+    let nextCursor: string | undefined
+    let total: number | undefined
+
+    // Time and m.msgtype are not standard Matrix search filters. Consume a
+    // bounded number of upstream pages to fill the requested page after local
+    // filtering, without dropping matches between opaque pagination tokens.
+    for (let pageNumber = 0; pageNumber < 10 && messages.length < limit; pageNumber++) {
+      const pageLimit = Math.min(100, limit - messages.length)
+      let events: MatrixEvent[]
+      if (term) {
+        const response = await this.client.searchRoomEvents({
+          searchTerm: term,
+          roomId: conversation.id,
+          fromUserId: query.fromUserId,
+          limit: pageLimit,
+          nextBatch: cursor,
+        })
+        const roomEvents = response.search_categories?.room_events
+        events = (roomEvents?.results ?? []).map((item) => item.result)
+        nextCursor = roomEvents?.next_batch
+        // The server count includes matches excluded by local media/time
+        // filters, so it is only meaningful when those filters are absent.
+        if (query.mediaKind === undefined && query.minTimestamp === undefined
+          && query.maxTimestamp === undefined) total = roomEvents?.count
+      } else {
+        const response = await this.client.getMessages(conversation.id, {
+          from: cursor,
+          dir: 'b',
+          limit: pageLimit,
+          filter: {
+            types: ['m.room.message'],
+            ...(query.fromUserId ? { senders: [query.fromUserId] } : {}),
+          },
+        })
+        this.ingestState(conversation.id, response.state ?? [])
+        events = response.chunk
+        nextCursor = response.end
+      }
+
+      for (const event of events) {
+        // Verify scope locally even though the homeserver received the filter.
+        if (event.type !== 'm.room.message' || (event.room_id && event.room_id !== conversation.id)
+          || (query.fromUserId && event.sender !== query.fromUserId)) continue
+        // A missing timestamp must not pass a requested date filter by using
+        // the normal timeline mapper's current-time fallback.
+        if ((query.minTimestamp !== undefined || query.maxTimestamp !== undefined)
+          && event.origin_server_ts === undefined) continue
+        const message = this.mapTimelineMessage(conversation.id, event)
+        if (!message || seen.has(message.id)) continue
+        if ((query.minTimestamp !== undefined && message.timestamp < query.minTimestamp)
+          || (query.maxTimestamp !== undefined && message.timestamp > query.maxTimestamp)) continue
+        if (query.mediaKind && !message.content.parts.some((part) =>
+          part.type === 'media' && part.media.kind === query.mediaKind)) continue
+        // A filter-only scan still needs to satisfy text filtering if the
+        // homeserver omitted a content type it cannot index.
+        seen.add(message.id)
+        messages.push(message)
+      }
+
+      if (!nextCursor || nextCursor === cursor || messages.length >= limit || !events.length) break
+      cursor = nextCursor
+    }
+    return {
+      messages,
+      nextCursor,
+      ...(total === undefined ? {} : { total }),
     }
   }
 
