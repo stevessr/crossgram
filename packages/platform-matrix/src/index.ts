@@ -306,11 +306,22 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     return this.client.getRoomPinnedEvents(conversation.id)
   }
 
-  /** Serialize local read/modify/write state requests so parallel pins cannot clobber one another. */
   async setMessagePinned(
     _session: PlatformSession, conversation: IMConversationRef, messageId: string, pinned: boolean,
   ): Promise<void> {
-    const roomId = conversation.id
+    await this.mutatePinnedEvents(conversation.id, (existing) => pinned
+      ? existing.includes(messageId) ? existing : [...existing, messageId]
+      : existing.filter((id) => id !== messageId))
+  }
+
+  async clearPinnedMessages(_session: PlatformSession, conversation: IMConversationRef): Promise<void> {
+    await this.mutatePinnedEvents(conversation.id, () => [])
+  }
+
+  /** Serialize room-state mutations, including clear-all, to avoid lost local writes. */
+  private async mutatePinnedEvents(
+    roomId: string, mutate: (existing: string[]) => string[],
+  ): Promise<void> {
     const previous = this.pinMutations.get(roomId)
     let release!: () => void
     const turn = new Promise<void>((resolve) => { release = resolve })
@@ -318,10 +329,10 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     await previous
     try {
       const existing = await this.client.getRoomPinnedEvents(roomId)
-      const next = pinned
-        ? existing.includes(messageId) ? existing : [...existing, messageId]
-        : existing.filter((id) => id !== messageId)
-      if (next.length !== existing.length) await this.client.setRoomPinnedEvents(roomId, next)
+      const next = mutate(existing)
+      if (next.length !== existing.length || next.some((id, index) => id !== existing[index])) {
+        await this.client.setRoomPinnedEvents(roomId, next)
+      }
     } finally {
       release()
       if (this.pinMutations.get(roomId) === turn) this.pinMutations.delete(roomId)
