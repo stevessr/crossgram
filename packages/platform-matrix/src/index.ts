@@ -272,7 +272,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     target: { conversationId: string, messageId: string },
     button: Extract<IMInlineKeyboardButton, { type: 'callback' }>,
   ): Promise<{ message?: string, alert?: boolean }> {
-    const match = /^matrix-poll-vote:(0|[1-9]\\d?)$/.exec(button.data)
+    const match = /^matrix-poll-vote:(0|[1-9]\d?)$/.exec(button.data)
     if (!match) return { message: '无效的投票选项', alert: true }
     const start = await this.client.getEvent(target.conversationId, target.messageId)
     if (!isMatrixPollStart(start.type) || start.unsigned?.redacted_because) {
@@ -284,7 +284,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     }
     const option = part.poll.answers[Number(match[1])]
     if (!option) return { message: '投票选项已失效', alert: true }
-    const pollKey = `${target.conversationId}\\0${start.event_id}`
+    const pollKey = `${target.conversationId}\0${start.event_id}`
     if (this.closedPolls.has(pollKey)) return { message: '投票已经结束', alert: true }
 
     // Matrix does not reject late votes automatically. Fail closed when the
@@ -566,7 +566,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     if (!raw) return
     const relation = raw['m.relates_to']
     if (pollEnd && relation?.rel_type === 'm.reference' && relation.event_id) {
-      this.rememberPollClosure(`${roomId}\\0${relation.event_id}`)
+      this.rememberPollClosure(`${roomId}\0${relation.event_id}`)
     }
     const content = relation?.rel_type === 'm.replace' && raw['m.new_content'] ? raw['m.new_content'] : raw
     const parts = pollStart ? matrixPollParts(content)
