@@ -1,0 +1,10 @@
+name = "crossgram-telegram-cdn-worker"
+main = "src/index.js"
+compatibility_date = "2026-10-12"
+
+# Set CROSSGRAM_TELEGRAM_ORIGIN to the public HTTPS origin of crossgram-telegram.
+# Never accept a client-provided upstream URL: this Worker is intentionally a
+# fixed-origin reverse proxy, not an open proxy.
+[vars]
+CROSSGRAM_TELEGRAM_ORIGIN = "https://telegram.example.com"
+
