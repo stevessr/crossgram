@@ -35,19 +35,19 @@ describe('E2EE untrusted-relay E2E boundaries', () => {
     const relay = new UntrustedRelay()
     const plaintext = 'private message over hostile infrastructure'
     const bytes = new TextEncoder().encode(plaintext)
-    relay.submit(sealMessage(bytes, 'conversation-123', alice, publicDevice(bobPhone)))
-    relay.submit(sealMessage(bytes, 'conversation-123', alice, publicDevice(bobLaptop)))
+    relay.submit(sealMessage(bytes, 'conversation-123', alice, publicDevice(bobPhone), { senderAccountId: 'alice', recipientAccountId: 'bob' }))
+    relay.submit(sealMessage(bytes, 'conversation-123', alice, publicDevice(bobLaptop), { senderAccountId: 'alice', recipientAccountId: 'bob' }))
     expect(relay.dump()).not.toContain(plaintext)
     const replay = new PersistentReplayStore()
     expect(new TextDecoder().decode(await openMessage(
       relay.read(0), 'conversation-123', bobPhone, publicDevice(alice), replay,
-    ))).toBe(plaintext)
-    await expect(openMessage(relay.read(0), 'conversation-123', bobLaptop, publicDevice(alice), replay))
+    , { senderAccountId: 'alice', recipientAccountId: 'bob' }))).toBe(plaintext)
+    await expect(openMessage(relay.read(0), 'conversation-123', bobLaptop, publicDevice(alice), replay, { senderAccountId: 'alice', recipientAccountId: 'bob' }))
       .rejects.toThrow('E2EE_CONTEXT_MISMATCH')
     expect(new TextDecoder().decode(await openMessage(
       relay.read(1), 'conversation-123', bobLaptop, publicDevice(alice), replay,
-    ))).toBe(plaintext)
-    await expect(openMessage(relay.read(0), 'conversation-123', bobPhone, publicDevice(alice), replay))
+    , { senderAccountId: 'alice', recipientAccountId: 'bob' }))).toBe(plaintext)
+    await expect(openMessage(relay.read(0), 'conversation-123', bobPhone, publicDevice(alice), replay, { senderAccountId: 'alice', recipientAccountId: 'bob' }))
       .rejects.toThrow('E2EE_REPLAY_DETECTED')
   })
 })
