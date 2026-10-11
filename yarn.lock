@@ -1902,6 +1902,12 @@ __metadata:
   languageName: unknown
   linkType: soft
 
+"@mtproto-relay/e2ee@workspace:packages/e2ee":
+  version: 0.0.0-use.local
+  resolution: "@mtproto-relay/e2ee@workspace:packages/e2ee"
+  languageName: unknown
+  linkType: soft
+
 "@mtproto-relay/group-auto-kick@workspace:packages/group-auto-kick":
   version: 0.0.0-use.local
   resolution: "@mtproto-relay/group-auto-kick@workspace:packages/group-auto-kick"
