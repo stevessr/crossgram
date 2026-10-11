@@ -297,6 +297,12 @@ export class PlatformSubscriptionManager {
   }
 
   private async _reconcileSession(platform: IMPlatform, session: PlatformSession): Promise<void> {
+    // Take the baseline BEFORE network reconciliation; a new live invitation
+    // delivered during the scan must not be mistaken for a withdrawn request.
+    const previousMatrixInvites = platform.platformKind === 'matrix'
+      ? (await this._store.listPendingRequests(session.platformSessionId))
+        .filter((request) => request.metadata?.matrixRoomInvite === true)
+      : []
     const authoritativeJoinedRoomIds = new Set<string>()
     if (platform.capabilities.history && platform.getDialogs) {
       const data = new PlatformDataService(
@@ -346,9 +352,8 @@ export class PlatformSubscriptionManager {
     // miss a join, decline or revoke transition while preserving an old pending
     // inbox row. Reconcile only Matrix invites, not other platform request kinds.
     if (platform.platformKind === 'matrix') {
-      const pending = await this._store.listPendingRequests(session.platformSessionId)
-      for (const request of pending) {
-        if (request.metadata?.matrixRoomInvite !== true || currentRequestIds.has(request.id)) continue
+      for (const request of previousMatrixInvites) {
+        if (currentRequestIds.has(request.id)) continue
         const roomId = request.group?.id
         await this._enqueue(session, {
           type: 'request',
