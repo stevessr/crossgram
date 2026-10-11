@@ -262,6 +262,75 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     }
   }
 
+  /**
+   * Telegram's ordinary poll RPC is intentionally not advertised. Single-choice
+   * Matrix polls use the bridge's callback keyboard instead, with native
+   * MSC3381 response events sent under the current Matrix account.
+   */
+  async clickInlineButton(
+    _session: PlatformSession,
+    target: { conversationId: string, messageId: string },
+    button: Extract<IMInlineKeyboardButton, { type: 'callback' }>,
+  ): Promise<{ message?: string, alert?: boolean }> {
+    const match = /^matrix-poll-vote:(0|[1-9]\\d?)$/.exec(button.data)
+    if (!match) return { message: '无效的投票选项', alert: true }
+    const start = await this.client.getEvent(target.conversationId, target.messageId)
+    if (!isMatrixPollStart(start.type) || start.unsigned?.redacted_because) {
+      return { message: '投票不存在或已经撤回', alert: true }
+    }
+    const part = matrixPollParts(start.content).find((part) => part.type === 'poll')
+    if (part?.type !== 'poll' || part.poll.maxSelections !== 1) {
+      return { message: '此投票不支持单选快捷提交', alert: true }
+    }
+    const option = part.poll.answers[Number(match[1])]
+    if (!option) return { message: '投票选项已失效', alert: true }
+    const pollKey = `${target.conversationId}\\0${start.event_id}`
+    if (this.closedPolls.has(pollKey)) return { message: '投票已经结束', alert: true }
+
+    // Matrix does not reject late votes automatically. Fail closed when the
+    // relation list is incomplete or the homeserver cannot verify closure.
+    const seen = new Set<string>()
+    let from: string | undefined
+    let exhausted = false
+    for (let page = 0; page < 100; page++) {
+      const relations = await this.client.getRelations(target.conversationId, target.messageId, {
+        from, limit: 100,
+      })
+      if (relations.chunk.some((event) =>
+        isMatrixPollEnd(event.type) && !event.unsigned?.redacted_because
+        && matrixReference(event.content) === target.messageId)) {
+        this.rememberPollClosure(pollKey)
+        return { message: '投票已经结束', alert: true }
+      }
+      if (!relations.next_batch) {
+        exhausted = true
+        break
+      }
+      if (seen.has(relations.next_batch)) break
+      seen.add(relations.next_batch)
+      from = relations.next_batch
+    }
+    if (!exhausted) return { message: '暂时无法确认投票状态，请稍后重试', alert: true }
+
+    const unstable = start.type === 'org.matrix.msc3381.poll.start'
+    await this.client.sendEvent(target.conversationId,
+      unstable ? 'org.matrix.msc3381.poll.response' : 'm.poll.response', {
+        'm.relates_to': { rel_type: 'm.reference', event_id: target.messageId },
+        ...(unstable
+          ? { 'org.matrix.msc3381.poll.response': { answers: [option.id] } }
+          : { 'm.selections': [option.id], 'm.poll.response': { answers: [option.id] } }),
+      })
+    return { message: '投票已提交，可再次选择修改投票' }
+  }
+
+  private rememberPollClosure(key: string): void {
+    this.closedPolls.add(key)
+    if (this.closedPolls.size > 2_000) {
+      const oldest = this.closedPolls.values().next().value
+      if (oldest !== undefined) this.closedPolls.delete(oldest)
+    }
+  }
+
   async editMessage(
     session: PlatformSession,
     target: IMMessageTarget,
@@ -488,13 +557,17 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         metadata: { matrixEncrypted: true },
       }
     }
-    const pollStart = event.type === 'm.poll.start' || event.type === 'org.matrix.msc3381.poll.start'
-    const pollEnd = event.type === 'm.poll.end' || event.type === 'org.matrix.msc3381.poll.end'
+    const pollStart = isMatrixPollStart(event.type)
+    const pollEnd = isMatrixPollEnd(event.type)
     const location = event.type === 'm.location' || event.type === 'org.matrix.msc3488.location'
     // Poll responses do not have a text fallback and must not appear as separate chat messages.
     if (!pollStart && !pollEnd && !location && event.type !== 'm.room.message') return
-    const raw = event.content as MatrixRoomMessageContent
+    const raw = matrixObject(event.content) as MatrixRoomMessageContent | undefined
+    if (!raw) return
     const relation = raw['m.relates_to']
+    if (pollEnd && relation?.rel_type === 'm.reference' && relation.event_id) {
+      this.rememberPollClosure(`${roomId}\\0${relation.event_id}`)
+    }
     const content = relation?.rel_type === 'm.replace' && raw['m.new_content'] ? raw['m.new_content'] : raw
     const parts = pollStart ? matrixPollParts(content)
       : pollEnd ? [{ type: 'text' as const, text: matrixEventText(event.content) || '投票已结束' }]
@@ -512,7 +585,15 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       replyToId: pollEnd && relation?.rel_type === 'm.reference'
         ? relation.event_id
         : content['m.relates_to']?.['m.in_reply_to']?.event_id,
-      content: { parts },
+      content: {
+        parts,
+        ...(pollStart && parts[0]?.type === 'poll' && parts[0].poll.maxSelections === 1
+          && !this.closedPolls.has(`${roomId}\\0${messageId}`)
+          ? { inlineKeyboard: { rows: parts[0].poll.answers.map((answer, index) => ({
+              buttons: [{ type: 'callback' as const, text: answer.text.slice(0, 128), data: `matrix-poll-vote:${index}` }],
+            })) } }
+          : {}),
+      },
     }
   }
 
@@ -624,6 +705,20 @@ function matrixMessageParts(content: MatrixRoomMessageContent): IMMessage<Matrix
       locator: { mxc },
     },
   }]
+}
+
+function isMatrixPollStart(type: string): boolean {
+  return type === 'm.poll.start' || type === 'org.matrix.msc3381.poll.start'
+}
+
+function isMatrixPollEnd(type: string): boolean {
+  return type === 'm.poll.end' || type === 'org.matrix.msc3381.poll.end'
+}
+
+function matrixReference(content: unknown): string | undefined {
+  const relation = matrixObject(matrixObject(content)?.['m.relates_to'])
+  return relation?.rel_type === 'm.reference' && typeof relation.event_id === 'string'
+    ? relation.event_id : undefined
 }
 
 /** Parse only RFC 5870 point coordinates; malformed or out-of-range locations stay textual. */
