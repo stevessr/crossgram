@@ -338,6 +338,7 @@ describe('MatrixPlatform', () => {
     const platform = createPlatform(fetch, { userId: '@me:example.org' })
     await platform.getDialogs(session)
     const members = await platform.getConversationMembers(session, { id: '!room:example.org' })
+    expect((await platform.getDialogs(session)).dialogs[0]?.conversation.selfPermissions?.pinMessages).toBe(false)
 
     expect(members.total).toBe(2)
     expect(members.members.find((item) => item.user.id === '@alice:example.org')).toMatchObject({
@@ -656,6 +657,199 @@ describe('MatrixPlatform', () => {
     await vi.waitFor(() => expect(deliveries).toBe(2), { timeout: 4_000 })
     await unsubscribe()
     expect(tokens.slice(0, 3)).toEqual([null, 's0', 's0'])
+  })
+
+  it('treats missing Matrix messages as absent but propagates permission errors', async () => {
+    const fetch = routeFetch((url) => {
+      if (url.pathname.endsWith('/event/%24missing')) {
+        return json({ errcode: 'M_NOT_FOUND' }, { status: 404 })
+      }
+      if (url.pathname.endsWith('/event/%24forbidden')) {
+        return json({ errcode: 'M_FORBIDDEN' }, { status: 403 })
+      }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch)
+    await expect(platform.getMessage(session, { id: '!room:example.org' }, '$missing'))
+      .resolves.toBeNull()
+    await expect(platform.getMessage(session, { id: '!room:example.org' }, '$forbidden'))
+      .rejects.toMatchObject({ status: 403, errcode: 'M_FORBIDDEN' })
+  })
+
+  it('pins and unpins Matrix events without losing other pins in concurrent writes', async () => {
+    let pinned: string[] = []
+    let muted = false
+    const requests: string[] = []
+    const fetch = routeFetch(async (url, init) => {
+      const method = init?.method ?? 'GET'
+      requests.push(`${method} ${url.pathname}`)
+      if (url.pathname.endsWith('/state/m.room.pinned_events')) {
+        if (method === 'GET') return json({ pinned })
+        pinned = (JSON.parse(init?.body as string) as { pinned: string[] }).pinned
+        return json({ event_id: '$pins' })
+      }
+      if (url.pathname.includes('/pushrules/global/room/')) {
+        if (method === 'GET') return muted
+          ? json({ actions: ['dont_notify'], enabled: true })
+          : json({ errcode: 'M_NOT_FOUND' }, { status: 404 })
+        muted = method === 'PUT'
+        return json({})
+      }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch)
+    const conversation = { id: '!room:example.org' }
+    expect(platform.capabilities.messageActions?.pin).toEqual({ read: true, write: true })
+    expect(platform.capabilities.notifications).toEqual({ read: true, mute: true })
+
+    await Promise.all([
+      platform.setMessagePinned(session, conversation, '$one', true),
+      platform.setMessagePinned(session, conversation, '$two', true),
+    ])
+    expect(await platform.getPinnedMessageIds(session, conversation)).toEqual(['$one', '$two'])
+    await platform.setMessagePinned(session, conversation, '$one', true)
+    expect(requests.filter((request) => request.startsWith('PUT ') && request.includes('/state/')))
+      .toHaveLength(2)
+    await platform.setMessagePinned(session, conversation, '$one', false)
+    expect(await platform.getPinnedMessageIds(session, conversation)).toEqual(['$two'])
+    await Promise.all([
+      platform.clearPinnedMessages(session, conversation),
+      platform.setMessagePinned(session, conversation, '$after-clear', true),
+    ])
+    expect(await platform.getPinnedMessageIds(session, conversation)).toEqual(['$after-clear'])
+    const writesBefore = requests.filter((request) =>
+      request.startsWith('PUT ') && request.includes('/state/')).length
+    await platform.clearPinnedMessages(session, conversation)
+    await platform.clearPinnedMessages(session, conversation)
+    expect(await platform.getPinnedMessageIds(session, conversation)).toEqual([])
+    expect(requests.filter((request) =>
+      request.startsWith('PUT ') && request.includes('/state/'))).toHaveLength(writesBefore + 1)
+
+    await platform.setConversationNotificationSettings(session, conversation, { muted: true })
+    expect(await platform.getConversationNotificationSettings(session, conversation))
+      .toEqual({ muted: true })
+    await platform.setConversationNotificationSettings(session, conversation, { muted: false })
+    expect(await platform.getConversationNotificationSettings(session, conversation))
+      .toEqual({ muted: false })
+  })
+
+  it('streams external pins and echoes local Matrix state IDs for durable deduplication', async () => {
+    const roomId = '!room:example.org'
+    let sync = 0
+    let nativePins = ['$one']
+    let releaseEcho!: (response: Response) => void
+    const echo = new Promise<Response>((resolve) => { releaseEcho = resolve })
+    const state = (pinned: string[], id: string) =>
+      event('m.room.pinned_events', { pinned }, { id, stateKey: '', ts: 1_000 * sync })
+    const roomSync = (next: string, pinned: string[], id: string) => json({
+      next_batch: next,
+      rooms: { join: { [roomId]: { state: { events: [state(pinned, id)] } } } },
+    })
+    const fetch = routeFetch((url, init) => {
+      if (url.pathname.endsWith('/sync')) {
+        sync++
+        if (sync === 1) return json({
+          next_batch: 's1', rooms: { join: { [roomId]: {
+            state: { events: [...roomState, state(['$one'], '$initial')] },
+          } } },
+        })
+        if (sync === 2) {
+          nativePins = ['$one', '$two']
+          return roomSync('s2', nativePins, '$external-add')
+        }
+        if (sync === 3) {
+          nativePins = ['$two', '$one']
+          return roomSync('s3', nativePins, '$external-order')
+        }
+        if (sync === 4) {
+          nativePins = ['$two']
+          return roomSync('s4', nativePins, '$external-remove')
+        }
+        if (sync === 5) return echo
+        return pendingUntilAbort(init?.signal)
+      }
+      if (url.pathname.endsWith('/state/m.room.pinned_events')) {
+        if (init?.method === 'PUT') {
+          nativePins = (JSON.parse(String(init.body)) as { pinned: string[] }).pinned
+          return json({ event_id: '$local' })
+        }
+        return json({ pinned: nativePins })
+      }
+      throw new Error(`unexpected Matrix HTTP call: ${url}`)
+    })
+    const platform = createPlatform(fetch, { userId: session.userId, syncTimeoutMs: 50 })
+    const observed: IMEvent[] = []
+    const unsubscribe = await platform.subscribe(session, (value) => { observed.push(value) })
+    await vi.waitFor(() => expect(observed.filter((item) => item.type === 'message-pins')).toHaveLength(3))
+    const pins = observed.filter((item): item is Extract<IMEvent, { type: 'message-pins' }> =>
+      item.type === 'message-pins')
+    expect(pins.map((item) => ({
+      eventId: item.eventId,
+      pinned: item.pinnedMessageIds,
+      removed: item.removedMessageIds,
+    }))).toEqual([
+      { eventId: '$external-add', pinned: ['$one', '$two'], removed: [] },
+      { eventId: '$external-order', pinned: ['$two', '$one'], removed: [] },
+      { eventId: '$external-remove', pinned: ['$two'], removed: ['$one'] },
+    ])
+
+    const mutation = await platform.setMessagePinned(session, { id: roomId }, '$self', true)
+    expect(mutation).toEqual({
+      changed: true, eventId: '$local', pinnedMessageIds: ['$two', '$self'],
+    })
+    // A redundant write never allocates a second Matrix state event or PTS.
+    await expect(platform.setMessagePinned(session, { id: roomId }, '$self', true))
+      .resolves.toEqual({ changed: false, pinnedMessageIds: ['$two', '$self'] })
+    expect(nativePins).toEqual(['$two', '$self'])
+    releaseEcho(roomSync('s5', nativePins, '$local'))
+    await vi.waitFor(() =>
+      expect(observed.filter((item) => item.type === 'message-pins')).toHaveLength(4))
+    await unsubscribe()
+    expect(observed.at(-1)).toMatchObject({
+      type: 'message-pins', eventId: '$local',
+      pinnedMessageIds: ['$two', '$self'], removedMessageIds: [],
+    })
+  })
+
+  it('retries a rejected pin event without advancing the Matrix sync token or snapshot', async () => {
+    const roomId = '!room:example.org'
+    const requestedTokens: Array<string | null> = []
+    const fetch = routeFetch((url, init) => {
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      requestedTokens.push(url.searchParams.get('since'))
+      if (requestedTokens.length === 1) {
+        return json({ next_batch: 'start', rooms: { join: {
+          [roomId]: { state: { events: [
+            ...roomState,
+            event('m.room.pinned_events', { pinned: ['$old'] }, { id: '$initial', stateKey: '' }),
+          ] } },
+        } } })
+      }
+      if (url.searchParams.get('since') === 'start') {
+        return json({ next_batch: 'advance', rooms: { join: {
+          [roomId]: { state: { events: [
+            event('m.room.pinned_events', { pinned: ['$new'] }, {
+              id: '$retry-pin', stateKey: '', ts: 2_000,
+            }),
+          ] } },
+        } } })
+      }
+      return pendingUntilAbort(init?.signal)
+    })
+    const platform = createPlatform(fetch, { userId: session.userId, syncTimeoutMs: 50 })
+    const delivered: Array<Extract<IMEvent, { type: 'message-pins' }>> = []
+    const unsubscribe = await platform.subscribe(session, async (value) => {
+      if (value.type !== 'message-pins') return
+      delivered.push(value)
+      if (delivered.length === 1) throw new Error('temporary delivery failure')
+    })
+    await vi.waitFor(() => expect(delivered).toHaveLength(2), { timeout: 4_000 })
+    await unsubscribe()
+    expect(requestedTokens.slice(0, 3)).toEqual([null, 'start', 'start'])
+    expect(delivered[0]).toMatchObject({
+      eventId: '$retry-pin', pinnedMessageIds: ['$new'], removedMessageIds: ['$old'],
+    })
+    expect(delivered[1]).toEqual(delivered[0])
   })
 
   it('subscribes from an initial token and emits messages, edits, redactions, receipts, and conversation changes', async () => {

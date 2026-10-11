@@ -5,13 +5,13 @@ import zhCN from './locales/zh-CN.yml'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialog,
   IMDialogPage, IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia,
-  IMInlineKeyboardButton, IMMessage, IMMessageInput, IMMessageSearchPage, IMMessageSearchQuery, IMMessageTarget, IMPageQuery, IMPlatform, IMReadTarget,
+  IMInlineKeyboardButton, IMMessage, IMMessageInput, IMMessagePinMutation, IMMessageSearchPage, IMMessageSearchQuery, IMMessageTarget, IMPageQuery, IMPlatform, IMReadTarget,
   IMRequest, IMRequestAction, IMRequestPage, IMRequestQuery,
   IMReactionActorPage, IMReactionActorPageRequest, IMReactionContext, IMReactionDefinition, IMReactionTarget,
   IMStickerSendPlan, IMTransferOptions, IMUser, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
-import { MatrixClient, type MatrixClientOptions } from './client.js'
+import { MatrixClient, MatrixHttpError, type MatrixClientOptions } from './client.js'
 import { matrixMentionUserIds, matrixTextEntities, textContent } from './formatting.js'
 import { countClosedMatrixPoll, type MatrixPollTally } from './poll-results.js'
 import type {
@@ -78,9 +78,11 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       delete: { own: { supported: true }, others: { supported: true } },
       edit: { mode: 'native' },
       forward: { mode: 'unsupported', preservesAuthor: false },
+      pin: { read: true, write: true },
     },
     stickers: { native: false, upload: true, formats: ['static', 'animated'] },
     reactions: { read: true, write: true, events: true, actorList: true, maxSelected: 20 },
+    notifications: { read: true, mute: true },
   }
 
   readonly client: MatrixClient
@@ -102,6 +104,9 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   private readonly closedPolls = new Set<string>()
   private readonly pollTallies = new Map<string, MatrixPollTally>()
   private readonly reactionEventTargets = new Map<string, string>()
+  private readonly pinMutations = new Map<string, Promise<void>>()
+  /** Local state snapshots suppress our own /sync echoes without masking external changes. */
+  private readonly pinSnapshots = new Map<string, string[]>()
 
   constructor(config: Config, logger?: MatrixLogger) {
     this.client = new MatrixClient(config satisfies MatrixClientOptions)
@@ -148,6 +153,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
           this.rememberReaction(event.event_id, relation.event_id)
         }
       }
+      this.pinSnapshots.set(roomId, this.cachedPinnedIds(roomId))
     }
     let since = initial.next_batch
     const running = (async () => {
@@ -442,8 +448,11 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     conversation: IMConversationRef,
     messageId: string,
   ): Promise<IMMessage<MatrixMediaLocator> | null> {
-    const event = await this.client.getEvent(conversation.id, messageId)
-    return this.mapTimelineMessage(conversation.id, event) ?? null
+    const event = await this.client.getEvent(conversation.id, messageId).catch((error: unknown) => {
+      if (error instanceof MatrixHttpError && error.status === 404) return null
+      throw error
+    })
+    return event ? this.mapTimelineMessage(conversation.id, event) ?? null : null
   }
 
   async sendMessage(
@@ -749,6 +758,56 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     return events
   }
 
+  async getPinnedMessageIds(_session: PlatformSession, conversation: IMConversationRef): Promise<string[]> {
+    return this.client.getRoomPinnedEvents(conversation.id)
+  }
+
+  async setMessagePinned(
+    _session: PlatformSession, conversation: IMConversationRef, messageId: string, pinned: boolean,
+  ): Promise<IMMessagePinMutation> {
+    return this.mutatePinnedEvents(conversation.id, (existing) => pinned
+      ? existing.includes(messageId) ? existing : [...existing, messageId]
+      : existing.filter((id) => id !== messageId))
+  }
+
+  async clearPinnedMessages(_session: PlatformSession, conversation: IMConversationRef): Promise<IMMessagePinMutation> {
+    return this.mutatePinnedEvents(conversation.id, () => [])
+  }
+
+  /** Serialize room-state mutations, including clear-all, to avoid lost local writes. */
+  private async mutatePinnedEvents(
+    roomId: string, mutate: (existing: string[]) => string[],
+  ): Promise<IMMessagePinMutation> {
+    const previous = this.pinMutations.get(roomId)
+    let release!: () => void
+    const turn = new Promise<void>((resolve) => { release = resolve })
+    this.pinMutations.set(roomId, turn)
+    await previous
+    try {
+      const existing = await this.client.getRoomPinnedEvents(roomId)
+      const next = mutate(existing)
+      if (samePinnedIds(existing, next)) return { changed: false, pinnedMessageIds: next }
+      const eventId = await this.client.setRoomPinnedEvents(roomId, next)
+      // Do not advance the /sync baseline here: an unrelated external pin
+      // update may be in flight. The shared event ID deduplicates the RPC
+      // publication and its Matrix sync echo in the durable update journal.
+      return { changed: true, eventId, pinnedMessageIds: [...next] }
+    } finally {
+      release()
+      if (this.pinMutations.get(roomId) === turn) this.pinMutations.delete(roomId)
+    }
+  }
+
+  async getConversationNotificationSettings(_session: PlatformSession, conversation: IMConversationRef) {
+    return { muted: await this.client.getRoomNotificationMuted(conversation.id) }
+  }
+
+  async setConversationNotificationSettings(
+    _session: PlatformSession, conversation: IMConversationRef, settings: { muted: boolean },
+  ): Promise<void> {
+    await this.client.setRoomNotificationMuted(conversation.id, settings.muted)
+  }
+
   async getUser(_session: PlatformSession, userId: string): Promise<IMUser<MatrixMediaLocator> | null> {
     const profile = await this.client.getProfile(userId).catch(() => null)
     return profile ? this.mapUser(userId, profile) : null
@@ -863,9 +922,32 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         ...(room.timeline?.events ?? []).filter((event) => event.state_key !== undefined),
       ]
       const stateChanged = stateEvents.length > 0
+      const pinState = stateEvents.filter((event) =>
+        event.type === 'm.room.pinned_events' && event.state_key === '').at(-1)
+      const previousPins = this.pinSnapshots.get(roomId)
       this.ingestState(roomId, stateEvents)
       const conversation = this.updateConversation(roomId, room)
       if (stateChanged) await handler({ type: 'conversation', conversation })
+      if (pinState) {
+        const current = matrixPinnedIds(pinState.content)
+        // First observation establishes a baseline. Every subsequent Matrix
+        // state event (including our own echo) uses the same event ID as the
+        // matching local RPC publication, so replay is safe and idempotent.
+        if (previousPins && !samePinnedIds(previousPins, current) && pinState.event_id) {
+          const currentIds = new Set(current)
+          await handler({
+            type: 'message-pins', eventId: pinState.event_id, conversation,
+            pinnedMessageIds: current,
+            removedMessageIds: previousPins.filter((id) => !currentIds.has(id)),
+            timestamp: matrixTimestamp(pinState),
+          })
+        }
+        // Only commit the snapshot after the handler succeeds; a failed
+        // publication must re-emit the change on the next /sync retry.
+        this.pinSnapshots.set(roomId, current)
+      } else if (!previousPins) {
+        this.pinSnapshots.set(roomId, this.cachedPinnedIds(roomId))
+      }
       for (const event of room.timeline?.events ?? []) {
         if (!event.event_id || event.state_key !== undefined) continue
         const redacts = event.redacts ?? (event.content as { redacts?: string }).redacts
@@ -1025,6 +1107,10 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     this.roomState.set(roomId, state)
   }
 
+  private cachedPinnedIds(roomId: string): string[] {
+    return matrixPinnedIds(this.roomState.get(roomId)?.get('m.room.pinned_events\0')?.content)
+  }
+
   private updateConversation(roomId: string, room?: MatrixJoinedRoom): IMConversation<MatrixMediaLocator> {
     const state = this.roomState.get(roomId)
     const name = state?.get('m.room.name\0')?.content as { name?: string } | undefined
@@ -1039,10 +1125,18 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       ?? members.find((event) => event.state_key !== this.accountUserId)?.state_key
     const hero = heroId ? state?.get(`m.room.member\0${heroId}`)?.content as MatrixRoomMemberContent | undefined : undefined
     const title = name?.name || alias?.alias || (direct ? hero?.displayname || heroId : undefined) || roomId
+    const selfState = this.accountUserId
+      ? state?.get(`m.room.member\0${this.accountUserId}`)?.content as MatrixRoomMemberContent | undefined
+      : undefined
+    const selfMember = selfState && this.accountUserId && selfState.membership === 'join'
+      ? this.mapMember(this.accountUserId, selfState, roomId)
+      : undefined
     const conversation: IMConversation<MatrixMediaLocator> = {
       id: roomId,
       kind: create?.type === 'm.space' ? 'channel' : direct ? 'direct' : 'group',
       title,
+      selfRole: selfMember?.role,
+      selfPermissions: selfMember?.permissions,
       avatar: avatar?.url ? avatarMedia(roomId, avatar.url) : direct && hero?.avatar_url
         ? avatarMedia(heroId!, hero.avatar_url)
         : undefined,
@@ -1151,7 +1245,8 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     roomId: string,
   ): IMConversationMember<MatrixMediaLocator> {
     const power = this.roomState.get(roomId)?.get('m.room.power_levels\0')?.content as {
-      users?: Record<string, number>, users_default?: number, state_default?: number, redact?: number, invite?: number
+      users?: Record<string, number>, users_default?: number, state_default?: number,
+      events?: Record<string, number>, redact?: number, invite?: number
     } | undefined
     const level = power?.users?.[userId] ?? power?.users_default ?? 0
     const owner = level >= 100
@@ -1164,7 +1259,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         manageMembers: administrator,
         deleteAnyMessage: level >= (power?.redact ?? 50),
         editAnyMessage: false,
-        pinMessages: level >= (power?.state_default ?? 50),
+        pinMessages: level >= (power?.events?.['m.room.pinned_events'] ?? power?.state_default ?? 50),
         inviteMembers: level >= (power?.invite ?? 0),
       },
     }
@@ -1175,6 +1270,17 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     this.accountUserId = this.configuredUserId ?? (await this.client.whoAmI()).user_id
     return this.accountUserId
   }
+}
+
+function matrixPinnedIds(content: unknown): string[] {
+  if (!content || typeof content !== 'object') return []
+  const pinned = (content as { pinned?: unknown }).pinned
+  return Array.isArray(pinned) ? [...new Set(pinned.filter((id): id is string =>
+    typeof id === 'string' && id.length > 0))] : []
+}
+
+function samePinnedIds(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((id, index) => id === b[index])
 }
 
 function matrixMessageParts(content: MatrixRoomMessageContent): IMMessage<MatrixMediaLocator>['content']['parts'] {

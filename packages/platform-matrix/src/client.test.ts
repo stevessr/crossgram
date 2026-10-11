@@ -126,6 +126,104 @@ describe('MatrixClient', () => {
     expect(paths[2]).toMatch(/\/redact\/%24event%2Fwith%2Fslash\//)
   })
 
+  it('uses room state for pins and account push rules for notifications', async () => {
+    const pins = ['$initial']
+    let muted = false
+    const writes: Array<{ path: string, method: string, body?: unknown }> = []
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      const url = new URL(String(input))
+      const method = init?.method ?? 'GET'
+      const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined
+      writes.push({ path: url.pathname, method, body })
+      if (url.pathname.endsWith('/state/m.room.pinned_events')) {
+        if (method === 'GET') return Response.json({ pinned: pins })
+        pins.splice(0, pins.length, ...body.pinned)
+        return Response.json({ event_id: '$state-event' })
+      }
+      if (url.pathname.includes('/pushrules/global/room/')) {
+        if (method === 'GET') return muted
+          ? Response.json({ actions: ['dont_notify'], enabled: true })
+          : Response.json({ errcode: 'M_NOT_FOUND' }, { status: 404 })
+        if (method === 'PUT') { muted = true; return Response.json({}) }
+        if (method === 'DELETE') { muted = false; return Response.json({}) }
+      }
+      throw new Error(`unexpected Matrix request: ${url}`)
+    })
+    const client = new MatrixClient({
+      homeserver: 'https://matrix.example.org', accessToken: 'token', fetch,
+    })
+    const roomId = '!r:example.org'
+    await expect(client.getRoomPinnedEvents(roomId)).resolves.toEqual(['$initial'])
+    await client.setRoomPinnedEvents(roomId, ['$initial', '$second'])
+    expect(pins).toEqual(['$initial', '$second'])
+    expect(writes.find((item) => item.method === 'PUT')?.body)
+      .toEqual({ pinned: ['$initial', '$second'] })
+    await expect(client.getRoomNotificationMuted(roomId)).resolves.toBe(false)
+    await client.setRoomNotificationMuted(roomId, true)
+    await expect(client.getRoomNotificationMuted(roomId)).resolves.toBe(true)
+    await client.setRoomNotificationMuted(roomId, false)
+    await expect(client.getRoomNotificationMuted(roomId)).resolves.toBe(false)
+    expect(writes.filter((item) => item.path.includes('/pushrules/') && item.method === 'PUT'))
+      .toHaveLength(1)
+    expect(writes.filter((item) => item.path.includes('/pushrules/') && item.method === 'DELETE'))
+      .toHaveLength(1)
+  })
+
+  it('preserves custom push rule tweaks when toggling room mute', async () => {
+    let rule: { actions: Array<string | { set_tweak: string, value: boolean }>, enabled?: boolean } = {
+      actions: ['dont_notify', { set_tweak: 'highlight', value: false }],
+      enabled: true,
+    }
+    const requests: Array<{ method: string, body?: unknown }> = []
+    const client = new MatrixClient({
+      homeserver: 'https://matrix.example.org', accessToken: 'token',
+      fetch: async (_input, init) => {
+        const method = init?.method ?? 'GET'
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined
+        requests.push({ method, body })
+        if (method === 'GET') return Response.json(rule)
+        if (method === 'PUT') {
+          if (body.actions) rule.actions = body.actions
+          if (body.enabled !== undefined) rule.enabled = body.enabled
+          return Response.json({})
+        }
+        return Response.json({})
+      },
+    })
+    const id = '!custom:example.org'
+    await client.setRoomNotificationMuted(id, false)
+    expect(rule.actions).toEqual([
+      'notify', { set_tweak: 'highlight', value: false },
+    ])
+    await client.setRoomNotificationMuted(id, true)
+    expect(rule.actions).toEqual([
+      'dont_notify', { set_tweak: 'highlight', value: false },
+    ])
+    rule.enabled = false
+    await client.setRoomNotificationMuted(id, true)
+    expect(requests.filter((entry) => (entry.body as { enabled?: boolean })?.enabled === true))
+      .toHaveLength(1)
+    expect(rule.enabled).toBe(true)
+  })
+
+  it('treats missing pinned state as empty but preserves non-404 errors', async () => {
+    const client = new MatrixClient({
+      homeserver: 'https://matrix.example.org', accessToken: 'token',
+      fetch: async () => Response.json({ errcode: 'M_NOT_FOUND' }, { status: 404 }),
+    })
+    await expect(client.getRoomPinnedEvents('!room:example.org')).resolves.toEqual([])
+    const unavailable = new MatrixClient({
+      homeserver: 'https://matrix.example.org', accessToken: 'token',
+      fetch: async () => Response.json({ errcode: 'M_FORBIDDEN' }, { status: 403 }),
+    })
+    await expect(unavailable.getRoomPinnedEvents('!room:example.org')).rejects.toMatchObject({
+      status: 403, errcode: 'M_FORBIDDEN',
+    })
+    await expect(unavailable.getRoomNotificationMuted('!room:example.org')).rejects.toMatchObject({
+      status: 403,
+    })
+  })
+
   it('validates Matrix content URIs', () => {
     expect(parseMxc('mxc://example.org/a/b')).toEqual({ serverName: 'example.org', mediaId: 'a/b' })
     expect(() => parseMxc('https://example.org/a')).toThrow(/invalid Matrix content URI/)

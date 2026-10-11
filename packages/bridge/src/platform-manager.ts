@@ -514,6 +514,8 @@ export class PlatformSubscriptionManager {
       }
       const result = await this._store.deleteMessages(session, event.conversation, event.messageIds)
       return this._publishCommitted(eventCtx, session, { event, result }, options)
+    } else if (event.type === 'message-pins') {
+      return this._publishCommitted(eventCtx, session, { event }, options)
     } else if (event.type === 'message-reactions') {
       const result = await this._store.setReactions(session, event.conversation, event.target, event.context)
       if (result) return this._publishCommitted(eventCtx, session, { event, result }, options)
@@ -597,6 +599,9 @@ function platformEventSummary(event: IMEvent): string {
   if (event.type === 'message-delete') {
     return `type=message-delete conversation=${event.conversation.id} eventId=${event.eventId} messages=${event.messageIds.join(',')}`
   }
+  if (event.type === 'message-pins') {
+    return `type=message-pins room=${event.conversation.id} state=${event.eventId} pins=${event.pinnedMessageIds.length} removed=${event.removedMessageIds.length}`
+  }
   if (event.type === 'message-reactions') {
     return `type=message-reactions conversation=${event.conversation.id} eventId=${event.eventId} message=${event.target.messageId} reactions=${event.context.reactions.length}`
   }
@@ -627,6 +632,7 @@ export type CommittedPlatformEvent =
   | { event: Extract<IMEvent, { type: 'message-edit' }>, result: IngestResult }
   | { event: Extract<IMEvent, { type: 'message-delete' }>, result: DeleteResult }
   | { event: Extract<IMEvent, { type: 'message-reactions' }>, result: ReactionResult }
+  | { event: Extract<IMEvent, { type: 'message-pins' }> }
   | { event: Extract<IMEvent, { type: 'read' }>, result: ReadResult }
   | { event: Extract<IMEvent, { type: 'voice-call' }> }
 

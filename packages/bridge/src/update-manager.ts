@@ -468,6 +468,13 @@ export class UpdateManager {
         )
         return
       }
+      if (committed.event.type === 'message-pins') {
+        return await this._publishPinnedMessages(
+          session,
+          committed as Extract<CommittedPlatformEvent, { event: { type: 'message-pins' } }>,
+          options,
+        )
+      }
       if (committed.event.type === 'read') {
         await this._publishRead(
           session,
@@ -479,7 +486,7 @@ export class UpdateManager {
       return await this._publishMessage(
         session,
         committed as Exclude<CommittedPlatformEvent, {
-          event: { type: 'message-delete' | 'message-reactions' | 'read' | 'voice-call' }
+          event: { type: 'message-delete' | 'message-reactions' | 'message-pins' | 'read' | 'voice-call' }
         }>,
         options,
       )
@@ -620,10 +627,102 @@ export class UpdateManager {
     }
   }
 
+  /** Journal Matrix-originated pin changes so channel difference recovers them offline. */
+  private async _publishPinnedMessages(
+    session: PlatformSession,
+    committed: Extract<CommittedPlatformEvent, { event: { type: 'message-pins' } }>,
+    options: PlatformEventDeliveryOptions,
+  ): Promise<PlatformEventPublishResult> {
+    const { event } = committed
+    const eventKey = platformEventUpdateKey(session, committed)!
+    const previousDelivery = await this._store.getUpdateDelivery(eventKey)
+    if (previousDelivery?.published) {
+      return previousDelivery.payload ? updateFromJson(previousDelivery.payload) : undefined
+    }
+    await this._blockedPeers?.ensureLoaded(session.platformSessionId)
+    const platform = this._registry.require(session.platformId)
+    const conversation = event.conversation
+    const displayConversation = conversation.kind === 'channel' && conversation.parentId
+      ? await this._store.getConversation(session.platformSessionId, conversation.parentId)
+        ?? { id: conversation.parentId, kind: 'channel' as const, title: conversation.parentId }
+      : conversation
+    const channelId = displayConversation.kind === 'direct'
+      ? undefined : stableId(peerTlSeed(session.platformSessionId, displayConversation.id))
+
+    const resolveIds = async (nativeIds: readonly string[]): Promise<number[]> => {
+      const ids: number[] = []
+      for (const nativeId of [...new Set(nativeIds)]) {
+        let projected = await this._store.findProjectedByPlatformId(
+          session.platformSessionId, conversation.id, nativeId,
+        )
+        if (!projected && platform.getMessage) {
+          const message = await platform.getMessage(session, conversation, nativeId)
+          if (message) {
+            await this._store.ingest(session, conversation, message)
+            projected = await this._store.findProjectedByPlatformId(
+              session.platformSessionId, conversation.id, nativeId,
+            )
+          }
+        }
+        if (!projected || await this._blockedPeers?.hidesMessage(
+          session.platformSessionId, projected.source, this._store,
+        )) continue
+        const first = projected.parts[0]?.tlMessageId
+        if (first !== undefined) ids.push(first)
+      }
+      return ids
+    }
+
+    // An unpin goes out before the new snapshot, including pure pin reorders.
+    const [removedIds, pinnedIds] = await Promise.all([
+      resolveIds(event.removedMessageIds), resolveIds(event.pinnedMessageIds),
+    ])
+    const changes: Array<{ ids: number[], pinned: boolean }> = [
+      { ids: removedIds, pinned: false },
+      { ids: pinnedIds, pinned: true },
+    ].filter((change) => change.ids.length > 0)
+    if (!changes.length) return
+
+    const date = event.timestamp || Math.floor(Date.now() / 1_000)
+    const delivery = previousDelivery ?? await this._store.prepareUpdateDelivery(
+      eventKey, session.platformSessionId, changes.length, date, channelId,
+    )
+    let pts = delivery.pts - delivery.ptsCount
+    const directPeerRow = channelId === undefined
+      ? await this._store.getUser(session.platformId, displayConversation.id)
+        ?? await this._store.upsertUser(session,
+          await platform.getUser?.(session, displayConversation.id)
+            ?? { id: displayConversation.id, firstName: displayConversation.title })
+      : undefined
+    const updates: tl.TypeUpdate[] = changes.map(({ ids, pinned }) => (
+      channelId === undefined
+        ? {
+            _: 'updatePinnedMessages', peer: { _: 'peerUser', userId: directPeerRow!.id },
+            messages: ids, pinned: pinned || undefined, pts: ++pts, ptsCount: 1,
+          }
+        : {
+            _: 'updatePinnedChannelMessages', channelId,
+            messages: ids, pinned: pinned || undefined, pts: ++pts, ptsCount: 1,
+          }
+    ))
+    const payload: tl.RawUpdates = {
+      _: 'updates', updates, users: [],
+      chats: channelId === undefined ? [] : [this._makeChat(session.platformSessionId, displayConversation)],
+      date: delivery.date, seq: delivery.seq,
+    }
+    await this._store.setUpdatePayload(eventKey, updateToJson(payload))
+    if (await this._send(
+      session.platformSessionId, payload, options.excludeAuthKeyId, options.excludeConnection,
+    ) || options.deliveredViaRpc) {
+      await this._store.markUpdatePublished(eventKey)
+    }
+    return payload
+  }
+
   private async _publishMessage(
     session: PlatformSession,
     committed: Exclude<CommittedPlatformEvent, {
-      event: { type: 'message-delete' | 'message-reactions' | 'read' | 'voice-call' }
+      event: { type: 'message-delete' | 'message-reactions' | 'message-pins' | 'read' | 'voice-call' }
     }>,
     options: PlatformEventDeliveryOptions,
   ): Promise<PlatformEventPublishResult> {
@@ -1327,6 +1426,8 @@ function platformEventUpdateKey(
       return `${prefix}:delete:${committed.event.eventId}`
     case 'message-reactions':
       return `${prefix}:reaction:${committed.event.eventId}`
+    case 'message-pins':
+      return `${prefix}:pin:${committed.event.conversation.id}:${committed.event.eventId}`
     case 'read':
       return `${prefix}:read:${committed.event.conversationId}:${committed.event.upToMessageId}`
     default:
@@ -1339,7 +1440,12 @@ function committedEventSummary(committed: CommittedPlatformEvent): string {
   if (event.type === 'voice-call') {
     return `type=voice-call signal=${event.signal} media=${event.media} conversation=${event.conversation.id}`
   }
-  const { result } = committed as Exclude<CommittedPlatformEvent, { event: { type: 'voice-call' } }>
+  if (event.type === 'message-pins') {
+    return `type=message-pins conversation=${event.conversation.id} eventId=${event.eventId} pinned=${event.pinnedMessageIds.length} removed=${event.removedMessageIds.length}`
+  }
+  const { result } = committed as Exclude<
+    CommittedPlatformEvent, { event: { type: 'voice-call' | 'message-pins' } }
+  >
   if (event.type === 'message' || event.type === 'message-edit') {
     const ingest = result as import('./message-store.js').IngestResult
     return `type=${event.type} conversation=${event.conversation.id} message=${event.message.id} created=${ingest.created} changed=${ingest.changed} projection=${ingest.projection.length}`
