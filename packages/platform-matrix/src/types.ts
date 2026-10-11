@@ -109,6 +109,11 @@ export interface MatrixMessagesResponse {
   state?: MatrixEvent[]
 }
 
+export interface MatrixRelationsResponse {
+  chunk: MatrixEvent[]
+  next_batch?: string
+}
+
 export interface MatrixEventContextResponse {
   start?: string
   end?: string
