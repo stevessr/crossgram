@@ -235,6 +235,18 @@ describe('MatrixPlatform', () => {
       .toHaveLength(2)
     await platform.setMessagePinned(session, conversation, '$one', false)
     expect(await platform.getPinnedMessageIds(session, conversation)).toEqual(['$two'])
+    await Promise.all([
+      platform.clearPinnedMessages(session, conversation),
+      platform.setMessagePinned(session, conversation, '$after-clear', true),
+    ])
+    expect(await platform.getPinnedMessageIds(session, conversation)).toEqual(['$after-clear'])
+    const writesBefore = requests.filter((request) =>
+      request.startsWith('PUT ') && request.includes('/state/')).length
+    await platform.clearPinnedMessages(session, conversation)
+    await platform.clearPinnedMessages(session, conversation)
+    expect(await platform.getPinnedMessageIds(session, conversation)).toEqual([])
+    expect(requests.filter((request) =>
+      request.startsWith('PUT ') && request.includes('/state/'))).toHaveLength(writesBefore + 1)
 
     await platform.setConversationNotificationSettings(session, conversation, { muted: true })
     expect(await platform.getConversationNotificationSettings(session, conversation))
