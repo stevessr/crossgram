@@ -160,15 +160,50 @@ describe('Matrix room message search', () => {
     expect(paths).toHaveLength(2)
   })
 
-  it('does not dispatch blank unfiltered searches or inverted time ranges', async () => {
+  it('scans history for empty-term searches, allowing bridge-native link and combined media filters', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+      const url = new URL(String(input))
+      expect(url.pathname).toBe('/_matrix/client/v3/rooms/!room%3Aexample.org/messages')
+      expect(url.searchParams.get('dir')).toBe('b')
+      return Response.json({
+        chunk: [message('$link', 'm.text', 'https://matrix.org', 5_000)],
+      })
+    })
+    const platform = new MatrixPlatform({
+      homeserver: 'https://matrix.example.org', accessToken: 'token', fetch,
+    })
+    const result = await platform.searchMessages(session, room, { query: '', limit: 10 })
+    expect(result.messages.map((item) => item.id)).toEqual(['$link'])
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it('paginates past empty server result batches instead of treating them as completion', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+      const url = new URL(String(input))
+      const cursor = url.searchParams.get('next_batch')
+      return Response.json({ search_categories: { room_events: cursor === 'continue'
+        ? { results: [{ result: message('$found', 'm.text', 'hello', 3_000) }] }
+        : { next_batch: 'continue', results: [] },
+      } })
+    })
+    const platform = new MatrixPlatform({
+      homeserver: 'https://matrix.example.org', accessToken: 'token', fetch,
+    })
+    const result = await platform.searchMessages(session, room, { query: 'hello', limit: 1 })
+    expect(result.messages.map((item) => item.id)).toEqual(['$found'])
+    expect(fetch).toHaveBeenCalledTimes(2)
+  })
+
+  it('does not dispatch inverted time ranges or zero-limit searches', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>()
     const platform = new MatrixPlatform({
       homeserver: 'https://matrix.example.org', accessToken: 'token', fetch,
     })
-    await expect(platform.searchMessages(session, room, { query: ' ' })).resolves.toEqual({ messages: [] })
     await expect(platform.searchMessages(session, room, {
       query: 'hello', minTimestamp: 10, maxTimestamp: 1,
     })).resolves.toEqual({ messages: [] })
+    await expect(platform.searchMessages(session, room, { query: '', limit: 0 }))
+      .resolves.toEqual({ messages: [] })
     expect(fetch).not.toHaveBeenCalled()
   })
 })
