@@ -2224,6 +2224,140 @@ describe('conversation kinds', () => {
     }
   })
 
+  it('shows empty Space child channels as accessible Telegram forum topics', async () => {
+    const emptyChildPlatform: IMPlatform = {
+      ...platform,
+      async getDialogs() {
+        return {
+          dialogs: conversations.map((conversation) => ({
+            conversation, unreadCount: 0,
+            ...(conversation.id === 'subchannel' ? {} : { lastMessage: source(conversation) }),
+          })),
+        }
+      },
+      async getSubdialogs(localSession, parent, query) {
+        const page = await platform.getSubdialogs!(localSession, parent, query)
+        return {
+          ...page,
+          // No preview message has ever existed in this empty child room.
+          dialogs: page.dialogs.map((dialog) => dialog.conversation.id === 'subchannel'
+            ? { ...dialog, lastMessage: undefined } : dialog),
+        }
+      },
+      async getHistory(localSession, target, query) {
+        if (target.id === 'subchannel') return { messages: [] }
+        return platform.getHistory!(localSession, target, query)
+      },
+    }
+    const { rpc } = await createRpc(emptyChildPlatform)
+    const dialogs = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
+    const parent = dialogs.chats.find((chat) => chat._ === 'channel' && chat.title === 'Discord / general')
+    if (!parent || parent._ !== 'channel') throw new Error('forum parent missing')
+    const peer = { _: 'inputPeerChannel' as const, channelId: parent.id, accessHash: Long.ZERO }
+    const topics = await rpc.getForumTopics({
+      _: 'messages.getForumTopics', peer, offsetDate: 0, offsetId: 0, offsetTopic: 0, limit: 100,
+    })
+    expect(topics.topics).toMatchObject([{ _: 'forumTopic', title: 'Discord / support' }])
+    expect(topics.messages).toMatchObject([{ _: 'message', message: 'Discord / support' }])
+    expect(() => roundTrip(topics)).not.toThrow()
+    const topic = topics.topics[0] as tl.RawForumTopic
+    const replies = await rpc.getReplies({
+      _: 'messages.getReplies', peer, msgId: topic.id,
+      offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+    }) as tl.messages.RawChannelMessages
+    expect(replies).toMatchObject({
+      _: 'messages.channelMessages', count: 0, topics: [{ id: topic.id }], messages: [],
+    })
+    expect(() => roundTrip(replies)).not.toThrow()
+  })
+
+  it('retains an empty Space topic ID when its first message arrives', async () => {
+    let populated = false
+    const selectedPlatform: IMPlatform = {
+      ...platform,
+      async getHistory(localSession, target, query) {
+        if (target.id === 'subchannel') {
+          return { messages: populated ? [source(conversations.find((item) => item.id === target.id)!)] : [] }
+        }
+        return platform.getHistory!(localSession, target, query)
+      },
+    }
+    const { rpc } = await createRpc(selectedPlatform)
+    const dialogs = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
+    const parent = dialogs.chats.find((chat) => chat._ === 'channel' && chat.title === 'Discord / general')
+    if (!parent || parent._ !== 'channel') throw new Error('forum parent missing')
+    const peer = { _: 'inputPeerChannel' as const, channelId: parent.id, accessHash: Long.ZERO }
+    const req = {
+      _: 'messages.getForumTopics' as const, peer,
+      offsetDate: 0, offsetId: 0, offsetTopic: 0, limit: 100,
+    }
+    const initial = await rpc.getForumTopics(req)
+    const initialTopic = initial.topics[0] as tl.RawForumTopic
+    populated = true
+    const updated = await rpc.getForumTopics(req)
+    expect(updated.topics).toMatchObject([{ id: initialTopic.id, title: 'Discord / support' }])
+    expect(updated.messages[0]).toMatchObject({ _: 'message', message: 'Discord / support' })
+    const replies = await rpc.getReplies({
+      _: 'messages.getReplies', peer, msgId: initialTopic.id,
+      offsetId: 0, offsetDate: 0, addOffset: 0, limit: 100, maxId: 0, minId: 0, hash: Long.ZERO,
+    }) as tl.messages.RawChannelMessages
+    expect(replies).toMatchObject({
+      _: 'messages.channelMessages', count: 1, topics: [{ id: initialTopic.id }],
+      messages: [{ _: 'message', message: 'Discord / support' }],
+    })
+    for (const response of [initial, updated, replies]) {
+      expect(() => roundTrip(response)).not.toThrow()
+    }
+  })
+
+  it('searches later lazy Space subdialog pages instead of only the first page', async () => {
+    const parent = conversations.find((item) => item.id === 'parent-channel')!
+    const first = conversations.find((item) => item.id === 'subchannel')!
+    const later: IMConversation = {
+      id: 'space-later', kind: 'channel', title: 'Later Match',
+      parentId: parent.id, spaceId: 'guild',
+    }
+    const pages: Array<string | undefined> = []
+    const histories: string[] = []
+    const selectedPlatform: IMPlatform = {
+      ...platform,
+      async getDialogs() {
+        return { dialogs: [{ conversation: parent, unreadCount: 0, lastMessage: source(parent) }] }
+      },
+      async getSubdialogs(_session, requestedParent, query) {
+        if (requestedParent.id !== parent.id) return { dialogs: [], total: 0 }
+        pages.push(query?.afterId)
+        const index = query?.afterId === first.id ? 1 : 0
+        const selected = [first, later][index]!
+        return {
+          // A lazy listing does not guarantee a cached message in every child.
+          dialogs: [{ conversation: selected, unreadCount: 0 }],
+          total: 2,
+          nextCursor: index === 0 ? '1' : undefined,
+        }
+      },
+      async getHistory(localSession, target, query) {
+        histories.push(target.id)
+        if (target.id === later.id) return { messages: [source(later)] }
+        return platform.getHistory!(localSession, target, query)
+      },
+    }
+    const { rpc } = await createRpc(selectedPlatform)
+    const dialogs = await rpc.getDialogs(dialogsRequest()) as tl.messages.RawDialogs
+    const parentChat = dialogs.chats.find((chat) => chat._ === 'channel' && chat.title === parent.title)
+    if (!parentChat || parentChat._ !== 'channel') throw new Error('Space parent missing')
+    const peer = { _: 'inputPeerChannel' as const, channelId: parentChat.id, accessHash: Long.ZERO }
+    const topics = await rpc.getForumTopics({
+      _: 'messages.getForumTopics', peer, q: 'Later', offsetDate: 0, offsetId: 0, offsetTopic: 0, limit: 100,
+    })
+    expect(topics).toMatchObject({
+      _: 'messages.forumTopics', count: 1, topics: [{ _: 'forumTopic', title: 'Later Match' }],
+    })
+    expect(pages).toEqual([undefined, first.id])
+    expect(histories).toEqual([later.id])
+    expect(() => roundTrip(topics)).not.toThrow()
+  })
+
   it('grants modern Telegram clients writable defaults for ordinary group members', async () => {
     const memberGroup: IMConversation = {
       id: 'member-group', kind: 'group', title: 'Member Group', selfRole: 'member',

@@ -1832,7 +1832,10 @@ export class DialogRpc {
     if (parent.kind !== 'channel') throw new RpcError(400, 'CHANNEL_FORUM_MISSING')
     let count: number
     let page: Array<{ topic: tl.RawForumTopic, top: MaterializedMessage }>
-    if (req._ === 'messages.getForumTopics' && this._platform.getSubdialogs) {
+    // A title search must inspect all lazy pages, otherwise a matching room
+    // that happens to be on a later Space page is silently omitted.
+    const searchAllChildren = req._ === 'messages.getForumTopics' && Boolean(req.q)
+    if (req._ === 'messages.getForumTopics' && this._platform.getSubdialogs && !searchAllChildren) {
       if (req.offsetTopic && !this._topicToConversation.has(req.offsetTopic)) await this._ensureTopics(parentId)
       const afterId = req.offsetTopic ? this._topicToConversation.get(req.offsetTopic) : undefined
       const loaded = await this._loadSubdialogPage(parentId, { limit: clampLimit(req.limit), afterId })
@@ -1841,7 +1844,11 @@ export class DialogRpc {
       page = await Promise.all(children.map((child) => this._materializeTopic(parent, child)))
       count = loaded.total ?? page.length
     } else {
-      await this._ensureTopics(parentId)
+      if (searchAllChildren) {
+        await this._hydrateSubdialogs(parentId)
+      } else {
+        await this._ensureTopics(parentId, req._ === 'messages.getForumTopicsByID')
+      }
       const children = this._subchannels(parentId)
       const selected = req._ === 'messages.getForumTopicsByID'
         ? children.filter((child) => req.topics.includes(this._conversationToTopic.get(child.id) ?? -1))
@@ -5727,8 +5734,28 @@ export class DialogRpc {
       .sort((left, right) => left.title.localeCompare(right.title))
   }
 
-  private async _ensureTopics(parentId: string): Promise<void> {
+  private async _hydrateSubdialogs(parentId: string): Promise<void> {
+    if (!this._platform.getSubdialogs) return
+    // Matrix Spaces can hold more than one page. Only load the directory here:
+    // search must not fetch the histories of every non-matching child room.
+    let afterId: string | undefined
+    const seen = new Set<string>()
+    for (let index = 0; index < 100; index++) {
+      const page = await this._loadSubdialogPage(parentId, { limit: 200, afterId })
+      const lastId = page.dialogs.at(-1)?.conversation.id
+      if (!lastId || seen.has(lastId)) break
+      seen.add(lastId)
+      if (!page.nextCursor) break
+      afterId = lastId
+    }
+  }
+
+  private async _ensureTopics(parentId: string, hydrateAll = false): Promise<void> {
     const parent = this._conversation(parentId)
+    // Direct getReplies / ByID requests can precede a forum listing.
+    if (hydrateAll || (this._platform.getSubdialogs && !this._subchannels(parentId).length)) {
+      await this._hydrateSubdialogs(parentId)
+    }
     for (const child of this._subchannels(parentId)) await this._materializeTopic(parent, child)
   }
 
@@ -5738,10 +5765,15 @@ export class DialogRpc {
   ): Promise<{ topic: tl.RawForumTopic, top: MaterializedMessage }> {
     const stored = await this._storedTopicSeed(child.id)
     const history = stored.length ? stored : await this._loadHistory(child.id, { limit: 100 })
-    const top = history[0]
-    const oldest = history.at(-1)
-    if (!top || !oldest) throw new RpcError(500, 'FORUM_TOPIC_EMPTY')
-    const topicId = await this._store?.getOldestTlMessageId(this._session.platformSessionId, child.id)
+    // Space containers and newly created child rooms may contain no messages.
+    // Telegram still needs a topic seed to display and open them.
+    const top = history[0] ?? this._emptyTopicSeed(child)
+    const oldest = history.at(-1) ?? top
+    // A previously advertised topic ID must survive the first real message
+    // (or a subsequent history backfill). Otherwise Telegram's stored topic
+    // references break when an initially empty Space child starts receiving data.
+    const topicId = this._conversationToTopic.get(child.id)
+      ?? await this._store?.getOldestTlMessageId(this._session.platformSessionId, child.id)
       ?? oldest.tlId
     this._topicToConversation.set(topicId, child.id)
     this._conversationToTopic.set(child.id, topicId)
@@ -5760,6 +5792,22 @@ export class DialogRpc {
         ))?.draft,
       },
     }
+  }
+
+  private _emptyTopicSeed(child: import('./platform.js').IMConversation): MaterializedMessage {
+    const source: IMMessage = {
+      id: `bridge:empty-topic:${child.id}`,
+      conversationId: child.id,
+      senderId: this._session.userId,
+      timestamp: 0,
+      outgoing: true,
+      content: { parts: [{ type: 'text', text: child.title }] },
+    }
+    const item: MaterializedMessage = {
+      source, tlId: this._messageId(child.id, source.id), ordinal: 0,
+    }
+    this._rememberMessage(item)
+    return item
   }
 
   private async _storedTopicSeed(conversationId: string): Promise<MaterializedMessage[]> {
