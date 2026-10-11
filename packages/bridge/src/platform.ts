@@ -931,6 +931,11 @@ export interface IMPlatform<TMediaLocator = unknown> {
     messageId: string,
     pinned: boolean,
   ): Promise<void>
+  /** Clear all upstream pinned messages as one operation when supported. */
+  clearPinnedMessages?(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+  ): Promise<void>
   /** Read notification overrides belonging to the current platform account. */
   getConversationNotificationSettings?(
     session: PlatformSession,
