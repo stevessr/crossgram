@@ -86,11 +86,13 @@ export class MatrixClient {
       : []
   }
 
-  async setRoomPinnedEvents(roomId: string, pinned: readonly string[]): Promise<void> {
-    await this.request(
+  async setRoomPinnedEvents(roomId: string, pinned: readonly string[]): Promise<string> {
+    const response = await this.request<{ event_id: string }>(
       `/_matrix/client/v3/rooms/${segment(roomId)}/state/m.room.pinned_events`,
       { method: 'PUT', body: { pinned } },
     )
+    if (!response?.event_id) throw new Error('Matrix pin state write did not return an event ID')
+    return response.event_id
   }
 
   /** Matrix push rules are private to the authenticated account, not room state. */
