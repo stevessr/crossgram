@@ -5,7 +5,7 @@ import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { RpcError, type ServerConnection } from '@mtproto-relay/mtproto'
-import { DialogRpc, projectTlMessage, stableId } from './dialogs.js'
+import { DialogRpc, projectTlMessage, searchableMessageText, stableId } from './dialogs.js'
 import { legacyInlineCustomEmojiDocumentId, ReactionRpc } from './reaction-rpc.js'
 import { IMMessageSendRejectedError } from './platform.js'
 import type { SystemPeerService } from './system-peer.js'
@@ -1094,6 +1094,31 @@ describe('DialogRpc', () => {
 
     await expect(response).resolves.toEqual({ _: 'messages.affectedMessages', pts: 1, ptsCount: 0 })
     expect(completedBeforeUpstream).toBe(true)
+  })
+
+  it('searches attachment filenames without rendering the filename as message text', () => {
+    const filenameOnly: IMMessage = {
+      id: '$report',
+      conversationId: 'alice',
+      senderId: 'alice',
+      timestamp: 1_700_000_100,
+      content: { parts: [{
+        type: 'media',
+        media: { id: 'mxc://example.org/report', kind: 'file', name: 'QuarterlyReport.pdf' },
+      }] },
+    }
+    expect(searchableMessageText(filenameOnly)).toBe('QuarterlyReport.pdf')
+    expect(searchableMessageText(filenameOnly).toLocaleLowerCase())
+      .toContain('quarterlyreport')
+    const captioned: IMMessage = {
+      ...filenameOnly,
+      content: { parts: [
+        { type: 'text', text: 'caption' },
+        { type: 'media', media: { id: 'mxc://example.org/photo', kind: 'image', name: 'holiday.png' } },
+      ] },
+    }
+    expect(searchableMessageText(captioned)).toBe('caption\nholiday.png')
+    expect(searchableMessageText({ ...filenameOnly, content: { parts: [] } })).toBe('')
   })
 
   it('uses platform search filters and carries its opaque cursor across Telegram pages', async () => {
