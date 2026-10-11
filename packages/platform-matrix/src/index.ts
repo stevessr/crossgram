@@ -119,7 +119,11 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     this.ingestAccountData(initial)
     for (const [roomId, room] of Object.entries(initial.rooms?.invite ?? {})) {
       const request = this.mapRoomInvite(roomId, room, userId)
-      if (request) this.pendingInvites.set(roomId, request)
+      if (!request) continue
+      const resolved = this.locallyResolvedInvites.get(roomId)
+      if (resolved?.id === request.id) continue
+      if (resolved) this.locallyResolvedInvites.delete(roomId)
+      this.pendingInvites.set(roomId, request)
     }
     for (const [roomId, room] of Object.entries(initial.rooms?.join ?? {})) {
       this.ingestState(roomId, room.state?.events ?? [])
