@@ -1159,10 +1159,16 @@ export class DialogRpc {
     }
     const now = Math.floor(Date.now() / 1000)
     const pts = await this._reservePts(1, now, conversation)
-    return this._updates(conversation, [{
-      _: 'updatePinnedMessages', peer: this._conversationPeer(conversation),
-      messages: [req.id], pinned: req.unpin ? undefined : true, pts, ptsCount: 1,
-    } as tl.TypeUpdate], now)
+    const update: tl.TypeUpdate = this._isTelegramChannel(conversation)
+      ? {
+          _: 'updatePinnedChannelMessages', channelId: this._peerId(conversation.id),
+          messages: [req.id], pinned: req.unpin ? undefined : true, pts, ptsCount: 1,
+        }
+      : {
+          _: 'updatePinnedMessages', peer: this._conversationPeer(conversation),
+          messages: [req.id], pinned: req.unpin ? undefined : true, pts, ptsCount: 1,
+        }
+    return this._updates(conversation, [update], now)
   }
 
   async getScheduledHistory(
