@@ -492,8 +492,6 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     content: IMMessageInput,
     options: IMTransferOptions = {},
   ): Promise<IMMessage<MatrixMediaLocator>> {
-    // Check *before* consuming/uploading any plaintext media bytes.
-    await this.assertPlaintextRoom(conversation.id)
     const sourceIds: string[] = []
     const parts: IMMessage<MatrixMediaLocator>['content']['parts'] = []
     for (let index = 0; index < content.parts.length; index++) {
@@ -503,6 +501,8 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         sourceIds.push(await this.sendPlaintextEvent(conversation.id, 'm.room.message', matrixContent))
         parts.push({ type: 'text', text: part.text, entities: part.entities })
       } else if (part.type === 'media') {
+        // A failed E2EE check must never consume or upload a plaintext stream.
+        await this.assertPlaintextRoom(conversation.id)
         let transferredBytes = 0
         const mxc = await this.client.upload(part.media.source.stream({ signal: options.signal }), {
           filename: part.media.name,
@@ -536,6 +536,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         const sticker = part.sticker
         if (sticker.type !== 'upload') throw new Error('Matrix cannot send native sticker references')
         if (sticker.format === 'video') throw new Error('Matrix sticker events do not support video stickers')
+        await this.assertPlaintextRoom(conversation.id)
         let transferredBytes = 0
         const mxc = await this.client.upload(sticker.source.stream({ signal: options.signal }), {
           filename: `${sticker.stickerId}.${mediaExtension(sticker.mimeType)}`,
