@@ -108,6 +108,59 @@ function roundTrip<T>(object: T): T {
 }
 
 describe('UpdateManager', () => {
+  it('journals Matrix-native pin changes and replays them through channel difference', async () => {
+    const conversation: IMConversation = { id: '!pinned:example.org', kind: 'group', title: 'Pins' }
+    const message = (id: string): IMMessage => ({
+      id, conversationId: conversation.id, senderId: 'alice', timestamp: 100,
+      content: { parts: [{ type: 'text', text: id }] },
+    })
+    const nativeFetch = vi.fn(async (_session: PlatformSession, _room: { id: string }, id: string) =>
+      id === '$two' ? message(id) : null)
+    const native: IMPlatform = { ...platform, getMessage: nativeFetch }
+    const { store, manager, sent } = await createHarness(undefined, native)
+    await store.ingest(session, conversation, message('$one'))
+    const pin = (id: string, pinnedMessageIds: string[], removedMessageIds: string[]) => ({
+      event: {
+        type: 'message-pins' as const, eventId: id, conversation,
+        pinnedMessageIds, removedMessageIds, timestamp: 200,
+      },
+    })
+    await manager.publish(session, pin('$pin1', ['$one', '$two'], []))
+    expect(nativeFetch).toHaveBeenCalledTimes(1)
+    expect(sent).toHaveLength(1)
+    const first = sent[0]!.update
+    expect(first).toMatchObject({ updates: [{
+      _: 'updatePinnedChannelMessages',
+      channelId: peerTlId(conversation.id), pinned: true, ptsCount: 1,
+    }] })
+    expect((first as tl.RawUpdates).updates[0]).toMatchObject({
+      messages: expect.arrayContaining([expect.any(Number), expect.any(Number)]),
+    })
+    expect(() => roundTrip(first)).not.toThrow()
+
+    await manager.publish(session, pin('$pin2', ['$two'], ['$one']))
+    expect(sent).toHaveLength(2)
+    const second = sent[1]!.update
+    expect(second).toMatchObject({ updates: [
+      { _: 'updatePinnedChannelMessages', channelId: peerTlId(conversation.id), ptsCount: 1 },
+      { _: 'updatePinnedChannelMessages', channelId: peerTlId(conversation.id), pinned: true, ptsCount: 1 },
+    ] })
+    expect(() => roundTrip(second)).not.toThrow()
+
+    // A local Telegram RPC and the Matrix /sync echo may carry the same native
+    // event ID but different observed snapshots. Never reserve or send twice.
+    await manager.publish(session, pin('$pin2', ['$two'], []))
+    expect(sent).toHaveLength(2)
+    const delivery = await store.getUpdateDelivery(`${session.platformSessionId}:pin:${conversation.id}:$pin2`)
+    expect(delivery?.published).toBe(true)
+    const recovered = await manager.getChannelDifference(session.platformSessionId, {
+      _: 'updates.getChannelDifference',
+      channel: { _: 'inputChannel', channelId: peerTlId(conversation.id), accessHash: Long.ONE },
+      filter: { _: 'channelMessagesFilterEmpty' }, pts: 0, limit: 50,
+    })
+    expect(JSON.stringify(roundTrip(recovered))).toContain('updatePinnedChannelMessages')
+  })
+
   it('hydrates only referenced users when broadcasting to several devices', async () => {
     const { ctx, store, manager, sent } = await createHarness()
     await ctx.database.create('mtproto_auth_binding', {

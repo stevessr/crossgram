@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { messageMentionsUser, type IMEvent, type PlatformSession } from '@mtproto-relay/bridge'
-import { MatrixEncryptionRequiredError, MatrixPlatform } from './index.js'
+import { MatrixPlatform } from './index.js'
 import type { MatrixRoomMessageContent, MatrixSyncResponse } from './types.js'
 
 const session: PlatformSession = {
@@ -28,98 +28,43 @@ const roomState = [
 ]
 
 describe('MatrixPlatform', () => {
-  it('blocks encrypted-room plaintext text, media, edits, reactions and poll votes before sending', async () => {
-    const paths: string[] = []
-    let sourceRead = false
-    const fetch = routeFetch((url) => {
-      paths.push(url.pathname)
-      if (url.pathname.endsWith('/state/m.room.encryption')) {
-        return json({ algorithm: 'm.megolm.v1.aes-sha2' })
+  it('stops multipart sends after a room enables E2EE between content events', async () => {
+    let probes = 0
+    const sends: string[] = []
+    const encrypted = event('m.room.encryption', { algorithm: 'm.megolm.v1.aes-sha2' }, { stateKey: '' })
+    const fetch = routeFetch((url, init) => {
+      if (url.pathname.includes('/send/m.room.message/')) {
+        sends.push((JSON.parse(String(init?.body)) as { body: string }).body)
+        return json({ event_id: '$sent-' + sends.length })
       }
-      throw new Error('plaintext request escaped guard: ' + url.pathname)
-    })
-    const platform = new MatrixPlatform({
-      homeserver: 'https://matrix.example.org', accessToken: 'token', fetch,
-      userId: '@me:example.org',
-    })
-    const room = '!private:example.org'
-    const expected = { code: 'MATRIX_E2EE_REQUIRED', roomId: room }
-    await expect(platform.sendMessage(session, { id: room }, {
-      parts: [{ type: 'text', text: 'secret' }],
-    })).rejects.toMatchObject(expected)
-    await expect(platform.sendMessage(session, { id: room }, {
-      parts: [{ type: 'media', media: {
-        kind: 'file', name: 'private.txt', mimeType: 'text/plain',
-        source: { size: 4, async *stream() { sourceRead = true; yield new Uint8Array([1, 2, 3, 4]) } },
-      } }],
-    })).rejects.toBeInstanceOf(MatrixEncryptionRequiredError)
-    await expect(platform.editMessage(session, {
-      conversationId: room, messageId: '$original', targetId: '$original',
-    }, { parts: [{ type: 'text', text: 'edited secret' }] })).rejects.toMatchObject(expected)
-    await expect(platform.setMessageReactions(session, {
-      conversationId: room, messageId: '$original', targetId: '$original',
-    }, ['👍'])).rejects.toMatchObject(expected)
-    await expect(platform.clickInlineButton(session, {
-      conversationId: room, messageId: '$poll',
-    }, { type: 'callback', text: 'Yes', data: 'matrix-poll-vote:0' })).rejects.toMatchObject(expected)
-
-    expect(sourceRead).toBe(false)
-    // The positive encryption observation is retained without further network calls.
-    expect(paths).toEqual(['/_matrix/client/v3/rooms/!private%3Aexample.org/state/m.room.encryption'])
-  })
-
-  it('fails closed when the encryption-state probe cannot be trusted', async () => {
-    const paths: string[] = []
-    const platform = new MatrixPlatform({
-      homeserver: 'https://matrix.example.org', accessToken: 'token',
-      fetch: routeFetch((url) => {
-        paths.push(url.pathname)
-        return json({ errcode: 'M_FORBIDDEN' }, { status: 403 })
-      }),
-    })
+      throw new Error('unexpected request: ' + url.pathname)
+    }, () => json(++probes === 1 ? [] : [encrypted]))
+    const platform = createPlatform(fetch)
     await expect(platform.sendMessage(session, { id: '!room:example.org' }, {
-      parts: [{ type: 'text', text: 'must not leak' }],
-    })).rejects.toMatchObject({ status: 403, errcode: 'M_FORBIDDEN' })
-    expect(paths).toEqual(['/_matrix/client/v3/rooms/!room%3Aexample.org/state/m.room.encryption'])
+      parts: [{ type: 'text', text: 'first' }, { type: 'text', text: 'second' }],
+    })).rejects.toThrow(/end-to-end encrypted/)
+    expect(probes).toBe(2)
+    expect(sends).toEqual(['first'])
   })
 
-  it('retains encryption state learned from sync even if later probes would say not found', async () => {
-    const paths: string[] = []
+  it('recognizes timeline-only encryption upgrades in an initial snapshot', async () => {
+    let stateProbes = 0
     const platform = createPlatform(routeFetch((url) => {
-      paths.push(url.pathname)
       if (url.pathname.endsWith('/sync')) return json({
         next_batch: 's1', rooms: { join: {
-          '!room:example.org': { state: { events: roomState }, timeline: { events: [] } },
-        } },
-      })
-      throw new Error('unexpected: ' + url.pathname)
-    }), { userId: '@me:example.org' })
-    await platform.getDialogs(session)
-    await expect(platform.sendMessage(session, { id: '!room:example.org' }, {
-      parts: [{ type: 'text', text: 'not cleartext' }],
-    })).rejects.toBeInstanceOf(MatrixEncryptionRequiredError)
-    expect(paths).toEqual(['/_matrix/client/v3/sync'])
-  })
-
-  it('observes encryption upgrades from timeline-only state in initial sync', async () => {
-    const calls: string[] = []
-    const platform = createPlatform(routeFetch((url) => {
-      calls.push(url.pathname)
-      if (url.pathname.endsWith('/sync')) return json({
-        next_batch: 's2', rooms: { join: {
-          '!upgraded:example.org': { state: { events: [] }, timeline: { events: [
+          '!upgrade:example.org': { state: { events: [] }, timeline: { events: [
             event('m.room.encryption', { algorithm: 'm.megolm.v1.aes-sha2' }, { stateKey: '', id: '$upgrade' }),
           ] } },
         } },
       })
-      throw new Error('unexpected: ' + url.pathname)
-    }), { userId: '@me:example.org' })
-    const dialogs = await platform.getDialogs(session)
-    expect(dialogs.dialogs[0]?.conversation.metadata).toMatchObject({ encrypted: true })
-    await expect(platform.sendMessage(session, { id: '!upgraded:example.org' }, {
-      parts: [{ type: 'text', text: 'no downgrade' }],
-    })).rejects.toBeInstanceOf(MatrixEncryptionRequiredError)
-    expect(calls).toEqual(['/_matrix/client/v3/sync'])
+      throw new Error('unexpected request: ' + url.pathname)
+    }, () => { stateProbes++; return json([]) }), { userId: '@me:example.org' })
+    const page = await platform.getDialogs(session)
+    expect(page.dialogs[0]?.conversation.metadata).toMatchObject({ encrypted: true })
+    await expect(platform.sendMessage(session, { id: '!upgrade:example.org' }, {
+      parts: [{ type: 'text', text: 'blocked' }],
+    })).rejects.toThrow(/end-to-end encrypted/)
+    expect(stateProbes).toBe(0)
   })
 
   it('reads and synchronizes Matrix annotation reactions using the typed relations endpoint', async () => {
@@ -140,6 +85,66 @@ describe('MatrixPlatform', () => {
     await platform.setMessageReactions(session, { conversationId: '!room:example.org', messageId: '$target', targetId: '$target' }, ['🔥'])
     expect(calls.some((call) => call.includes('/send/m.reaction/'))).toBe(true)
     await platform.stop()
+  })
+
+  it('fails closed for encrypted rooms before media upload, text, edit, reaction and poll writes', async () => {
+    const paths: string[] = []
+    let streamed = false
+    const encrypted = event('m.room.encryption', { algorithm: 'm.megolm.v1.aes-sha2' }, { stateKey: '' })
+    const fetch = routeFetch((url) => {
+      paths.push(url.pathname)
+      if (url.pathname.endsWith('/sync')) return json({
+        next_batch: 'stale', rooms: { join: { '!room:example.org': { state: { events: [] } } },
+        },
+      })
+      throw new Error('unexpected request: ' + url)
+    }, () => json([encrypted]))
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+    // The last /sync snapshot was unencrypted, but the live room state has changed.
+    await platform.getDialogs(session)
+    const conversation = { id: '!room:example.org' }
+    const encryptedError = /end-to-end encrypted/
+    await expect(platform.sendMessage(session, conversation, {
+      parts: [{ type: 'text', text: 'secret' }],
+    })).rejects.toThrow(encryptedError)
+    await expect(platform.sendMessage(session, conversation, {
+      parts: [{ type: 'media', media: {
+        kind: 'file', name: 'secret.txt', mimeType: 'text/plain', size: 1,
+        source: { size: 1, async *stream() { streamed = true; yield new Uint8Array([1]) } },
+      } }],
+    })).rejects.toThrow(encryptedError)
+    await expect(platform.editMessage(session, {
+      conversationId: conversation.id, messageId: '$old', targetId: '$old',
+    }, { parts: [{ type: 'text', text: 'replacement' }] })).rejects.toThrow(encryptedError)
+    await expect(platform.setMessageReactions(session, {
+      conversationId: conversation.id, messageId: '$old', targetId: '$old',
+    }, ['👍'])).rejects.toThrow(encryptedError)
+    await expect(platform.clickInlineButton(session, {
+      conversationId: conversation.id, messageId: '$poll',
+    }, { type: 'callback', text: 'Vote', data: 'matrix-poll-vote:0' })).rejects.toThrow(encryptedError)
+    expect(streamed).toBe(false)
+    expect(paths).toEqual(['/_matrix/client/v3/sync'])
+  })
+
+  it('does not downgrade to plaintext when room-state verification fails or is malformed', async () => {
+    const attempts: string[] = []
+    let response: Response = json({ errcode: 'M_UNAVAILABLE' }, { status: 503 })
+    const fetch = routeFetch((url) => {
+      attempts.push(url.pathname)
+      if (url.pathname.includes('/send/')) return json({ event_id: '$sent' })
+      throw new Error('unexpected request: ' + url)
+    }, () => response)
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+    const send = () => platform.sendMessage(session, { id: '!room:example.org' }, {
+      parts: [{ type: 'text', text: 'normal room message' }],
+    })
+    await expect(send()).rejects.toThrow(/Cannot verify Matrix room encryption state/)
+    response = json({ malformed: true })
+    await expect(send()).rejects.toThrow(/Cannot verify Matrix room encryption state/)
+    expect(attempts).toEqual([])
+    response = json([])
+    await expect(send()).resolves.toMatchObject({ sourceIds: ['$sent'] })
+    expect(attempts).toEqual([expect.stringContaining('/send/')])
   })
 
   it('maps account profiles, direct rooms, state, unread counts, and media timelines', async () => {
@@ -372,6 +377,7 @@ describe('MatrixPlatform', () => {
     const platform = createPlatform(fetch, { userId: '@me:example.org' })
     await platform.getDialogs(session)
     const members = await platform.getConversationMembers(session, { id: '!room:example.org' })
+    expect((await platform.getDialogs(session)).dialogs[0]?.conversation.selfPermissions?.pinMessages).toBe(false)
 
     expect(members.total).toBe(2)
     expect(members.members.find((item) => item.user.id === '@alice:example.org')).toMatchObject({
@@ -690,6 +696,199 @@ describe('MatrixPlatform', () => {
     await vi.waitFor(() => expect(deliveries).toBe(2), { timeout: 4_000 })
     await unsubscribe()
     expect(tokens.slice(0, 3)).toEqual([null, 's0', 's0'])
+  })
+
+  it('treats missing Matrix messages as absent but propagates permission errors', async () => {
+    const fetch = routeFetch((url) => {
+      if (url.pathname.endsWith('/event/%24missing')) {
+        return json({ errcode: 'M_NOT_FOUND' }, { status: 404 })
+      }
+      if (url.pathname.endsWith('/event/%24forbidden')) {
+        return json({ errcode: 'M_FORBIDDEN' }, { status: 403 })
+      }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch)
+    await expect(platform.getMessage(session, { id: '!room:example.org' }, '$missing'))
+      .resolves.toBeNull()
+    await expect(platform.getMessage(session, { id: '!room:example.org' }, '$forbidden'))
+      .rejects.toMatchObject({ status: 403, errcode: 'M_FORBIDDEN' })
+  })
+
+  it('pins and unpins Matrix events without losing other pins in concurrent writes', async () => {
+    let pinned: string[] = []
+    let muted = false
+    const requests: string[] = []
+    const fetch = routeFetch(async (url, init) => {
+      const method = init?.method ?? 'GET'
+      requests.push(`${method} ${url.pathname}`)
+      if (url.pathname.endsWith('/state/m.room.pinned_events')) {
+        if (method === 'GET') return json({ pinned })
+        pinned = (JSON.parse(init?.body as string) as { pinned: string[] }).pinned
+        return json({ event_id: '$pins' })
+      }
+      if (url.pathname.includes('/pushrules/global/room/')) {
+        if (method === 'GET') return muted
+          ? json({ actions: ['dont_notify'], enabled: true })
+          : json({ errcode: 'M_NOT_FOUND' }, { status: 404 })
+        muted = method === 'PUT'
+        return json({})
+      }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch)
+    const conversation = { id: '!room:example.org' }
+    expect(platform.capabilities.messageActions?.pin).toEqual({ read: true, write: true })
+    expect(platform.capabilities.notifications).toEqual({ read: true, mute: true })
+
+    await Promise.all([
+      platform.setMessagePinned(session, conversation, '$one', true),
+      platform.setMessagePinned(session, conversation, '$two', true),
+    ])
+    expect(await platform.getPinnedMessageIds(session, conversation)).toEqual(['$one', '$two'])
+    await platform.setMessagePinned(session, conversation, '$one', true)
+    expect(requests.filter((request) => request.startsWith('PUT ') && request.includes('/state/')))
+      .toHaveLength(2)
+    await platform.setMessagePinned(session, conversation, '$one', false)
+    expect(await platform.getPinnedMessageIds(session, conversation)).toEqual(['$two'])
+    await Promise.all([
+      platform.clearPinnedMessages(session, conversation),
+      platform.setMessagePinned(session, conversation, '$after-clear', true),
+    ])
+    expect(await platform.getPinnedMessageIds(session, conversation)).toEqual(['$after-clear'])
+    const writesBefore = requests.filter((request) =>
+      request.startsWith('PUT ') && request.includes('/state/')).length
+    await platform.clearPinnedMessages(session, conversation)
+    await platform.clearPinnedMessages(session, conversation)
+    expect(await platform.getPinnedMessageIds(session, conversation)).toEqual([])
+    expect(requests.filter((request) =>
+      request.startsWith('PUT ') && request.includes('/state/'))).toHaveLength(writesBefore + 1)
+
+    await platform.setConversationNotificationSettings(session, conversation, { muted: true })
+    expect(await platform.getConversationNotificationSettings(session, conversation))
+      .toEqual({ muted: true })
+    await platform.setConversationNotificationSettings(session, conversation, { muted: false })
+    expect(await platform.getConversationNotificationSettings(session, conversation))
+      .toEqual({ muted: false })
+  })
+
+  it('streams external pins and echoes local Matrix state IDs for durable deduplication', async () => {
+    const roomId = '!room:example.org'
+    let sync = 0
+    let nativePins = ['$one']
+    let releaseEcho!: (response: Response) => void
+    const echo = new Promise<Response>((resolve) => { releaseEcho = resolve })
+    const state = (pinned: string[], id: string) =>
+      event('m.room.pinned_events', { pinned }, { id, stateKey: '', ts: 1_000 * sync })
+    const roomSync = (next: string, pinned: string[], id: string) => json({
+      next_batch: next,
+      rooms: { join: { [roomId]: { state: { events: [state(pinned, id)] } } } },
+    })
+    const fetch = routeFetch((url, init) => {
+      if (url.pathname.endsWith('/sync')) {
+        sync++
+        if (sync === 1) return json({
+          next_batch: 's1', rooms: { join: { [roomId]: {
+            state: { events: [...roomState, state(['$one'], '$initial')] },
+          } } },
+        })
+        if (sync === 2) {
+          nativePins = ['$one', '$two']
+          return roomSync('s2', nativePins, '$external-add')
+        }
+        if (sync === 3) {
+          nativePins = ['$two', '$one']
+          return roomSync('s3', nativePins, '$external-order')
+        }
+        if (sync === 4) {
+          nativePins = ['$two']
+          return roomSync('s4', nativePins, '$external-remove')
+        }
+        if (sync === 5) return echo
+        return pendingUntilAbort(init?.signal)
+      }
+      if (url.pathname.endsWith('/state/m.room.pinned_events')) {
+        if (init?.method === 'PUT') {
+          nativePins = (JSON.parse(String(init.body)) as { pinned: string[] }).pinned
+          return json({ event_id: '$local' })
+        }
+        return json({ pinned: nativePins })
+      }
+      throw new Error(`unexpected Matrix HTTP call: ${url}`)
+    })
+    const platform = createPlatform(fetch, { userId: session.userId, syncTimeoutMs: 50 })
+    const observed: IMEvent[] = []
+    const unsubscribe = await platform.subscribe(session, (value) => { observed.push(value) })
+    await vi.waitFor(() => expect(observed.filter((item) => item.type === 'message-pins')).toHaveLength(3))
+    const pins = observed.filter((item): item is Extract<IMEvent, { type: 'message-pins' }> =>
+      item.type === 'message-pins')
+    expect(pins.map((item) => ({
+      eventId: item.eventId,
+      pinned: item.pinnedMessageIds,
+      removed: item.removedMessageIds,
+    }))).toEqual([
+      { eventId: '$external-add', pinned: ['$one', '$two'], removed: [] },
+      { eventId: '$external-order', pinned: ['$two', '$one'], removed: [] },
+      { eventId: '$external-remove', pinned: ['$two'], removed: ['$one'] },
+    ])
+
+    const mutation = await platform.setMessagePinned(session, { id: roomId }, '$self', true)
+    expect(mutation).toEqual({
+      changed: true, eventId: '$local', pinnedMessageIds: ['$two', '$self'],
+    })
+    // A redundant write never allocates a second Matrix state event or PTS.
+    await expect(platform.setMessagePinned(session, { id: roomId }, '$self', true))
+      .resolves.toEqual({ changed: false, pinnedMessageIds: ['$two', '$self'] })
+    expect(nativePins).toEqual(['$two', '$self'])
+    releaseEcho(roomSync('s5', nativePins, '$local'))
+    await vi.waitFor(() =>
+      expect(observed.filter((item) => item.type === 'message-pins')).toHaveLength(4))
+    await unsubscribe()
+    expect(observed.at(-1)).toMatchObject({
+      type: 'message-pins', eventId: '$local',
+      pinnedMessageIds: ['$two', '$self'], removedMessageIds: [],
+    })
+  })
+
+  it('retries a rejected pin event without advancing the Matrix sync token or snapshot', async () => {
+    const roomId = '!room:example.org'
+    const requestedTokens: Array<string | null> = []
+    const fetch = routeFetch((url, init) => {
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      requestedTokens.push(url.searchParams.get('since'))
+      if (requestedTokens.length === 1) {
+        return json({ next_batch: 'start', rooms: { join: {
+          [roomId]: { state: { events: [
+            ...roomState,
+            event('m.room.pinned_events', { pinned: ['$old'] }, { id: '$initial', stateKey: '' }),
+          ] } },
+        } } })
+      }
+      if (url.searchParams.get('since') === 'start') {
+        return json({ next_batch: 'advance', rooms: { join: {
+          [roomId]: { state: { events: [
+            event('m.room.pinned_events', { pinned: ['$new'] }, {
+              id: '$retry-pin', stateKey: '', ts: 2_000,
+            }),
+          ] } },
+        } } })
+      }
+      return pendingUntilAbort(init?.signal)
+    })
+    const platform = createPlatform(fetch, { userId: session.userId, syncTimeoutMs: 50 })
+    const delivered: Array<Extract<IMEvent, { type: 'message-pins' }>> = []
+    const unsubscribe = await platform.subscribe(session, async (value) => {
+      if (value.type !== 'message-pins') return
+      delivered.push(value)
+      if (delivered.length === 1) throw new Error('temporary delivery failure')
+    })
+    await vi.waitFor(() => expect(delivered).toHaveLength(2), { timeout: 4_000 })
+    await unsubscribe()
+    expect(requestedTokens.slice(0, 3)).toEqual([null, 'start', 'start'])
+    expect(delivered[0]).toMatchObject({
+      eventId: '$retry-pin', pinnedMessageIds: ['$new'], removedMessageIds: ['$old'],
+    })
+    expect(delivered[1]).toEqual(delivered[0])
   })
 
   it('subscribes from an initial token and emits messages, edits, redactions, receipts, and conversation changes', async () => {
@@ -1103,16 +1302,8 @@ describe('MatrixPlatform', () => {
 })
 
 function createPlatform(fetch: typeof globalThis.fetch, extra: Record<string, unknown> = {}) {
-  // Existing platform fixtures model unencrypted rooms unless a test opts into
-  // the real HTTP encryption probe using the MatrixPlatform constructor.
-  const unencryptedFixture: typeof globalThis.fetch = (input, init) => {
-    if (new URL(String(input)).pathname.endsWith('/state/m.room.encryption')) {
-      return Promise.resolve(json({ errcode: 'M_NOT_FOUND' }, { status: 404 }))
-    }
-    return fetch(input, init)
-  }
   return new MatrixPlatform({
-    homeserver: 'https://matrix.example.org', accessToken: 'token', fetch: unencryptedFixture,
+    homeserver: 'https://matrix.example.org', accessToken: 'token', fetch,
     ...extra,
   })
 }
@@ -1139,8 +1330,13 @@ function json(value: unknown, init?: ResponseInit): Response {
 
 function routeFetch(
   handler: (url: URL, init?: RequestInit) => Response | Promise<Response>,
+  roomState: (url: URL, init?: RequestInit) => Response | Promise<Response> = () => json([]),
 ): typeof globalThis.fetch {
-  return async (input, init) => handler(new URL(String(input)), init)
+  return async (input, init) => {
+    const url = new URL(String(input))
+    if (url.pathname.endsWith('/state')) return roomState(url, init)
+    return handler(url, init)
+  }
 }
 
 function pendingUntilAbort(signal?: AbortSignal | null): Promise<Response> {

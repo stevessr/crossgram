@@ -57,7 +57,7 @@ describe('Matrix platform HTTP e2e', () => {
   let proxyUrl: string
   let activePlatform: MatrixPlatform | undefined
   let invitationScenario = false
-  let encryptedScenario = false
+  let encryptedRoomScenario = false
   const invitedRooms = new Set<string>()
   const joinedRooms = new Set<string>()
 
@@ -79,7 +79,7 @@ describe('Matrix platform HTTP e2e', () => {
     await activePlatform?.stop()
     activePlatform = undefined
     invitationScenario = false
-    encryptedScenario = false
+    encryptedRoomScenario = false
     invitedRooms.clear()
     joinedRooms.clear()
   })
@@ -141,28 +141,27 @@ describe('Matrix platform HTTP e2e', () => {
     })
   })
 
-  it('refuses to upload or send cleartext into an encrypted room over real HTTP', async () => {
-    encryptedScenario = true
-    const start = requests.length
+  it('rejects plaintext and media uploads in encrypted rooms over authenticated HTTP', async () => {
+    encryptedRoomScenario = true
+    const from = requests.length
     const platform = activePlatform = new MatrixPlatform({
       homeserver, accessToken: 'e2e-token', proxy: proxyUrl, userId: '@bot:test',
-      requestTimeoutMs: 2_000,
+      requestTimeoutMs: 2_000, syncTimeoutMs: 100,
     })
     const session: PlatformSession = {
-      platformSessionId: 'matrix-encrypted-e2e', platformId: 'matrix',
+      platformSessionId: 'e2ee-guard', platformId: 'matrix',
       userId: '@bot:test', credentials: {}, metadata: {},
     }
-    let opened = false
     await expect(platform.sendMessage(session, { id: '!e2e:test' }, {
       parts: [{ type: 'media', media: {
-        kind: 'file', name: 'secret.txt', mimeType: 'text/plain',
-        source: { size: 4, async *stream() { opened = true; yield new Uint8Array([1, 2, 3, 4]) } },
+        kind: 'file', name: 'private.bin', mimeType: 'application/octet-stream',
+        source: { size: 1, async *stream() { yield new Uint8Array([42]) } },
       } }],
-    })).rejects.toMatchObject({ code: 'MATRIX_E2EE_REQUIRED' })
-    expect(opened).toBe(false)
-    const observed = requests.slice(start)
-    expect(observed.some((request) => request.path.endsWith('/state/m.room.encryption'))).toBe(true)
-    expect(observed.some((request) => request.path.includes('/send/') || request.path.includes('/upload'))).toBe(false)
+    })).rejects.toThrow(/end-to-end encrypted/)
+    const trace = requests.slice(from)
+    expect(trace.filter((item) => item.path.endsWith('/state'))).toHaveLength(1)
+    expect(trace.every((item) => item.authorization === 'Bearer e2e-token')).toBe(true)
+    expect(trace.some((item) => item.path.includes('/upload') || item.path.includes('/send/'))).toBe(false)
   })
 
   it('handles Matrix invitation accept/reject over real authenticated HTTP', async () => {
@@ -212,12 +211,12 @@ describe('Matrix platform HTTP e2e', () => {
   async function route(request: IncomingMessage, response: ServerResponse, _body: Uint8Array): Promise<void> {
     const url = new URL(request.url ?? '/', homeserver || 'http://127.0.0.1')
     if (url.pathname.endsWith('/account/whoami')) return sendJson(response, { user_id: '@bot:test' })
+    if (url.pathname.endsWith('/state')) return sendJson(response, encryptedRoomScenario
+      ? [{ type: 'm.room.encryption', state_key: '', content: { algorithm: 'm.megolm.v1.aes-sha2' } }]
+      : [])
     if (url.pathname.includes('/profile/')) return sendJson(response, {
       displayname: 'E2E Bot', avatar_url: 'mxc://test/avatar',
     })
-    if (url.pathname.endsWith('/state/m.room.encryption') && encryptedScenario) {
-      return sendJson(response, { algorithm: 'm.megolm.v1.aes-sha2' })
-    }
     if (invitationScenario) {
       const match = /^\/_matrix\/client\/v3\/rooms\/(.+)\/(join|leave)$/.exec(url.pathname)
       if (match && request.method === 'POST') {

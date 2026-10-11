@@ -69,27 +69,71 @@ export class MatrixClient {
     return this.request(`/_matrix/client/v3/user/${segment(userId)}/account_data/m.direct`)
   }
 
-  /**
-   * Probe the authoritative state, rather than assuming the room is cleartext
-   * when an incremental /sync omitted its encryption state.
-   *
-   * Only M_NOT_FOUND means no encryption state; timeouts, permission errors,
-   * malformed responses, and other 404s must stop plaintext writes.
-   */
-  async hasRoomEncryption(roomId: string): Promise<boolean> {
-    try {
-      await this.request<unknown>(`/_matrix/client/v3/rooms/${segment(roomId)}/state/m.room.encryption`)
-      return true
-    } catch (error) {
-      if (error instanceof MatrixHttpError && error.status === 404 && error.errcode === 'M_NOT_FOUND') {
-        return false
-      }
+  getRoomState(roomId: string): Promise<MatrixEvent[]> {
+    return this.request(`/_matrix/client/v3/rooms/${segment(roomId)}/state`)
+  }
+
+  /** m.room.pinned_events is a room state event; 404 means it has not been set. */
+  async getRoomPinnedEvents(roomId: string): Promise<string[]> {
+    const content = await this.request<{ pinned?: unknown }>(
+      `/_matrix/client/v3/rooms/${segment(roomId)}/state/m.room.pinned_events`,
+    ).catch((error: unknown) => {
+      if (error instanceof MatrixHttpError && error.status === 404) return { pinned: [] }
       throw error
+    })
+    return Array.isArray(content.pinned)
+      ? content.pinned.filter((id): id is string => typeof id === 'string')
+      : []
+  }
+
+  async setRoomPinnedEvents(roomId: string, pinned: readonly string[]): Promise<string> {
+    const response = await this.request<{ event_id: string }>(
+      `/_matrix/client/v3/rooms/${segment(roomId)}/state/m.room.pinned_events`,
+      { method: 'PUT', body: { pinned } },
+    )
+    if (!response?.event_id) throw new Error('Matrix pin state write did not return an event ID')
+    return response.event_id
+  }
+
+  /** Matrix push rules are private to the authenticated account, not room state. */
+  async getRoomNotificationMuted(roomId: string): Promise<boolean> {
+    const rule = await this.getRoomPushRule(roomId)
+    return Boolean(rule?.enabled !== false && rule?.actions.includes('dont_notify'))
+  }
+
+  async setRoomNotificationMuted(roomId: string, muted: boolean): Promise<void> {
+    const rule = await this.getRoomPushRule(roomId)
+    const currentlyMuted = Boolean(rule?.enabled !== false && rule?.actions.includes('dont_notify'))
+    const path = `/_matrix/client/v3/pushrules/global/room/${segment(roomId)}`
+    if (muted) {
+      if (currentlyMuted) return
+      // Preserve existing per-room tweaks instead of discarding custom rules.
+      const tweaks = rule?.actions.filter((action) => typeof action !== 'string') ?? []
+      await this.request(path, {
+        method: 'PUT', body: { actions: ['dont_notify', ...tweaks] },
+      })
+      if (rule?.enabled === false) {
+        await this.request(`${path}/enabled`, { method: 'PUT', body: { enabled: true } })
+      }
+    } else if (rule && currentlyMuted) {
+      const preserved = rule.actions.filter((action) => action !== 'dont_notify' && action !== 'notify')
+      if (preserved.length) {
+        await this.request(path, { method: 'PUT', body: { actions: ['notify', ...preserved] } })
+      } else {
+        await this.request(path, { method: 'DELETE' })
+      }
     }
   }
 
-  getRoomState(roomId: string): Promise<MatrixEvent[]> {
-    return this.request(`/_matrix/client/v3/rooms/${segment(roomId)}/state`)
+  private async getRoomPushRule(roomId: string): Promise<{
+    actions: Array<string | Record<string, unknown>>, enabled?: boolean
+  } | null> {
+    return this.request<{ actions: Array<string | Record<string, unknown>>, enabled?: boolean }>(
+      `/_matrix/client/v3/pushrules/global/room/${segment(roomId)}`,
+    ).catch((error: unknown) => {
+      if (error instanceof MatrixHttpError && error.status === 404) return null
+      throw error
+    })
   }
 
   getMembers(roomId: string): Promise<MatrixMembersResponse> {
@@ -300,7 +344,7 @@ export class MatrixClient {
 }
 
 interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PUT'
+  method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
   query?: Record<string, string | number | boolean | undefined>
   headers?: HeadersInit
   body?: unknown
