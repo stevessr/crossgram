@@ -1176,7 +1176,7 @@ export class DialogRpc {
       this._throwMessageAction(error, 'CHAT_ADMIN_REQUIRED')
     }
     const now = Math.floor(Date.now() / 1000)
-    if (mutation?.changed === false) {
+    if (mutation && mutation.changed === false) {
       // A repeated pin/unpin request made no native state change, so it must
       // not allocate a new Telegram PTS or announce a phantom state update.
       return { response: this._updates(conversation, [], now), published: true }
@@ -1258,7 +1258,7 @@ export class DialogRpc {
       this._throwMessageAction(error, 'CHAT_ADMIN_REQUIRED')
     }
     const now = Math.floor(Date.now() / 1000)
-    if (mutation?.changed === false) {
+    if (mutation && mutation.changed === false) {
       const pts = conversation.kind === 'direct'
         ? (await this._store.getUpdateState(this._session.platformSessionId)).pts
         : await this._channelPts(conversation)
@@ -1313,13 +1313,13 @@ export class DialogRpc {
     options: PlatformEventDeliveryOptions = this._localDelivery(),
   ): Promise<tl.RawUpdates | undefined> {
     if (!this._onLocalEvent || !this._platform.getPinnedMessageIds) return
-    const pinnedMessageIds = mutation?.pinnedMessageIds
+    const pinnedMessageIds = (mutation && mutation.pinnedMessageIds)
       ?? await this._platform.getPinnedMessageIds(this._session, conversation)
     const event: IMEvent = {
       type: 'message-pins',
       // Matrix returns the very same ID in /sync. Both paths now reuse one
       // durable delivery key, even if the echo races with the originating RPC.
-      eventId: mutation?.eventId ?? `relay-pin:${conversation.id}:${Date.now()}:${Math.random()}`,
+      eventId: (mutation && mutation.eventId) || `relay-pin:${conversation.id}:${Date.now()}:${Math.random()}`,
       conversation, pinnedMessageIds, removedMessageIds, timestamp,
     }
     const published = await this._onLocalEvent(this._session, event, options)
