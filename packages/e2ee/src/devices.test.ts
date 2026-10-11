@@ -7,15 +7,6 @@ import {
   generateDeviceIdentity, openMessage, publicDevice, MemoryReplayGuard,
 } from './envelope.js'
 
-class MemoryDevicePinStoreWithDevice extends MemoryDevicePinStore {
-  constructor(identity: ReturnType<typeof generateDeviceIdentity>) {
-    super()
-    const bundle = exportDeviceBundle(identity)
-    // Memory store methods complete their insertion synchronously.
-    void this.pinIfAbsent('bob-account', bundle)
-  }
-}
-
 describe('CrossGram E2EE public-device identity exchange', () => {
   it('roundtrips portable public bundles without serializing private keys', () => {
     const alice = generateDeviceIdentity('alice-desktop')
@@ -95,14 +86,16 @@ describe('CrossGram E2EE public-device identity exchange', () => {
     const pins = new MemoryDevicePinStore()
     const aliceBundle = exportDeviceBundle(sender)
     await verifyAndPinDevice(pins, 'alice-account', aliceBundle, bundleFingerprint(aliceBundle))
+    const bobPins = new MemoryDevicePinStore()
+    const bobBundle = exportDeviceBundle(bob)
+    await verifyAndPinDevice(bobPins, 'bob-account', bobBundle, bundleFingerprint(bobBundle))
     const trustedEnvelope = (await sealToPinnedDevices(new TextEncoder().encode('verified'),
-      'private', sender, new MemoryDevicePinStoreWithDevice(bob),
-      'bob-account', ['bob']))[0]
+      'private', sender, bobPins, 'bob-account', ['bob']))[0]
     expect(new TextDecoder().decode(await openFromPinnedDevice(trustedEnvelope, 'private',
       bob, pins, 'alice-account', new MemoryReplayGuard()))).toBe('verified')
 
     const forgedEnvelope = (await sealToPinnedDevices(new Uint8Array([1]), 'private', attacker,
-      new MemoryDevicePinStoreWithDevice(bob), 'bob-account', ['bob']))[0]
+      bobPins, 'bob-account', ['bob']))[0]
     await expect(openFromPinnedDevice(forgedEnvelope, 'private', bob, pins,
       'alice-account', new MemoryReplayGuard())).rejects.toThrow('E2EE_SIGNATURE_INVALID')
     await pins.revoke('alice-account', 'alice')
