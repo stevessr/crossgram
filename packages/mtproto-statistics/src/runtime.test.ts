@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
+import { getHeapStatistics } from 'node:v8'
 import { RuntimeMonitor } from './runtime.js'
 
 describe('RuntimeMonitor', () => {
@@ -16,5 +17,36 @@ describe('RuntimeMonitor', () => {
     } finally {
       monitor.dispose()
     }
+  })
+
+  it('caches expensive heap traversal while continuing to sample CPU and event-loop metrics', () => {
+    let now = 1_000
+    const readHeapStatistics = vi.fn(getHeapStatistics)
+    const monitor = new RuntimeMonitor({
+      getHeapStatistics: readHeapStatistics,
+      now: () => now,
+    })
+    try {
+      const first = monitor.sample()
+      now += 9_000
+      const second = monitor.sample()
+      expect(readHeapStatistics).toHaveBeenCalledOnce()
+      expect(second.cpuPercent).toBeGreaterThanOrEqual(0)
+      expect(second.eventLoopUtilization).toBeGreaterThanOrEqual(0)
+      expect(second.heapLimitBytes).toBe(first.heapLimitBytes)
+      expect(second.mallocedBytes).toBe(first.mallocedBytes)
+
+      now += 1_001
+      monitor.sample()
+      expect(readHeapStatistics).toHaveBeenCalledTimes(2)
+    } finally {
+      monitor.dispose()
+    }
+  })
+
+  it('rejects invalid heap statistics sampling intervals', () => {
+    expect(() => new RuntimeMonitor({ heapStatisticsSampleIntervalMs: 0 })).toThrow(
+      'Heap statistics sample interval must be a positive finite number',
+    )
   })
 })

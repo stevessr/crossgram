@@ -10,6 +10,14 @@ import { getHeapStatistics } from 'node:v8'
 import type { RuntimeSnapshot } from './types.js'
 
 const CGROUP_SAMPLE_INTERVAL_MS = 5_000
+const HEAP_STATISTICS_SAMPLE_INTERVAL_MS = 10_000
+
+export interface RuntimeMonitorOptions {
+  /** Heap traversal is expensive on Bun/JSC; refresh it less often than CPU/ELU. */
+  heapStatisticsSampleIntervalMs?: number
+  getHeapStatistics?: typeof getHeapStatistics
+  now?: () => number
+}
 
 interface CgroupMemorySnapshot {
   currentBytes: number
@@ -37,10 +45,22 @@ export class RuntimeMonitor {
   private gcDurationMs = 0
   private readonly observer: PerformanceObserver
   private readonly cgroupPath = unifiedCgroupPath()
+  private readonly heapStatisticsSampleIntervalMs: number
+  private readonly readHeapStatistics: typeof getHeapStatistics
+  private readonly now: () => number
+  private heapStatistics?: ReturnType<typeof getHeapStatistics>
+  private nextHeapStatisticsSampleAt = Number.NEGATIVE_INFINITY
   private cgroup = EMPTY_CGROUP_MEMORY
   private nextCgroupSampleAt = 0
 
-  constructor() {
+  constructor(options: RuntimeMonitorOptions = {}) {
+    this.heapStatisticsSampleIntervalMs = options.heapStatisticsSampleIntervalMs ?? HEAP_STATISTICS_SAMPLE_INTERVAL_MS
+    if (!Number.isFinite(this.heapStatisticsSampleIntervalMs) || this.heapStatisticsSampleIntervalMs <= 0) {
+      throw new RangeError('Heap statistics sample interval must be a positive finite number')
+    }
+    this.readHeapStatistics = options.getHeapStatistics ?? getHeapStatistics
+    this.now = options.now ?? performance.now.bind(performance)
+    this.previousTime = this.now()
     this.delay.enable()
     this.observer = new PerformanceObserver((list) => {
       for (const entry of list.getEntries()) {
@@ -52,12 +72,16 @@ export class RuntimeMonitor {
   }
 
   sample(): RuntimeSnapshot {
-    const now = performance.now()
+    const now = this.now()
     const cpu = process.cpuUsage(this.previousCpu)
     const elapsedMs = Math.max(1, now - this.previousTime)
     const elu = performance.eventLoopUtilization(this.previousElu)
     const memory = process.memoryUsage()
-    const heap = getHeapStatistics()
+    if (!this.heapStatistics || now >= this.nextHeapStatisticsSampleAt) {
+      this.heapStatistics = this.readHeapStatistics()
+      this.nextHeapStatisticsSampleAt = now + this.heapStatisticsSampleIntervalMs
+    }
+    const heap = this.heapStatistics
     if (now >= this.nextCgroupSampleAt) {
       this.cgroup = readCgroupMemory(this.cgroupPath)
       this.nextCgroupSampleAt = now + CGROUP_SAMPLE_INTERVAL_MS
