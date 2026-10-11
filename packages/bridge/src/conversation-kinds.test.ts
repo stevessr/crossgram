@@ -2141,6 +2141,7 @@ describe('conversation kinds', () => {
       parentId: parent.id, spaceId: 'guild',
     }
     const pages: Array<string | undefined> = []
+    const histories: string[] = []
     const selectedPlatform: IMPlatform = {
       ...platform,
       async getDialogs() {
@@ -2158,6 +2159,7 @@ describe('conversation kinds', () => {
         }
       },
       async getHistory(localSession, target, query) {
+        histories.push(target.id)
         if (target.id === later.id) return { messages: [source(later)] }
         return platform.getHistory!(localSession, target, query)
       },
@@ -2174,6 +2176,7 @@ describe('conversation kinds', () => {
       _: 'messages.forumTopics', count: 1, topics: [{ _: 'forumTopic', title: 'Later Match' }],
     })
     expect(pages).toEqual([undefined, first.id])
+    expect(histories).toEqual([later.id])
     expect(() => roundTrip(topics)).not.toThrow()
   })
 
