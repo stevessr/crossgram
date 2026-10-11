@@ -836,6 +836,8 @@ export class DialogRpc {
       messages.push(message)
     }
     const materialized = await this._visibleMessages(await this._materializeSearchMessages(peerId, messages))
+    // Telegram expects the newest matching messages first.
+    materialized.sort((a, b) => b.source.timestamp - a.source.timestamp || b.tlId - a.tlId)
     const q = req.q.toLocaleLowerCase()
     const filtered = materialized.filter((item) =>
       (!req.offsetId || item.tlId < req.offsetId)
@@ -1577,10 +1579,38 @@ export class DialogRpc {
     }
   }
 
+  /** Resolve the last native pin to its durable Telegram message id for chat banners. */
+  private async _currentPinnedTlId(conversation: IMConversation): Promise<number | undefined> {
+    if (!this._store || !this._platform.getPinnedMessageIds) return
+    try {
+      const pinned = await this._platform.getPinnedMessageIds(this._session, conversation)
+      for (const id of pinned.slice().reverse()) {
+        let projected = await this._store.findProjectedByPlatformId(
+          this._session.platformSessionId, conversation.id, id,
+        )
+        if (!projected && this._platform.getMessage) {
+          const message = await this._platform.getMessage(this._session, conversation, id)
+          if (message) {
+            await this._store.ingest(this._session, conversation, message)
+            projected = await this._store.findProjectedByPlatformId(
+              this._session.platformSessionId, conversation.id, id,
+            )
+          }
+        }
+        const tlId = projected?.parts[0]?.tlMessageId
+        if (tlId !== undefined) return tlId
+      }
+    } catch (error) {
+      // Losing pin visibility must not prevent the user opening the room.
+      this._onTrace?.('pinned message lookup failed peer=%s error=%s', conversation.id, String(error))
+    }
+  }
+
   async getFullChannel(req: tl.channels.RawGetFullChannelRequest): Promise<tl.messages.RawChatFull> {
     await this._hydratePeers()
     const conversation = this._resolveChannel(req.channel)
     const pts = await this._channelPts(conversation)
+    const pinnedMsgId = await this._currentPinnedTlId(conversation)
     const reactionContext = await this._platform.getAvailableReactions?.(
       this._session, { conversationId: conversation.id },
     )
@@ -1591,6 +1621,7 @@ export class DialogRpc {
         canViewParticipants: true,
         participantsCount: Number(conversation.metadata?.participantsCount ?? 0),
         readInboxMaxId: 0, readOutboxMaxId: 0, unreadCount: 0,
+        pinnedMsgId,
         chatPhoto: { _: 'photoEmpty', id: Long.ZERO },
         notifySettings: await this._peerNotifySettings(conversation.id), botInfo: [], pts,
         availableReactions: this._reactions?.chatReactions(conversation.id, reactionContext),
@@ -5802,10 +5833,15 @@ export class DialogRpc {
     if (target.type === 'peer' && this._platform.getConversationNotificationSettings
       && (persisted.muteUntil === undefined || persisted.muteUntil === 0
         || persisted.muteUntil === MUTE_FOREVER)) {
-      const native = await this._platform.getConversationNotificationSettings(
-        this._session, { id: target.peerId },
-      )
-      merged = { ...merged, muteUntil: native.muted ? MUTE_FOREVER : 0 }
+      try {
+        const native = await this._platform.getConversationNotificationSettings(
+          this._session, { id: target.peerId },
+        )
+        merged = { ...merged, muteUntil: native.muted ? MUTE_FOREVER : 0 }
+      } catch (error) {
+        // A temporarily unavailable homeserver should not break dialogs.
+        this._onTrace?.('native notification lookup failed peer=%s error=%s', target.peerId, String(error))
+      }
     }
     if (target.type !== 'peer' || !this._notificationSettings) return merged
     // Telegram answers with the *effective* settings of a peer. Clients treat
