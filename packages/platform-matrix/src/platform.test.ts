@@ -257,7 +257,8 @@ describe('MatrixPlatform', () => {
       { path: '/_matrix/client/v3/rooms/!beta%3Aexample.org/leave', method: 'POST' },
     ])
     await expect(platform.resolveRequest(session, requests[0]!.id, 'accept'))
-      .rejects.toThrow(/no longer pending/)
+      .resolves.toMatchObject({ state: 'accepted' })
+    expect(actions).toHaveLength(2)
   })
 
   it('uses one stable sync snapshot across request-list pages', async () => {
@@ -325,6 +326,45 @@ describe('MatrixPlatform', () => {
     await expect(platform.resolveRequest(session, original.id, 'reject'))
       .rejects.toThrow(/no longer pending/)
     expect(actions).toEqual(['join'])
+  })
+
+  it('emits the terminal request again after a successful API action', async () => {
+    let sync = 0
+    let joins = 0
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      const url = new URL(String(input))
+      if (url.pathname.endsWith('/join')) {
+        joins++
+        return json({ room_id: '!room:example.org' })
+      }
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      sync++
+      if (sync <= 2) return json({
+        next_batch: `s${sync}`, rooms: { invite: { '!room:example.org': { invite_state: { events: [
+          event('m.room.member', { membership: 'invite' }, {
+            stateKey: '@me:example.org', sender: '@alice:example.org', id: '$invite',
+          }),
+        ] } } } },
+      })
+      if (sync === 3) return json({
+        next_batch: 's3', rooms: { join: { '!room:example.org': {} } },
+      })
+      return pendingUntilAbort(init?.signal)
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org', syncTimeoutMs: 50 })
+    const request = (await platform.getRequests(session)).requests[0]!
+    await platform.resolveRequest(session, request.id, 'accept')
+    await expect(platform.resolveRequest(session, request.id, 'accept'))
+      .resolves.toMatchObject({ state: 'accepted' })
+    expect(joins).toBe(1)
+    const events: IMEvent[] = []
+    const unsubscribe = await platform.subscribe(session, (value) => { events.push(value) })
+    await vi.waitFor(() => expect(events.some((value) =>
+      value.type === 'request' && value.request.state === 'accepted')).toBe(true))
+    await unsubscribe()
+    const terminal = events.find((value) => value.type === 'request')
+    expect(terminal).toMatchObject({ request: { id: request.id, state: 'accepted' } })
+    expect(joins).toBe(1)
   })
 
   it('keeps an invitation pending when an accept operation fails', async () => {
