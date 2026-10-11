@@ -36,6 +36,7 @@ export interface MatrixRoomMemberContent {
   membership?: 'invite' | 'join' | 'knock' | 'leave' | 'ban'
   displayname?: string
   avatar_url?: string
+  reason?: string
 }
 
 export interface MatrixRoomMessageContent {
@@ -72,6 +73,7 @@ export interface MatrixSyncResponse {
   next_batch: string
   rooms?: {
     join?: Record<string, MatrixJoinedRoom>
+    invite?: Record<string, MatrixInvitedRoom>
     leave?: Record<string, MatrixLeftRoom>
   }
   account_data?: { events?: MatrixEvent[] }
@@ -88,6 +90,11 @@ export interface MatrixJoinedRoom {
     'm.joined_member_count'?: number
     'm.invited_member_count'?: number
   }
+}
+
+/** Invited rooms contain stripped state rather than a joined-room timeline. */
+export interface MatrixInvitedRoom {
+  invite_state?: { events?: MatrixEvent[] }
 }
 
 export interface MatrixLeftRoom {
