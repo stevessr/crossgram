@@ -73,6 +73,54 @@ export class MatrixClient {
     return this.request(`/_matrix/client/v3/rooms/${segment(roomId)}/state`)
   }
 
+  /** m.room.pinned_events is a room state event; 404 means it has not been set. */
+  async getRoomPinnedEvents(roomId: string): Promise<string[]> {
+    const content = await this.request<{ pinned?: unknown }>(
+      `/_matrix/client/v3/rooms/${segment(roomId)}/state/m.room.pinned_events`,
+    ).catch((error: unknown) => {
+      if (error instanceof MatrixHttpError && error.status === 404) return { pinned: [] }
+      throw error
+    })
+    return Array.isArray(content.pinned)
+      ? content.pinned.filter((id): id is string => typeof id === 'string')
+      : []
+  }
+
+  async setRoomPinnedEvents(roomId: string, pinned: readonly string[]): Promise<void> {
+    await this.request(
+      `/_matrix/client/v3/rooms/${segment(roomId)}/state/m.room.pinned_events`,
+      { method: 'PUT', body: { pinned } },
+    )
+  }
+
+  /** Matrix push rules are private to the authenticated account, not room state. */
+  async getRoomNotificationMuted(roomId: string): Promise<boolean> {
+    const rule = await this.getRoomPushRule(roomId)
+    return Boolean(rule?.enabled !== false && rule?.actions.includes('dont_notify'))
+  }
+
+  async setRoomNotificationMuted(roomId: string, muted: boolean): Promise<void> {
+    const rule = await this.getRoomPushRule(roomId)
+    const currentlyMuted = Boolean(rule?.enabled !== false && rule?.actions.includes('dont_notify'))
+    if (muted) {
+      if (currentlyMuted) return
+      await this.request(`/_matrix/client/v3/pushrules/global/room/${segment(roomId)}`, {
+        method: 'PUT', body: { actions: ['dont_notify'] },
+      })
+    } else if (rule && currentlyMuted) {
+      await this.request(`/_matrix/client/v3/pushrules/global/room/${segment(roomId)}`, { method: 'DELETE' })
+    }
+  }
+
+  private async getRoomPushRule(roomId: string): Promise<{ actions: string[], enabled?: boolean } | null> {
+    return this.request<{ actions: string[], enabled?: boolean }>(
+      `/_matrix/client/v3/pushrules/global/room/${segment(roomId)}`,
+    ).catch((error: unknown) => {
+      if (error instanceof MatrixHttpError && error.status === 404) return null
+      throw error
+    })
+  }
+
   getMembers(roomId: string): Promise<MatrixMembersResponse> {
     return this.request(`/_matrix/client/v3/rooms/${segment(roomId)}/members`, {
       query: { membership: 'join' },
@@ -227,7 +275,7 @@ export class MatrixClient {
 }
 
 interface RequestOptions {
-  method?: 'GET' | 'POST' | 'PUT'
+  method?: 'GET' | 'POST' | 'PUT' | 'DELETE'
   query?: Record<string, string | number | boolean | undefined>
   headers?: HeadersInit
   body?: unknown
