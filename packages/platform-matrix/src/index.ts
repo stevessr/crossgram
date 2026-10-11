@@ -84,6 +84,8 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   private readonly conversations = new Map<string, IMConversation<MatrixMediaLocator>>()
   private readonly directRoomIds = new Set<string>()
   private readonly pinMutations = new Map<string, Promise<void>>()
+  /** Local state snapshots suppress our own /sync echoes without masking external changes. */
+  private readonly pinSnapshots = new Map<string, string[]>()
 
   constructor(config: Config, logger?: MatrixLogger) {
     this.client = new MatrixClient(config satisfies MatrixClientOptions)
@@ -116,6 +118,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     for (const [roomId, room] of Object.entries(initial.rooms?.join ?? {})) {
       this.ingestState(roomId, room.state?.events ?? [])
       this.updateConversation(roomId, room)
+      this.pinSnapshots.set(roomId, this.cachedPinnedIds(roomId))
     }
     let since = initial.next_batch
     const running = (async () => {
@@ -338,6 +341,9 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       const next = mutate(existing)
       if (next.length !== existing.length || next.some((id, index) => id !== existing[index])) {
         await this.client.setRoomPinnedEvents(roomId, next)
+        // The server will echo this same state event on /sync. The RPC caller
+        // already gets an MTProto update; do not allocate a second PTS for it.
+        this.pinSnapshots.set(roomId, [...next])
       }
     } finally {
       release()
@@ -444,9 +450,29 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         ...(room.timeline?.events ?? []).filter((event) => event.state_key !== undefined),
       ]
       const stateChanged = stateEvents.length > 0
+      const pinState = stateEvents.filter((event) =>
+        event.type === 'm.room.pinned_events' && event.state_key === '').at(-1)
+      const previousPins = this.pinSnapshots.get(roomId)
       this.ingestState(roomId, stateEvents)
       const conversation = this.updateConversation(roomId, room)
       if (stateChanged) await handler({ type: 'conversation', conversation })
+      if (pinState) {
+        const current = matrixPinnedIds(pinState.content)
+        this.pinSnapshots.set(roomId, current)
+        // First observation establishes a baseline; subsequent changes,
+        // including external reordering, must propagate to Telegram clients.
+        if (previousPins && !samePinnedIds(previousPins, current) && pinState.event_id) {
+          const currentIds = new Set(current)
+          await handler({
+            type: 'message-pins', eventId: pinState.event_id, conversation,
+            pinnedMessageIds: current,
+            removedMessageIds: previousPins.filter((id) => !currentIds.has(id)),
+            timestamp: matrixTimestamp(pinState),
+          })
+        }
+      } else if (!previousPins) {
+        this.pinSnapshots.set(roomId, this.cachedPinnedIds(roomId))
+      }
       for (const event of room.timeline?.events ?? []) {
         if (!event.event_id || event.state_key !== undefined) continue
         const redacts = event.redacts ?? (event.content as { redacts?: string }).redacts
@@ -495,6 +521,10 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       state.set(`${event.type}\0${event.state_key}`, event)
     }
     this.roomState.set(roomId, state)
+  }
+
+  private cachedPinnedIds(roomId: string): string[] {
+    return matrixPinnedIds(this.roomState.get(roomId)?.get('m.room.pinned_events\\0')?.content)
   }
 
   private updateConversation(roomId: string, room?: MatrixJoinedRoom): IMConversation<MatrixMediaLocator> {
@@ -622,6 +652,17 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     this.accountUserId = this.configuredUserId ?? (await this.client.whoAmI()).user_id
     return this.accountUserId
   }
+}
+
+function matrixPinnedIds(content: unknown): string[] {
+  if (!content || typeof content !== 'object') return []
+  const pinned = (content as { pinned?: unknown }).pinned
+  return Array.isArray(pinned) ? [...new Set(pinned.filter((id): id is string =>
+    typeof id === 'string' && id.length > 0))] : []
+}
+
+function samePinnedIds(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((id, index) => id === b[index])
 }
 
 function matrixMessageParts(content: MatrixRoomMessageContent): IMMessage<MatrixMediaLocator>['content']['parts'] {
