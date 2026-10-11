@@ -245,6 +245,96 @@ describe('MatrixPlatform', () => {
     expect(events[3]).toMatchObject({ messageIds: ['$old'] })
     expect(events[4]).toMatchObject({ upToMessageId: '$new' })
   })
+  it('projects stable and legacy Matrix polls without showing individual votes as messages', async () => {
+    const fetch = routeFetch((url) => {
+      if (!url.pathname.endsWith('/messages')) throw new Error(`unexpected request: ${url}`)
+      return json({ chunk: [
+        event('m.poll.start', {
+          'm.text': [{ mimetype: 'text/plain', body: 'Dinner? 1. Pizza 2. Noodles' }],
+          'm.poll': {
+            kind: 'm.disclosed', max_selections: 2,
+            question: { 'm.text': [{ body: 'Dinner?' }] },
+            answers: [
+              { 'm.id': 'pizza', 'm.text': [{ body: 'Pizza' }] },
+              { 'm.id': 'noodles', 'm.text': [{ body: 'Noodles' }] },
+            ],
+          },
+        }, { id: '$poll', sender: '@alice:example.org', ts: 1_000 }),
+        event('m.poll.response', {
+          'm.relates_to': { rel_type: 'm.reference', event_id: '$poll' },
+          'm.selections': ['pizza'],
+        }, { id: '$vote', sender: '@me:example.org', ts: 2_000 }),
+        event('m.poll.end', {
+          'm.relates_to': { rel_type: 'm.reference', event_id: '$poll' },
+          'm.text': [{ body: 'Poll closed' }],
+        }, { id: '$close', sender: '@alice:example.org', ts: 3_000 }),
+        event('org.matrix.msc3381.poll.start', {
+          'org.matrix.msc1767.text': 'Where to go?',
+          'org.matrix.msc3381.poll.start': {
+            kind: 'org.matrix.msc3381.poll.undisclosed',
+            question: { 'org.matrix.msc1767.text': 'Where to go?' },
+            answers: [{ id: 'beach', 'org.matrix.msc1767.text': 'Beach' }],
+          },
+        }, { id: '$legacy', sender: '@alice:example.org', ts: 4_000 }),
+        event('org.matrix.msc3381.poll.end', {
+          'm.relates_to': { rel_type: 'm.reference', event_id: '$legacy' },
+          'org.matrix.msc1767.text': 'Voting ended',
+        }, { id: '$legacy-end', sender: '@alice:example.org', ts: 5_000 }),
+        event('m.poll.start', { 'm.text': [{ body: 'Fallback when poll is malformed' }] },
+          { id: '$fallback', sender: '@alice:example.org', ts: 6_000 }),
+      ] })
+    })
+    const platform = createPlatform(fetch)
+    const page = await platform.getHistory(session, { id: '!room:example.org' })
+    expect(page.messages.map((item) => item.id)).toEqual([
+      '$poll', '$close', '$legacy', '$legacy-end', '$fallback',
+    ])
+    expect(page.messages[0]).toMatchObject({ content: { parts: [{ type: 'poll', poll: {
+      question: 'Dinner?', kind: 'disclosed', maxSelections: 2,
+      answers: [{ id: 'pizza', text: 'Pizza' }, { id: 'noodles', text: 'Noodles' }],
+    } }] } })
+    expect(page.messages[1]).toMatchObject({
+      replyToId: '$poll', content: { parts: [{ type: 'text', text: 'Poll closed' }] },
+    })
+    expect(page.messages[2]).toMatchObject({ content: { parts: [{ type: 'poll', poll: {
+      question: 'Where to go?', kind: 'undisclosed', maxSelections: 1,
+      answers: [{ id: 'beach', text: 'Beach' }],
+    } }] } })
+    expect(page.messages[3]).toMatchObject({ replyToId: '$legacy', content: {
+      parts: [{ text: 'Voting ended' }],
+    } })
+    expect(page.messages[4]?.content.parts).toEqual([
+      { type: 'text', text: 'Fallback when poll is malformed' },
+    ])
+  })
+
+  it('parses valid geo URIs into map cards and preserves malformed locations as text', async () => {
+    const fetch = routeFetch((url) => {
+      if (!url.pathname.endsWith('/messages')) throw new Error(`unexpected request: ${url}`)
+      return json({ chunk: [
+        event('m.room.message', { msgtype: 'm.location', body: 'Big Ben', geo_uri: 'geo:51.5008,-0.1247;u=15' },
+          { id: '$geo', sender: '@alice:example.org' }),
+        event('m.room.message', { msgtype: 'm.location', body: 'Invalid point', geo_uri: 'geo:91,200' },
+          { id: '$invalid', sender: '@alice:example.org' }),
+        event('m.room.message', { msgtype: 'm.location', body: 'Missing URI' },
+          { id: '$missing', sender: '@alice:example.org' }),
+        event('m.room.message', { msgtype: 'm.location', body: 'Southwest edge', geo_uri: 'geo:-90,-180' },
+          { id: '$edge', sender: '@alice:example.org' }),
+      ] })
+    })
+    const platform = createPlatform(fetch)
+    const page = await platform.getHistory(session, { id: '!room:example.org' })
+    expect(page.messages[0]).toMatchObject({ content: { parts: [{ type: 'card', card: {
+      kind: 'location', title: 'Big Ben', latitude: 51.5008, longitude: -0.1247,
+      url: 'https://www.openstreetmap.org/?mlat=51.5008&mlon=-0.1247',
+    } }] } })
+    expect(page.messages[1]?.content.parts).toEqual([{ type: 'text', text: 'Invalid point' }])
+    expect(page.messages[2]?.content.parts).toEqual([{ type: 'text', text: 'Missing URI' }])
+    expect(page.messages[3]).toMatchObject({ content: { parts: [{ type: 'card', card: {
+      latitude: -90, longitude: -180,
+    } }] } })
+  })
+
 })
 
 function createPlatform(fetch: typeof globalThis.fetch, extra: Record<string, unknown> = {}) {
