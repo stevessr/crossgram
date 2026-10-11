@@ -5,7 +5,7 @@ import { __tlReaderMap, __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import { RpcError, type ServerConnection } from '@mtproto-relay/mtproto'
-import { DialogRpc, projectTlMessage, stableId } from './dialogs.js'
+import { DialogRpc, projectTlMessage, searchableMessageText, stableId } from './dialogs.js'
 import { legacyInlineCustomEmojiDocumentId, ReactionRpc } from './reaction-rpc.js'
 import { IMMessageSendRejectedError } from './platform.js'
 import type { SystemPeerService } from './system-peer.js'
@@ -1094,6 +1094,73 @@ describe('DialogRpc', () => {
 
     await expect(response).resolves.toEqual({ _: 'messages.affectedMessages', pts: 1, ptsCount: 0 })
     expect(completedBeforeUpstream).toBe(true)
+  })
+
+  it('searches attachment filenames without rendering the filename as message text', () => {
+    const filenameOnly: IMMessage = {
+      id: '$report',
+      conversationId: 'alice',
+      senderId: 'alice',
+      timestamp: 1_700_000_100,
+      content: { parts: [{
+        type: 'media',
+        media: { id: 'mxc://example.org/report', kind: 'file', name: 'QuarterlyReport.pdf' },
+      }] },
+    }
+    expect(searchableMessageText(filenameOnly)).toBe('QuarterlyReport.pdf')
+    expect(searchableMessageText(filenameOnly).toLocaleLowerCase())
+      .toContain('quarterlyreport')
+    const captioned: IMMessage = {
+      ...filenameOnly,
+      content: { parts: [
+        { type: 'text', text: 'caption' },
+        { type: 'media', media: { id: 'mxc://example.org/photo', kind: 'image', name: 'holiday.png' } },
+      ] },
+    }
+    expect(searchableMessageText(captioned)).toBe('caption\nholiday.png')
+    expect(searchableMessageText({ ...filenameOnly, content: { parts: [] } })).toBe('')
+  })
+
+  it('keeps filename-only native search hits in Telegram RPC results', async () => {
+    class FilenameSearchPlatform extends DialogTestPlatform {
+      async searchMessages(_session: PlatformSession, conversation: { id: string }) {
+        return {
+          messages: [{
+            id: 'matrix-file',
+            conversationId: conversation.id,
+            senderId: 'alice',
+            timestamp: 1_700_000_140,
+            content: { parts: [
+              { type: 'text' as const, text: 'Here is the attachment' },
+              { type: 'media' as const, media: {
+                id: 'mxc://example.org/quarterly',
+                kind: 'file' as const,
+                mimeType: 'application/pdf',
+                name: 'quarterly-2026.pdf',
+              } },
+            ] },
+          }],
+        }
+      }
+    }
+    const platform = new FilenameSearchPlatform()
+    const rpc = new DialogRpc(platform, session)
+    await rpc.getDialogs(getDialogsRequest())
+    const peer = {
+      _: 'inputPeerUser' as const,
+      userId: rpc.peerTlId('alice'),
+      accessHash: Long.ZERO,
+    }
+    const result = await rpc.search({
+      _: 'messages.search', peer, q: 'quarterly-2026',
+      filter: { _: 'inputMessagesFilterEmpty' },
+      minDate: 0, maxDate: 0, offsetId: 0, addOffset: 0, limit: 20,
+      maxId: 0, minId: 0, hash: Long.ZERO,
+    }) as tl.messages.RawMessages
+    expect(result.messages).toHaveLength(1)
+    expect(result.messages[0]).toMatchObject({
+      _: 'message', message: 'Here is the attachment',
+    })
   })
 
   it('uses platform search filters and carries its opaque cursor across Telegram pages', async () => {
