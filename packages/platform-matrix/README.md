@@ -58,9 +58,25 @@ messages cannot be searched by a server that does not have their plaintext.
 
 ## Current limitations
 
-- End-to-end encryption is not implemented. Encrypted events and attachments are
-  shown as explicit placeholders instead of exposing ciphertext or silently
-  dropping messages. Use an unencrypted room for full functionality.
+- **Native Matrix Olm/Megolm E2EE is not implemented.** Incoming `m.room.encrypted`
+  messages and encrypted attachments still show explicit placeholders. This is
+  **not** end-to-end decryption, device verification, key backup, or a Secret Chat.
+- To prevent accidental disclosure, the bridge now **fails closed on sends into
+  encrypted rooms**. It probes `m.room.encryption` state before plaintext text,
+  edits, media uploads, sticker uploads, poll votes and reaction mutations, and
+  again before each message/event send. Previously observed encryption state is
+  retained across incomplete syncs. Only an explicit Matrix `404 M_NOT_FOUND`
+  permits an unencrypted-room send; server errors, unavailable homeservers and
+  ambiguous responses block the operation. Read receipts and redactions remain
+  available because they do not carry message plaintext.
+- This is an interim protection, **not** a substitute for a native crypto
+  engine: a room may be upgraded between checking its state and sending, because
+  the Client-Server API does not provide an atomic state-and-send transaction.
+  Implementing real Matrix E2EE requires a maintained Olm/Megolm implementation,
+  persistent per-device crypto state, cross-signing/device verification, and
+  encrypted attachment handling. Do not expose private content through this
+  adapter in encrypted rooms until those pieces are integrated.
+- In unencrypted rooms all original send/media flows remain available.
 - Reactions use `m.annotation` events: the adapter can read counts/actors, set
   up to 20 emoji reactions, and emits reaction updates when annotations are
   added or redacted. Homeserver relation pagination is followed before results
