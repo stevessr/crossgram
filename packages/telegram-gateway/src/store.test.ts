@@ -20,7 +20,9 @@ it('persists private route metadata and detects orphan sessions', async () => {
   const store = await setup()
   await store.save(parent, record)
   expect(await store.load(parent)).toEqual(record)
-  expect((await stat(join(store.directory, `${parent}.json`))).mode & 0o077).toBe(0)
+  if (process.platform !== 'win32') {
+    expect((await stat(join(store.directory, `${parent}.json`))).mode & 0o077).toBe(0)
+  }
   expect(await store.hasSession(parent)).toBe(false)
   const path = await store.sessionPath(parent)
   await writeFile(path, 'orphan session')
