@@ -409,6 +409,44 @@ describe('MatrixPlatform', () => {
     expect(reads).toBe(1)
   })
 
+  it('does not let a delayed full-state fetch erase newer joined Space relationships', async () => {
+    let fullReads = 0
+    let releaseStale: ((response: Response) => void) | undefined
+    const stale = { next_batch: 'old', rooms: { join: {
+      '!old:example.org': { state: { events: [
+        event('m.room.create', {}, { stateKey: '' }),
+      ] } },
+    } } }
+    const current = { next_batch: 'fresh', rooms: { join: {
+      '!space:example.org': { state: { events: [
+        event('m.room.create', { type: 'm.space' }, { stateKey: '' }),
+        event('m.space.child', { via: ['example.org'] }, { stateKey: '!child:example.org' }),
+      ] } },
+      '!child:example.org': { state: { events: [
+        event('m.room.create', {}, { stateKey: '' }),
+      ] } },
+    } } }
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      const url = new URL(String(input))
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      if (url.searchParams.has('since')) return pendingUntilAbort(init?.signal)
+      fullReads++
+      if (fullReads === 1) return new Promise<Response>((resolve) => { releaseStale = resolve })
+      return json(current)
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org', syncTimeoutMs: 50 })
+    const pending = platform.getDialogs(session)
+    await vi.waitFor(() => expect(fullReads).toBe(1))
+    const unsubscribe = await platform.subscribe(session, () => {})
+    releaseStale!(json(stale))
+    const result = await pending
+    await unsubscribe()
+    expect(result.dialogs.map((dialog) => dialog.conversation.id)).toEqual(['!space:example.org'])
+    expect((await platform.getSubdialogs(session, { id: '!space:example.org' }))
+      .dialogs.map((dialog) => dialog.conversation.id)).toEqual(['!child:example.org'])
+    expect(fullReads).toBe(3)
+  })
+
   it('emits child parent changes even when the child has a timeline in the same sync batch', async () => {
     const space = '!space:example.org'
     const child = '!child:example.org'
