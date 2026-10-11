@@ -824,13 +824,20 @@ export class DialogRpc {
   private async _searchPinnedMessages(
     req: tl.messages.RawSearchRequest, peerId: string, conversation: IMConversation,
   ): Promise<tl.messages.TypeMessages> {
-    if (!this._platform.getPinnedMessageIds || !this._platform.getMessage) {
-      return this._emptyMessages(conversation)
-    }
+    if (!this._platform.getPinnedMessageIds) return this._emptyMessages(conversation)
     const ids = await this._platform.getPinnedMessageIds(this._session, conversation)
     const messages: IMMessage[] = []
     for (const id of [...new Set(ids)]) {
-      const message = await this._platform.getMessage(this._session, conversation, id)
+      // Prefer the stored projection: fetching an original Matrix event after a
+      // replacement edit would otherwise overwrite the edited text in the relay.
+      const existing = await this._store?.findProjectedByPlatformId(
+        this._session.platformSessionId, peerId, id,
+      )
+      if (existing) {
+        messages.push(existing.source)
+        continue
+      }
+      const message = await this._platform.getMessage?.(this._session, conversation, id)
       if (!message) continue
       if (this._store) await this._store.ingest(this._session, conversation, message)
       messages.push(message)
