@@ -274,6 +274,9 @@ describe('conversation kinds', () => {
           pin: { read: true, write: true },
         },
       },
+      // Native Matrix search is enabled as of upstream PR #1, but Telegram's
+      // pinned filter must always use m.room.pinned_events instead.
+      async searchMessages() { throw new Error('pinned query must not use native room search') },
       async getPinnedMessageIds() { return [...pinned] },
       async getMessage(_session, target, id) {
         return target.id === room.id && id === 'message-group' ? source(room) : null
