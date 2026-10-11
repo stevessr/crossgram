@@ -799,7 +799,7 @@ export class DialogRpc {
       if (req.maxDate > 0 && item.source.timestamp >= req.maxDate) return false
       if (req.maxId > 0 && item.tlId >= req.maxId) return false
       if (req.minId > 0 && item.tlId <= req.minId) return false
-      if (query && !messageText(item.source).toLocaleLowerCase().includes(query)) return false
+      if (query && !searchableMessageText(item.source).toLocaleLowerCase().includes(query)) return false
       return matchesMessageFilter(item, req.filter)
     })
     const start = Math.max(0, req.addOffset)
@@ -988,7 +988,7 @@ export class DialogRpc {
         if (req.maxDate > 0 && item.source.timestamp >= req.maxDate) return false
         if (req.maxId > 0 && item.tlId >= req.maxId) return false
         if (req.minId > 0 && item.tlId <= req.minId) return false
-        if (normalizedQuery && !messageText(item.source).toLocaleLowerCase().includes(normalizedQuery)) return false
+        if (normalizedQuery && !searchableMessageText(item.source).toLocaleLowerCase().includes(normalizedQuery)) return false
         return matchesMessageFilter(item, req.filter)
       }))
       upstreamCursor = upstream.nextCursor
@@ -6081,6 +6081,13 @@ function matchesMessageFilter(item: MaterializedMessage, filter: tl.TypeMessages
   if (filter._ === 'inputMessagesFilterMusic') return music
   if (filter._ === 'inputMessagesFilterRoundVoice') return voice
   return false
+}
+
+/** Search media filenames without changing Telegram's visible text/caption projection. */
+export function searchableMessageText(message: IMMessage): string {
+  const attachmentNames = message.content.parts.flatMap((part) =>
+    part.type === 'media' && part.media.name ? [part.media.name] : [])
+  return [messageText(message), ...attachmentNames].filter(Boolean).join('\n')
 }
 
 function searchMediaKind(filter: tl.TypeMessagesFilter): 'image' | 'file' | undefined {
