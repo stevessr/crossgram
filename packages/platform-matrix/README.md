@@ -27,7 +27,8 @@ multiple ordered Matrix events and retained as one logical bridge message.
 
 The adapter uses the Matrix Client-Server API `POST /_matrix/client/v3/search` for
 non-empty text searches, with room and sender constraints applied by the homeserver.
-Result ordering is newest first and pagination uses the homeserver's opaque
+Indexed attachment filenames are also searchable without being injected into the
+visible Telegram message text. Result ordering is newest first and pagination uses the homeserver's opaque
 `next_batch` token. Date ranges and image/file-type filters are evaluated after
 retrieval, so counts may be unavailable and pages may be shorter if very few
 messages match. Searches without keywords scan paginated room history, including
