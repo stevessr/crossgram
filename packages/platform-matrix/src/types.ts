@@ -10,6 +10,7 @@ export interface MatrixProfile {
 
 export interface MatrixEvent<T = Record<string, unknown>> {
   type: string
+  room_id?: string
   event_id?: string
   sender?: string
   origin_server_ts?: number
@@ -127,4 +128,21 @@ export interface MatrixDirectAccountData {
 export interface MatrixMediaLocator {
   mxc: string
   thumbnailMxc?: string
+}
+
+export interface MatrixRoomEventFilter {
+  types?: string[]
+  rooms?: string[]
+  senders?: string[]
+}
+
+/** POST /_matrix/client/v3/search response for the room_events category. */
+export interface MatrixSearchResponse {
+  search_categories?: {
+    room_events?: {
+      count?: number
+      next_batch?: string
+      results?: Array<{ result: MatrixEvent }>
+    }
+  }
 }
