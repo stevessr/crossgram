@@ -493,7 +493,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     const raw = event.content as MatrixRoomMessageContent
     const relation = raw['m.relates_to']
     const content = relation?.rel_type === 'm.replace' && raw['m.new_content'] ? raw['m.new_content'] : raw
-    const parts = pollStart ? matrixPollParts(event.content)
+    const parts = pollStart ? matrixPollParts(content)
       : pollEnd ? [{ type: 'text' as const, text: matrixEventText(event.content) || '投票已结束' }]
         : matrixMessageParts(content)
     if (!parts.length) return
@@ -676,7 +676,8 @@ function matrixPollParts(value: unknown): IMMessage<MatrixMediaLocator>['content
     type: 'poll',
     poll: {
       question, answers, maxSelections,
-      kind: poll.kind === 'm.disclosed' || poll.kind === 'org.matrix.msc3381.poll.disclosed'
+      kind: poll.kind === 'm.disclosed' || poll.kind === 'm.poll.disclosed'
+        || poll.kind === 'org.matrix.msc3381.poll.disclosed'
         ? 'disclosed' : 'undisclosed',
     },
   }]
