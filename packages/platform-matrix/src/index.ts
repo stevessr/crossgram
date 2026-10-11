@@ -408,9 +408,9 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
           },
         })
         this.ingestState(conversation.id, [
-      ...(response.state ?? []),
-      ...(response.chunk ?? []).filter((event) => event.state_key !== undefined),
-    ])
+          ...(response.state ?? []),
+          ...(response.chunk ?? []).filter((event) => event.state_key !== undefined),
+        ])
         events = response.chunk
         nextCursor = response.end
       }
