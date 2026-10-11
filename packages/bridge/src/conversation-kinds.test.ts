@@ -291,6 +291,11 @@ describe('conversation kinds', () => {
     expect(full.fullChat).toMatchObject({ _: 'channelFull', pinnedMsgId: pinnedId })
     expect(() => wireRoundTrip(full)).not.toThrow()
 
+    await expect(rpc.updatePinnedMessage({
+      peer, id: pinnedId, pmOneside: true,
+    })).rejects.toThrow('PIN_RESTRICTED')
+    expect(pinChanges).toEqual([])
+
     const updated = await rpc.updatePinnedMessage({ peer, id: pinnedId, unpin: true })
     expect(updated).toMatchObject({
       _: 'updates', updates: [expect.objectContaining({
