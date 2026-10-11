@@ -32,7 +32,35 @@ Telegram Secret Chat 所需的 `messages.requestEncryption`、`messages.acceptEn
 
 此原型不应直接作为生产端到端加密系统部署，需要专业安全审查，并优先评估成熟的会话层密码协议。
 
-## 三、完整实现所需工作
+## 三、设备身份、密文接收与持久重放原型（新增）
+
+新增 `packages/e2ee/src/devices.ts`：
+
+- `exportDeviceBundle` / `parseDeviceBundle`：序列化并严格校验公开的 Ed25519、X25519 SPKI 密钥，公钥包不包含私钥。
+- `bundleFingerprint` / `verifyAndPinDevice`：要求用户通过**服务器之外的独立认证渠道**核对 SHA-256 公钥指纹；只有核对成功，才会原子性地固定至本地设备存储；同一账号、设备 ID 出现新的公钥时拒绝静默替换。
+- `getPinnedDevice` / `openFromPinnedDevice`：接收端仅允许已经独立核验并固定的发信设备；被撤销或未知设备一律拒绝，不能按服务器传来的公钥自动解密。
+- `sealToPinnedDevices`：先核验所有收件设备均已受信，才对每个收件设备独立加密；禁止空收件人、重复 ID、超过 32 台设备的无界扩散。
+- `DevicePinStore` 接口：实际客户端必须提供本地、持久、**不可被服务端覆盖**的原子固定实现。现有 `MemoryDevicePinStore` **仅供测试**，重启后不能继续保护换钥检测。
+
+新增 `packages/e2ee/src/replay-ledger.ts`：
+
+- `PosixFileReplayGuard` 提供通过 `O_EXCL` 及文件/目录 `fsync` 的持久防重放演示；可拒绝进程重启后的同一条密文，并通过原子创建操作阻止多个进程同时消费相同的消息。
+- **只适用于 POSIX 实验环境，禁止用于生产服务端。** 根目录必须预先建立，归当前用户所有，权限至少应为 `0700`（不能授予组/其他用户权限），且必须使用能够持久化目录 `fsync` 的文件系统。
+- 每条密文都会生成一个文件，不清理、不能扩容处理高吞吐消息。Windows 会明确拒绝，真实客户端应以加密 SQLite/本地 KV 的原子事务替换它。
+- 重放库不可自行删除、恢复至旧快照；恢复旧备份等于失去历史防重放保证，生产方案需与消息状态一起防回滚。
+
+**注意**：设备身份验证不是服务端 API 返回的 `fingerprint` 字符串比对。客户端必须在 QR 核验、人际联系等独立可信渠道上取得指纹；如果比较值和公钥都来自同一个恶意服务器，攻击者可以同时替换二者。根目录的建立与保护必须由客户端执行，CrossGram 服务端不得生成或管理客户端私钥、设备信任数据。
+
+### 此轮新增的测试
+
+```sh
+yarn vitest run packages/e2ee/src/devices.test.ts
+yarn vitest run packages/e2ee/src/replay-ledger.test.ts
+```
+
+以上测试是本地密码学原型测试，尚未在 GitHub CI 上获得通过记录，尚未接入任何真实 Telegram 客户端。
+
+## 四、完整实现所需工作
 
 1. **明确受保护的通信对象**：区分 CrossGram 原生 E2EE 联系人与 QQ/Discord/Matrix 外部桥接联系人。普通外部适配器不可能让其不支持此协议的终端自动解密；若桥接端解密，必须显式提示信任边界。
 2. **选择成熟协议**：对 Telegram 原生设备间聊天优先评估 Secret Chat 全套协议；对自研原生多设备消息优先考虑经过审计的 Double Ratchet、MLS 或成熟客户端库，而非扩展此演示型密文信封。
@@ -42,7 +70,7 @@ Telegram Secret Chat 所需的 `messages.requestEncryption`、`messages.acceptEn
 6. **高级功能与安全性**：异步会话建立及预密钥、Double Ratchet 恢复能力、加密媒体分块、多设备同步、群成员变更重新密钥协商、密钥备份和透明迁移。
 7. **测试与发布门槛**：两端独立进程真实消息流、恶意服务器篡改和重放、断网同步、SQLite/PostgreSQL 重启场景、客户端兼容矩阵及独立密码审计。
 
-## 四、测试
+## 五、测试
 
 ```sh
 yarn vitest run packages/e2ee/src/envelope.test.ts
