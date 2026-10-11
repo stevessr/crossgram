@@ -147,7 +147,9 @@ export async function sealToPinnedDevices(
   store: DevicePinStore,
   recipientAccountId: string,
   recipientDeviceIds: readonly string[],
+  senderAccountId: string,
 ): Promise<EncryptedEnvelope[]> {
+  validateIdentifier(senderAccountId)
   if (!recipientDeviceIds.length) throw new Error('E2EE_NO_RECIPIENT_DEVICES')
   if (recipientDeviceIds.length > 32) throw new Error('E2EE_TOO_MANY_RECIPIENT_DEVICES')
   const unique = new Set(recipientDeviceIds)
@@ -157,7 +159,10 @@ export async function sealToPinnedDevices(
   const devices = await Promise.all(recipientDeviceIds.map(
     id => getPinnedDevice(store, recipientAccountId, id),
   ))
-  return devices.map(device => sealMessage(plaintext, conversationId, sender, device))
+  return devices.map(device => sealMessage(plaintext, conversationId, sender, device, {
+    senderAccountId,
+    recipientAccountId,
+  }))
 }
 
 /**
@@ -171,10 +176,15 @@ export async function openFromPinnedDevice(
   store: DevicePinStore,
   senderAccountId: string,
   replayGuard: ReplayGuard,
+  recipientAccountId: string,
 ): Promise<Uint8Array> {
+  validateIdentifier(recipientAccountId)
   const envelope = parseEnvelope(untrustedEnvelope)
   const sender = await getPinnedDevice(store, senderAccountId, envelope.senderDeviceId)
-  return openMessage(envelope, conversationId, recipient, sender, replayGuard)
+  return openMessage(envelope, conversationId, recipient, sender, replayGuard, {
+    senderAccountId,
+    recipientAccountId,
+  })
 }
 
 function validateIdentifier(value: string): void {
