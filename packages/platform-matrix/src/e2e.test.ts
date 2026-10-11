@@ -171,7 +171,7 @@ describe('Matrix platform HTTP e2e', () => {
       displayname: 'E2E Bot', avatar_url: 'mxc://test/avatar',
     })
     if (invitationScenario) {
-      const match = /^\\/_matrix\\/client\\/v3\\/rooms\\/(.+)\\/(join|leave)$/.exec(url.pathname)
+      const match = /^\/_matrix\/client\/v3\/rooms\/(.+)\/(join|leave)$/.exec(url.pathname)
       if (match && request.method === 'POST') {
         const roomId = decodeURIComponent(match[1]!)
         if (match[2] === 'join') {
