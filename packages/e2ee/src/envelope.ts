@@ -11,10 +11,10 @@ import {
   type KeyObject,
 } from 'node:crypto'
 
-const VERSION = 1
+const VERSION = 2
 const MAX_MESSAGE_BYTES = 256 * 1024
 const MAX_ID_BYTES = 256
-const AAD_DOMAIN = 'crossgram/e2ee-envelope/v1'
+const AAD_DOMAIN = 'crossgram/e2ee-envelope/v2'
 
 export interface DeviceIdentity {
   /** Private keys MUST be created and persisted by the end-user device only. */
@@ -32,8 +32,16 @@ export interface VerifiedDevice {
   agreementPublicKey: KeyObject
 }
 
+export interface EnvelopeAccountContext {
+  /** Authenticated account identities from the caller's local trust model. */
+  senderAccountId: string
+  recipientAccountId: string
+}
+
 export interface EncryptedEnvelope {
-  v: 1
+  v: 2
+  senderAccountId: string
+  recipientAccountId: string
   /** Associated-data context, e.g. an authenticated conversation identifier. */
   conversationId: string
   senderDeviceId: string
@@ -106,7 +114,10 @@ export function sealMessage(
   conversationId: string,
   sender: DeviceIdentity,
   recipient: VerifiedDevice,
+  accounts: EnvelopeAccountContext,
 ): EncryptedEnvelope {
+  checkId(accounts.senderAccountId)
+  checkId(accounts.recipientAccountId)
   checkId(conversationId)
   checkId(sender.deviceId)
   checkId(recipient.deviceId)
@@ -122,6 +133,8 @@ export function sealMessage(
   })
   const envelope: EncryptedEnvelope = {
     v: VERSION,
+    senderAccountId: accounts.senderAccountId,
+    recipientAccountId: accounts.recipientAccountId,
     conversationId,
     senderDeviceId: sender.deviceId,
     recipientDeviceId: recipient.deviceId,
@@ -157,7 +170,10 @@ export async function openMessage(
   recipient: DeviceIdentity,
   pinnedSender: VerifiedDevice,
   replayGuard: ReplayGuard,
+  accounts: EnvelopeAccountContext,
 ): Promise<Uint8Array> {
+  checkId(accounts.senderAccountId)
+  checkId(accounts.recipientAccountId)
   const envelope = parseEnvelope(candidate)
   checkId(conversationId)
   checkId(recipient.deviceId)
@@ -166,6 +182,8 @@ export async function openMessage(
   checkPrivateKey(recipient.agreementPrivateKey, 'x25519')
   if (
     envelope.conversationId !== conversationId
+    || envelope.senderAccountId !== accounts.senderAccountId
+    || envelope.recipientAccountId !== accounts.recipientAccountId
     || envelope.recipientDeviceId !== recipient.deviceId
     || envelope.senderDeviceId !== pinnedSender.deviceId
   ) throw new Error('E2EE_CONTEXT_MISMATCH')
@@ -216,13 +234,16 @@ export function parseEnvelope(candidate: unknown): EncryptedEnvelope {
     throw new Error('E2EE_MALFORMED_ENVELOPE')
   }
   const value = candidate as Record<string, unknown>
-  const fields = ['conversationId', 'senderDeviceId', 'recipientDeviceId',
+  const fields = ['senderAccountId', 'recipientAccountId',
+    'conversationId', 'senderDeviceId', 'recipientDeviceId',
     'recipientKeyId', 'ephemeralPublicKey', 'salt', 'nonce', 'ciphertext', 'tag', 'signature'] as const
   if (value.v !== VERSION || Object.keys(value).length !== fields.length + 1
       || fields.some(field => typeof value[field] !== 'string')) {
     throw new Error('E2EE_MALFORMED_ENVELOPE')
   }
   const e = value as unknown as EncryptedEnvelope
+  checkId(e.senderAccountId)
+  checkId(e.recipientAccountId)
   checkId(e.conversationId)
   checkId(e.senderDeviceId)
   checkId(e.recipientDeviceId)
@@ -279,21 +300,24 @@ function decodeExact(value: string, bytes: number): Buffer {
 
 function headerBytes(e: EncryptedEnvelope): Buffer {
   return Buffer.from(JSON.stringify([
-    AAD_DOMAIN, e.v, e.conversationId, e.senderDeviceId, e.recipientDeviceId,
+    AAD_DOMAIN, e.v, e.senderAccountId, e.recipientAccountId,
+    e.conversationId, e.senderDeviceId, e.recipientDeviceId,
     e.recipientKeyId, e.ephemeralPublicKey, e.salt, e.nonce,
   ]))
 }
 
 function signedBytes(e: EncryptedEnvelope): Buffer {
   return Buffer.from(JSON.stringify([
-    AAD_DOMAIN, e.v, e.conversationId, e.senderDeviceId, e.recipientDeviceId,
+    AAD_DOMAIN, e.v, e.senderAccountId, e.recipientAccountId,
+    e.conversationId, e.senderDeviceId, e.recipientDeviceId,
     e.recipientKeyId, e.ephemeralPublicKey, e.salt, e.nonce, e.ciphertext, e.tag,
   ]))
 }
 
 function deriveKey(secret: Buffer, salt: Buffer, e: EncryptedEnvelope): Buffer {
   const info = Buffer.from(JSON.stringify([
-    AAD_DOMAIN, e.conversationId, e.senderDeviceId, e.recipientDeviceId, e.recipientKeyId,
+    AAD_DOMAIN, e.senderAccountId, e.recipientAccountId,
+    e.conversationId, e.senderDeviceId, e.recipientDeviceId, e.recipientKeyId,
   ]))
   return Buffer.from(hkdfSync('sha256', secret, salt, info, 32))
 }
