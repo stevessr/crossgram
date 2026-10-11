@@ -304,6 +304,31 @@ describe('conversation kinds', () => {
       _: 'channels.getFullChannel',
       channel: { _: 'inputChannel', channelId, accessHash: Long.ONE },
     })).fullChat).not.toHaveProperty('pinnedMsgId', pinnedId)
+
+    // A clear-all operation also removes pins that have no local Telegram projection.
+    pinned.push('message-group', '$unresolvable')
+    const cleared = await rpc.unpinAllMessages({ _: 'messages.unpinAllMessages', peer })
+    expect(cleared.affected).toMatchObject({
+      _: 'messages.affectedHistory', ptsCount: 1, offset: 0,
+    })
+    expect(cleared.updates).toMatchObject([{
+      _: 'updatePinnedChannelMessages', channelId, messages: [pinnedId],
+    }])
+    expect(() => wireRoundTrip(cleared.affected)).not.toThrow()
+    expect(() => wireRoundTrip({
+      _: 'updates', updates: cleared.updates, users: [], chats: [], date: 0, seq: 0,
+    })).not.toThrow()
+    expect(pinChanges.slice(1)).toEqual([
+      { id: 'message-group', pinned: false },
+      { id: '$unresolvable', pinned: false },
+    ])
+    expect(pinned).toEqual([])
+    const alreadyEmpty = await rpc.unpinAllMessages({ _: 'messages.unpinAllMessages', peer })
+    expect(alreadyEmpty.affected.ptsCount).toBe(0)
+    expect(alreadyEmpty.updates).toEqual([])
+    await expect(rpc.unpinAllMessages({
+      _: 'messages.unpinAllMessages', peer, topMsgId: 42,
+    })).rejects.toThrow('TOPIC_ID_INVALID')
   })
 
   it('acknowledges an empty channel deletion without refreshing dialogs or calling the platform', async () => {
