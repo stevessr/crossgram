@@ -69,7 +69,9 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       delete: { own: { supported: true }, others: { supported: true } },
       edit: { mode: 'native' },
       forward: { mode: 'unsupported', preservesAuthor: false },
+      pin: { read: true, write: true },
     },
+    notifications: { read: true, mute: true },
   }
 
   readonly client: MatrixClient
@@ -80,6 +82,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   private readonly roomState = new Map<string, Map<string, MatrixEvent>>()
   private readonly conversations = new Map<string, IMConversation<MatrixMediaLocator>>()
   private readonly directRoomIds = new Set<string>()
+  private readonly pinMutations = new Map<string, Promise<void>>()
 
   constructor(config: Config, logger?: MatrixLogger) {
     this.client = new MatrixClient(config satisfies MatrixClientOptions)
@@ -297,6 +300,42 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
 
   async markRead(_session: PlatformSession, target: IMReadTarget): Promise<void> {
     await this.client.markRead(target.conversationId, target.messageId)
+  }
+
+  async getPinnedMessageIds(_session: PlatformSession, conversation: IMConversationRef): Promise<string[]> {
+    return this.client.getRoomPinnedEvents(conversation.id)
+  }
+
+  /** Serialize local read/modify/write state requests so parallel pins cannot clobber one another. */
+  async setMessagePinned(
+    _session: PlatformSession, conversation: IMConversationRef, messageId: string, pinned: boolean,
+  ): Promise<void> {
+    const roomId = conversation.id
+    const previous = this.pinMutations.get(roomId)
+    let release!: () => void
+    const turn = new Promise<void>((resolve) => { release = resolve })
+    this.pinMutations.set(roomId, turn)
+    await previous
+    try {
+      const existing = await this.client.getRoomPinnedEvents(roomId)
+      const next = pinned
+        ? existing.includes(messageId) ? existing : [...existing, messageId]
+        : existing.filter((id) => id !== messageId)
+      if (next.length !== existing.length) await this.client.setRoomPinnedEvents(roomId, next)
+    } finally {
+      release()
+      if (this.pinMutations.get(roomId) === turn) this.pinMutations.delete(roomId)
+    }
+  }
+
+  async getConversationNotificationSettings(_session: PlatformSession, conversation: IMConversationRef) {
+    return { muted: await this.client.getRoomNotificationMuted(conversation.id) }
+  }
+
+  async setConversationNotificationSettings(
+    _session: PlatformSession, conversation: IMConversationRef, settings: { muted: boolean },
+  ): Promise<void> {
+    await this.client.setRoomNotificationMuted(conversation.id, settings.muted)
   }
 
   async getUser(_session: PlatformSession, userId: string): Promise<IMUser<MatrixMediaLocator> | null> {
@@ -531,7 +570,8 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     roomId: string,
   ): IMConversationMember<MatrixMediaLocator> {
     const power = this.roomState.get(roomId)?.get('m.room.power_levels\0')?.content as {
-      users?: Record<string, number>, users_default?: number, state_default?: number, redact?: number, invite?: number
+      users?: Record<string, number>, users_default?: number, state_default?: number,
+      events?: Record<string, number>, redact?: number, invite?: number
     } | undefined
     const level = power?.users?.[userId] ?? power?.users_default ?? 0
     const owner = level >= 100
@@ -544,7 +584,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         manageMembers: administrator,
         deleteAnyMessage: level >= (power?.redact ?? 50),
         editAnyMessage: false,
-        pinMessages: level >= (power?.state_default ?? 50),
+        pinMessages: level >= (power?.events?.['m.room.pinned_events'] ?? power?.state_default ?? 50),
         inviteMembers: level >= (power?.invite ?? 0),
       },
     }
