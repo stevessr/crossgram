@@ -120,9 +120,10 @@ function rangesOverlap(aStart: number, aLength: number, bStart: number, bLength:
 }
 
 function escapeHtml(text: string): string {
-  return text.replace(/[&<>"']/gu, (char) => ({
+  const escapes: Record<string, string> = {
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  })[char]!)
+  }
+  return text.replace(/[&<>"']/gu, (char) => escapes[char]!)
 }
 
 function decodeHtml(text: string): string {
