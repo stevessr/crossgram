@@ -1144,8 +1144,11 @@ export class DialogRpc {
 
   /** Persist native pinned state before returning Telegram's update to the requester. */
   async updatePinnedMessage(req: {
-    peer: tl.TypeInputPeer, id: number, unpin?: boolean,
+    peer: tl.TypeInputPeer, id: number, unpin?: boolean, pmOneside?: boolean,
   }): Promise<tl.TypeUpdates> {
+    // Matrix m.room.pinned_events is shared room state. Never interpret a
+    // Telegram one-sided/private pin as permission to change everyone's room.
+    if (req.pmOneside) throw new RpcError(400, 'PIN_RESTRICTED')
     if (!this._platform.setMessagePinned || !this._platform.capabilities.messageActions?.pin?.write) {
       throw new RpcError(400, 'CHAT_ADMIN_REQUIRED')
     }
