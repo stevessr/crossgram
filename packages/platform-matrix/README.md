@@ -20,7 +20,7 @@ to one named Cordis platform entry and exposes joined rooms to Telegram clients.
 The adapter supports account profiles, direct and group rooms, Matrix Spaces,
 room history, incremental `/sync`, text/image/file/audio/video messages, replies,
 media upload/download, read markers, text edits, redactions, members, power-level
-permissions, and user/room avatars. Mixed Telegram messages are represented by
+permissions, user/room avatars, and Matrix room invitations in the shared request inbox\n(with accept/reject actions). Mixed Telegram messages are represented by
 multiple ordered Matrix events and retained as one logical bridge message.
 
 ## Current limitations
