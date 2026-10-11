@@ -162,7 +162,7 @@ export class MemoryEncryptedMailbox {
   }
 }
 
-function deliveryId(senderAccountId: string, recipientAccountId: string, e: EncryptedEnvelope): string {
+export function deliveryId(senderAccountId: string, recipientAccountId: string, e: EncryptedEnvelope): string {
   // Fixed field ordering also deduplicates semantically identical JSON objects.
   return createHash('sha256').update(JSON.stringify([
     'crossgram/e2ee-mailbox/v1', senderAccountId, recipientAccountId,
@@ -171,13 +171,13 @@ function deliveryId(senderAccountId: string, recipientAccountId: string, e: Encr
     e.ciphertext, e.tag, e.signature,
   ])).digest('hex')
 }
-function validateDevice(device: AuthenticatedDevice | RecipientDevice): void {
+export function validateDevice(device: AuthenticatedDevice | RecipientDevice): void {
   if (!device || typeof device !== 'object') throw new Error('E2EE_INVALID_MAILBOX_DEVICE')
   for (const value of [device.accountId, device.deviceId]) {
     if (typeof value !== 'string' || !value.trim()
       || Buffer.byteLength(value, 'utf8') > 256) throw new Error('E2EE_INVALID_MAILBOX_DEVICE')
   }
 }
-function deviceKey(device: AuthenticatedDevice | RecipientDevice): string {
+export function deviceKey(device: AuthenticatedDevice | RecipientDevice): string {
   return JSON.stringify([device.accountId, device.deviceId])
 }
