@@ -1178,6 +1178,80 @@ export class DialogRpc {
     return this._updates(conversation, [update], now)
   }
 
+  /** Clear room pins using native room-state updates; never clear forum-topic pins accidentally. */
+  async unpinAllMessages(req: tl.messages.RawUnpinAllMessagesRequest): Promise<{
+    affected: tl.messages.RawAffectedHistory
+    updates: tl.TypeUpdate[]
+  }> {
+    if (!this._platform.getPinnedMessageIds
+      || (!this._platform.clearPinnedMessages && !this._platform.setMessagePinned)
+      || !this._platform.capabilities.messageActions?.pin?.write) {
+      throw new RpcError(400, 'CHAT_ADMIN_REQUIRED')
+    }
+    if (req.topMsgId !== undefined || req.savedPeerId !== undefined) {
+      throw new RpcError(400, 'TOPIC_ID_INVALID')
+    }
+    if (!this._store) throw new RpcError(500, 'MESSAGE_STORE_UNAVAILABLE')
+    await this._hydratePeers()
+    const peerId = this._resolvePeer(req.peer)
+    this._assertWritableConversation(peerId)
+    const conversation = this._conversation(peerId)
+    if (conversation.selfPermissions?.pinMessages === false) throw new RpcError(400, 'CHAT_ADMIN_REQUIRED')
+    const nativeIds = [...new Set(await this._platform.getPinnedMessageIds(this._session, conversation))]
+    if (!nativeIds.length) {
+      return { affected: {
+        _: 'messages.affectedHistory', pts: await this._channelPts(conversation),
+        ptsCount: 0, offset: 0,
+      }, updates: [] }
+    }
+
+    const tlIds: number[] = []
+    for (const id of nativeIds) {
+      let projected = await this._store.findProjectedByPlatformId(
+        this._session.platformSessionId, peerId, id,
+      )
+      if (!projected && this._platform.getMessage) {
+        const message = await this._platform.getMessage(this._session, conversation, id)
+        if (message) {
+          await this._store.ingest(this._session, conversation, message)
+          projected = await this._store.findProjectedByPlatformId(
+            this._session.platformSessionId, peerId, id,
+          )
+        }
+      }
+      if (projected) tlIds.push(...projected.parts.map((part) => part.tlMessageId))
+    }
+
+    try {
+      if (this._platform.clearPinnedMessages) {
+        await this._platform.clearPinnedMessages(this._session, conversation)
+      } else {
+        for (const id of nativeIds) {
+          await this._platform.setMessagePinned!(this._session, conversation, id, false)
+        }
+      }
+    } catch (error) {
+      this._throwMessageAction(error, 'CHAT_ADMIN_REQUIRED')
+    }
+    const now = Math.floor(Date.now() / 1000)
+    const ptsCount = 1
+    const pts = await this._reservePts(ptsCount, now, conversation)
+    const uniqueIds = [...new Set(tlIds)]
+    const update: tl.TypeUpdate = this._isTelegramChannel(conversation)
+      ? {
+          _: 'updatePinnedChannelMessages', channelId: this._peerId(conversation.id),
+          messages: uniqueIds, pts, ptsCount,
+        }
+      : {
+          _: 'updatePinnedMessages', peer: this._conversationPeer(conversation),
+          messages: uniqueIds, pts, ptsCount,
+        }
+    return {
+      affected: { _: 'messages.affectedHistory', pts, ptsCount, offset: 0 },
+      updates: [update],
+    }
+  }
+
   async getScheduledHistory(
     req: tl.messages.RawGetScheduledHistoryRequest,
   ): Promise<tl.messages.TypeMessages> {
