@@ -1319,6 +1319,32 @@ describe('PlatformRegistry', () => {
     expect(registry.get('second')).toBeUndefined()
   })
 
+  it('does not reject a new live Matrix invite arriving during cold reconciliation', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform() as PushPlatform & { platformKind: string }
+    platform.platformKind = 'matrix'
+    const pendingPage = Promise.withResolvers<{ requests: IMRequest[] }>()
+    platform.getRequests = vi.fn(async () => pendingPage.promise)
+    const store = new MessageStore(database)
+    const manager = new PlatformSubscriptionManager(
+      database, new PlatformRegistry([['push', platform]]), store,
+    )
+    await manager.ensure(session)
+    await vi.waitFor(() => expect(platform.getRequests).toHaveBeenCalledTimes(1))
+    const live: IMRequest = {
+      id: 'new-during-reconcile', kind: 'group-join', state: 'pending', createdAt: 100,
+      requester: { id: '@alice:example.org', firstName: 'Alice' },
+      group: { id: '!new:example.org', kind: 'group', title: 'New' },
+      metadata: { matrixRoomInvite: true, matrixRoomId: '!new:example.org' },
+    }
+    await platform.emit({ type: 'request', request: live })
+    pendingPage.resolve({ requests: [] })
+    await vi.waitFor(async () => {
+      expect((await store.getRequest(session.platformSessionId, live.id))?.state).toBe('pending')
+    })
+    await manager.stop()
+  })
+
   it('repairs joined and withdrawn Matrix invites missed during a bridge restart', async () => {
     const database = await createDatabase()
     const store = new MessageStore(database)
