@@ -374,9 +374,31 @@ describe('MatrixPlatform', () => {
     await expect(platform.resolveRequest(session, oldInvite!.id, 'reject'))
       .resolves.toMatchObject({ state: 'rejected' })
     revision = '$second-invite'
-    const [newInvite] = (await platform.getRequests(session)).requests
+    const replacements = (await platform.getRequests(session)).requests
+    const newInvite = replacements.find((request) => request.state === 'pending')
     expect(newInvite).toMatchObject({ state: 'pending', group: { id: '!room:example.org' } })
     expect(newInvite?.id).not.toBe(oldInvite?.id)
+    expect(replacements.find((request) => request.id === oldInvite?.id)?.state).toBe('rejected')
+  })
+
+  it('reconciles a superseded pending invite before publishing the replacement', async () => {
+    let revision = '$old'
+    const fetch = routeFetch((url) => {
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      return json({ next_batch: 's1', rooms: { invite: {
+        '!room:example.org': { invite_state: { events: [
+          event('m.room.member', { membership: 'invite' }, {
+            id: revision, stateKey: '@me:example.org', sender: '@alice:example.org',
+          }),
+        ] } },
+      } } })
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+    const previous = (await platform.getRequests(session)).requests[0]!
+    revision = '$new'
+    const current = (await platform.getRequests(session)).requests
+    expect(current.find((request) => request.id === previous.id)?.state).toBe('rejected')
+    expect(current.find((request) => request.id !== previous.id)?.state).toBe('pending')
   })
 
   it('serializes conflicting decisions and ignores stale invited-room snapshots', async () => {
