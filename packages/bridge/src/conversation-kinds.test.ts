@@ -282,14 +282,14 @@ describe('conversation kinds', () => {
     expect(found.count).toBe(1)
     expect(found.messages).toMatchObject([{ _: 'message', message: room.title }])
     const pinnedId = found.messages[0]!.id
-    expect(() => wireRoundTrip(found)).not.toThrow()
+    expect(() => roundTrip(found)).not.toThrow()
 
     const full = await rpc.getFullChannel({
       _: 'channels.getFullChannel',
       channel: { _: 'inputChannel', channelId, accessHash: Long.ONE },
     })
     expect(full.fullChat).toMatchObject({ _: 'channelFull', pinnedMsgId: pinnedId })
-    expect(() => wireRoundTrip(full)).not.toThrow()
+    expect(() => roundTrip(full)).not.toThrow()
 
     await expect(rpc.updatePinnedMessage({
       peer, id: pinnedId, pmOneside: true,
@@ -302,7 +302,7 @@ describe('conversation kinds', () => {
         _: 'updatePinnedChannelMessages', channelId, messages: [pinnedId],
       })],
     })
-    expect(() => wireRoundTrip(updated)).not.toThrow()
+    expect(() => roundTrip(updated)).not.toThrow()
     expect(pinChanges).toEqual([{ id: 'message-group', pinned: false }])
     expect((await search() as tl.messages.RawMessagesSlice).count).toBe(0)
     expect((await rpc.getFullChannel({
@@ -319,8 +319,8 @@ describe('conversation kinds', () => {
     expect(cleared.updates).toMatchObject([{
       _: 'updatePinnedChannelMessages', channelId, messages: [pinnedId],
     }])
-    expect(() => wireRoundTrip(cleared.affected)).not.toThrow()
-    expect(() => wireRoundTrip({
+    expect(() => roundTrip(cleared.affected)).not.toThrow()
+    expect(() => roundTrip({
       _: 'updates', updates: cleared.updates, users: [], chats: [], date: 0, seq: 0,
     })).not.toThrow()
     expect(pinChanges.slice(1)).toEqual([
