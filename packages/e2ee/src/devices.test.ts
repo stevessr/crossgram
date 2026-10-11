@@ -1,11 +1,20 @@
 import { describe, expect, it } from 'vitest'
 import {
   bundleFingerprint, exportDeviceBundle, getPinnedDevice, MemoryDevicePinStore,
-  parseDeviceBundle, sealToPinnedDevices, verifyAndPinDevice,
+  openFromPinnedDevice, parseDeviceBundle, sealToPinnedDevices, verifyAndPinDevice,
 } from './devices.js'
 import {
   generateDeviceIdentity, openMessage, publicDevice, MemoryReplayGuard,
 } from './envelope.js'
+
+class MemoryDevicePinStoreWithDevice extends MemoryDevicePinStore {
+  constructor(identity: ReturnType<typeof generateDeviceIdentity>) {
+    super()
+    const bundle = exportDeviceBundle(identity)
+    // Memory store methods complete their insertion synchronously.
+    void this.pinIfAbsent('bob-account', bundle)
+  }
+}
 
 describe('CrossGram E2EE public-device identity exchange', () => {
   it('roundtrips portable public bundles without serializing private keys', () => {
@@ -77,6 +86,28 @@ describe('CrossGram E2EE public-device identity exchange', () => {
     }
     await expect(openMessage(envelopes[0], 'chat:alice-bob', bobLaptop,
       publicDevice(sender), new MemoryReplayGuard())).rejects.toThrow('E2EE_CONTEXT_MISMATCH')
+  })
+
+  it('authenticates inbound messages against locally pinned senders and revocation', async () => {
+    const sender = generateDeviceIdentity('alice')
+    const attacker = generateDeviceIdentity('alice')
+    const bob = generateDeviceIdentity('bob')
+    const pins = new MemoryDevicePinStore()
+    const aliceBundle = exportDeviceBundle(sender)
+    await verifyAndPinDevice(pins, 'alice-account', aliceBundle, bundleFingerprint(aliceBundle))
+    const trustedEnvelope = (await sealToPinnedDevices(new TextEncoder().encode('verified'),
+      'private', sender, new MemoryDevicePinStoreWithDevice(bob),
+      'bob-account', ['bob']))[0]
+    expect(new TextDecoder().decode(await openFromPinnedDevice(trustedEnvelope, 'private',
+      bob, pins, 'alice-account', new MemoryReplayGuard()))).toBe('verified')
+
+    const forgedEnvelope = (await sealToPinnedDevices(new Uint8Array([1]), 'private', attacker,
+      new MemoryDevicePinStoreWithDevice(bob), 'bob-account', ['bob']))[0]
+    await expect(openFromPinnedDevice(forgedEnvelope, 'private', bob, pins,
+      'alice-account', new MemoryReplayGuard())).rejects.toThrow('E2EE_SIGNATURE_INVALID')
+    await pins.revoke('alice-account', 'alice')
+    await expect(openFromPinnedDevice(trustedEnvelope, 'private', bob, pins,
+      'alice-account', new MemoryReplayGuard())).rejects.toThrow('E2EE_DEVICE_UNVERIFIED')
   })
 
   it('fails the whole fan-out before sealing if any target device is unverified', async () => {
