@@ -172,16 +172,16 @@ export async function openMessage(
   if (envelope.recipientKeyId !== keyId(createPublicKey(recipient.agreementPrivateKey))) {
     throw new Error('E2EE_RECIPIENT_KEY_MISMATCH')
   }
-  const signature = decode(envelope.signature, 64)
+  const signature = decodeExact(envelope.signature, 64)
   if (!verify(null, signedBytes(envelope), pinnedSender.signingPublicKey, signature)) {
     throw new Error('E2EE_SIGNATURE_INVALID')
   }
   const ephemeral = createPublicKey({ key: decode(envelope.ephemeralPublicKey, 128), format: 'der', type: 'spki' })
   checkPublicKey(ephemeral, 'x25519')
-  const salt = decode(envelope.salt, 32)
-  const nonce = decode(envelope.nonce, 12)
+  const salt = decodeExact(envelope.salt, 32)
+  const nonce = decodeExact(envelope.nonce, 12)
   const ciphertext = decode(envelope.ciphertext, MAX_MESSAGE_BYTES, true)
-  const tag = decode(envelope.tag, 16)
+  const tag = decodeExact(envelope.tag, 16)
   const secret = diffieHellman({ privateKey: recipient.agreementPrivateKey, publicKey: ephemeral })
   const key = deriveKey(secret, salt, envelope)
   secret.fill(0)
@@ -218,13 +218,13 @@ export function parseEnvelope(candidate: unknown): EncryptedEnvelope {
   checkId(e.conversationId)
   checkId(e.senderDeviceId)
   checkId(e.recipientDeviceId)
-  decode(e.recipientKeyId, 32)
+  decodeExact(e.recipientKeyId, 32)
   decode(e.ephemeralPublicKey, 128)
-  decode(e.salt, 32)
-  decode(e.nonce, 12)
+  decodeExact(e.salt, 32)
+  decodeExact(e.nonce, 12)
   decode(e.ciphertext, MAX_MESSAGE_BYTES, true)
-  decode(e.tag, 16)
-  decode(e.signature, 64)
+  decodeExact(e.tag, 16)
+  decodeExact(e.signature, 64)
   return e
 }
 
@@ -261,6 +261,12 @@ function decode(value: string, maxLength: number, allowEmpty = false): Buffer {
     throw new Error('E2EE_INVALID_ENCODING')
   }
   return result
+}
+
+function decodeExact(value: string, bytes: number): Buffer {
+  const decoded = decode(value, bytes)
+  if (decoded.length !== bytes) throw new Error('E2EE_INVALID_ENCODING')
+  return decoded
 }
 
 function headerBytes(e: EncryptedEnvelope): Buffer {
