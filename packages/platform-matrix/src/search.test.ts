@@ -239,6 +239,30 @@ describe('Matrix room message search', () => {
     expect(fetch).toHaveBeenCalledOnce()
   })
 
+  it('returns a continuation cursor after the bounded sparse-result scan', async () => {
+    let requests = 0
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+      const url = new URL(String(input))
+      expect(url.searchParams.get('next_batch')).toBe(requests ? `page-${requests}` : null)
+      requests++
+      return Response.json({
+        search_categories: { room_events: {
+          next_batch: `page-${requests}`,
+          results: [{ result: message(`$text-${requests}`, 'm.text', 'match', 1_000) }],
+        } },
+      })
+    })
+    const platform = new MatrixPlatform({
+      homeserver: 'https://matrix.example.org', accessToken: 'token', fetch,
+    })
+    const result = await platform.searchMessages(session, room, {
+      query: 'match', limit: 1, mediaKind: 'image',
+    })
+    expect(result.messages).toEqual([])
+    expect(result.nextCursor).toBe('page-10')
+    expect(fetch).toHaveBeenCalledTimes(10)
+  })
+
   it('does not dispatch inverted time ranges or zero-limit searches', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>()
     const platform = new MatrixPlatform({
