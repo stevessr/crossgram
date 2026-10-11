@@ -1,0 +1,10 @@
+{
+  "name": "@mtproto-relay/e2ee",
+  "version": "0.0.0-experimental",
+  "private": true,
+  "type": "module",
+  "main": "./src/envelope.ts",
+  "exports": {
+    ".": "./src/envelope.ts"
+  }
+}
