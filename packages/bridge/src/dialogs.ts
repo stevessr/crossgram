@@ -5478,7 +5478,11 @@ export class DialogRpc {
     // Telegram still needs a topic seed to display and open them.
     const top = history[0] ?? this._emptyTopicSeed(child)
     const oldest = history.at(-1) ?? top
-    const topicId = await this._store?.getOldestTlMessageId(this._session.platformSessionId, child.id)
+    // A previously advertised topic ID must survive the first real message
+    // (or a subsequent history backfill). Otherwise Telegram's stored topic
+    // references break when an initially empty Space child starts receiving data.
+    const topicId = this._conversationToTopic.get(child.id)
+      ?? await this._store?.getOldestTlMessageId(this._session.platformSessionId, child.id)
       ?? oldest.tlId
     this._topicToConversation.set(topicId, child.id)
     this._conversationToTopic.set(child.id, topicId)
