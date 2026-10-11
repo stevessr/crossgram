@@ -1142,10 +1142,17 @@ export class DialogRpc {
     return { _: 'messages.affectedMessages', pts: state?.pts ?? this._pts, ptsCount: 0 }
   }
 
-  /** Persist native pinned state before returning Telegram's update to the requester. */
+  /** Preserve the simple DialogRpc API used by platform-independent tests. */
   async updatePinnedMessage(req: {
     peer: tl.TypeInputPeer, id: number, unpin?: boolean, pmOneside?: boolean,
   }): Promise<tl.TypeUpdates> {
+    return (await this.updatePinnedMessageWithDelivery(req)).response
+  }
+
+  /** Return whether the durable pipeline already delivered updates to other devices. */
+  async updatePinnedMessageWithDelivery(req: {
+    peer: tl.TypeInputPeer, id: number, unpin?: boolean, pmOneside?: boolean,
+  }): Promise<{ response: tl.TypeUpdates, published: boolean }> {
     // Matrix m.room.pinned_events is shared room state. Never interpret a
     // Telegram one-sided/private pin as permission to change everyone's room.
     if (req.pmOneside) throw new RpcError(400, 'PIN_RESTRICTED')
@@ -1168,6 +1175,9 @@ export class DialogRpc {
       this._throwMessageAction(error, 'CHAT_ADMIN_REQUIRED')
     }
     const now = Math.floor(Date.now() / 1000)
+    const published = await this._publishPinEvent(conversation, req.unpin ? [nativeId] : [], now)
+    if (published) return { response: published, published: true }
+
     const pts = await this._reservePts(1, now, conversation)
     const update: tl.TypeUpdate = this._isTelegramChannel(conversation)
       ? {
@@ -1178,13 +1188,14 @@ export class DialogRpc {
           _: 'updatePinnedMessages', peer: this._conversationPeer(conversation),
           messages: [req.id], pinned: req.unpin ? undefined : true, pts, ptsCount: 1,
         }
-    return this._updates(conversation, [update], now)
+    return { response: this._updates(conversation, [update], now), published: false }
   }
 
   /** Clear room pins using native room-state updates; never clear forum-topic pins accidentally. */
   async unpinAllMessages(req: tl.messages.RawUnpinAllMessagesRequest): Promise<{
     affected: tl.messages.RawAffectedHistory
     updates: tl.TypeUpdate[]
+    published?: boolean
   }> {
     if (!this._platform.getPinnedMessageIds
       || (!this._platform.clearPinnedMessages && !this._platform.setMessagePinned)
@@ -1240,6 +1251,21 @@ export class DialogRpc {
       this._throwMessageAction(error, 'CHAT_ADMIN_REQUIRED')
     }
     const now = Math.floor(Date.now() / 1000)
+    const published = await this._publishPinEvent(
+      conversation, nativeIds, now, { deliveredViaRpc: true },
+    )
+    if (published) {
+      const pinUpdates = published.updates.filter((item) =>
+        item._ === 'updatePinnedChannelMessages' || item._ === 'updatePinnedMessages')
+      const last = pinUpdates.at(-1)
+      const pts = last && 'pts' in last ? last.pts : await this._channelPts(conversation)
+      return {
+        affected: {
+          _: 'messages.affectedHistory', pts, ptsCount: pinUpdates.length, offset: 0,
+        },
+        updates: pinUpdates, published: true,
+      }
+    }
     const ptsCount = 1
     const pts = await this._reservePts(ptsCount, now, conversation)
     const uniqueIds = [...new Set(tlIds)]
@@ -1256,6 +1282,28 @@ export class DialogRpc {
       affected: { _: 'messages.affectedHistory', pts, ptsCount, offset: 0 },
       updates: [update],
     }
+  }
+
+  /**
+   * Publish a native mutation via the same durable pin-update path used by
+   * incoming Matrix state events. The backend journal, not a bare PTS increment,
+   * is responsible for channel difference recovery after disconnects.
+   */
+  private async _publishPinEvent(
+    conversation: IMConversation,
+    removedMessageIds: string[],
+    timestamp: number,
+    options: PlatformEventDeliveryOptions = this._localDelivery(),
+  ): Promise<tl.RawUpdates | undefined> {
+    if (!this._onLocalEvent || !this._platform.getPinnedMessageIds) return
+    const pinnedMessageIds = await this._platform.getPinnedMessageIds(this._session, conversation)
+    const event: IMEvent = {
+      type: 'message-pins',
+      eventId: `relay-pin:${conversation.id}:${Date.now()}:${Math.random()}`,
+      conversation, pinnedMessageIds, removedMessageIds, timestamp,
+    }
+    const published = await this._onLocalEvent(this._session, event, options)
+    return published && published._ === 'updates' ? published : undefined
   }
 
   async getScheduledHistory(
