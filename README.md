@@ -24,7 +24,7 @@ Crossgram 由一组 cordis 插件组成，插件及其配置在 [app.yml](app.ym
 |---|---|---|---|
 | QQ | `@mtproto-relay/platform-qqnt` | 注入 QQNT 的 qqnt-bridge 本地服务 | 主要目标平台，功能最完整 |
 | Discord | `@mtproto-relay/platform-discord` | Discord 普通用户账号（userbot） | 收发、频道与子频道、回应 |
-| Matrix | `@mtproto-relay/platform-matrix` | homeserver 的 Client-Server API | 仅支持未加密房间 |
+| Matrix | `@mtproto-relay/platform-matrix` | homeserver 的 Client-Server API | 未加密房间；支持文字、媒体、回应与贴纸 |
 | Satori | `@mtproto-relay/platform-satori` | 任意 Satori cordis adaptor | 能力取决于 adaptor |
 | 微信 | `@mtproto-relay/platform-wechat` | Windows 上的 ComWeChat HTTP API | 只接收消息 |
 | static | `@mtproto-relay/platform-static` | 内存中的模拟数据 | 参考实现，用于测试 |
@@ -53,11 +53,11 @@ QQ 适配器的源码位于 `packages/platform-crossgram`。适配器通过 HTTP
 | 禁言与移出成员 | ✓ | ✗ | ✗ | ✗ |
 | 好友与入群申请 | ✓ | ✗ | ✗ | ✗ |
 | 撤回消息 | ✓<sup>[1]</sup> | ✓ | ✓ | ✓ |
-| 编辑消息 | 撤回后重发<sup>[1]</sup> | ✓ | 仅纯文本 | ✓ |
+| 编辑消息 | 撤回后重发<sup>[1]</sup> | ✓ | 文字与媒体说明 | ✓ |
 | 转发 | ✓ | ✓ | ✗ | ✓ |
 | 合并转发 | ✓ | ✗ | ✗ | ✗ |
-| 回应（reaction） | ✓ | ✓ | ✗ | ✓ |
-| 表情包 | 收藏表情 | 作为图片接收 | ✗ | ✓ |
+| 回应（reaction） | ✓ | ✓ | ✓ | ✓ |
+| 表情包 | 收藏表情 | 作为图片接收 | 作为图片收发 | ✓ |
 | 系统提示（灰条） | ✓<sup>[2]</sup> | ✓ | ✗ | ✗ |
 | 戳一戳 | ✓ | ✗ | ✗ | ✗ |
 | 语音消息与转写 | ✓ | ✗ | ✗ | ✗ |
