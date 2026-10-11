@@ -263,6 +263,23 @@ describe('MatrixPlatform', () => {
     })
   })
 
+  it('treats missing Matrix messages as absent but propagates permission errors', async () => {
+    const fetch = routeFetch((url) => {
+      if (url.pathname.endsWith('/event/%24missing')) {
+        return json({ errcode: 'M_NOT_FOUND' }, { status: 404 })
+      }
+      if (url.pathname.endsWith('/event/%24forbidden')) {
+        return json({ errcode: 'M_FORBIDDEN' }, { status: 403 })
+      }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch)
+    await expect(platform.getMessage(session, { id: '!room:example.org' }, '$missing'))
+      .resolves.toBeNull()
+    await expect(platform.getMessage(session, { id: '!room:example.org' }, '$forbidden'))
+      .rejects.toMatchObject({ status: 403, errcode: 'M_FORBIDDEN' })
+  })
+
   it('pins and unpins Matrix events without losing other pins in concurrent writes', async () => {
     let pinned: string[] = []
     let muted = false
