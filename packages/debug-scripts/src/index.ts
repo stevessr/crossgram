@@ -101,10 +101,14 @@ const defaultImport: ImportScript = async (filename) => {
   )
   try {
     await writeFile(temporary, await readFile(filename), { mode: 0o600 })
-    return (await tsImport(
-      pathToFileURL(temporary).href,
-      import.meta.url,
-    )) as Record<string, unknown>
+    const url = pathToFileURL(temporary).href
+    // Bun already transpiles TypeScript modules natively. The patched tsx
+    // resolver currently fails under Bun with `Cannot find package 'tsx:'`;
+    // keep tsx for Node, but use the runtime's native loader on Bun.
+    if (process.versions.bun) {
+      return (await import(url)) as Record<string, unknown>
+    }
+    return (await tsImport(url, import.meta.url)) as Record<string, unknown>
   } finally {
     await rm(temporary, { force: true })
   }
