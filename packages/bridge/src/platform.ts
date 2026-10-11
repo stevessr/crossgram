@@ -783,6 +783,17 @@ export type IMEvent<TMediaLocator = unknown> =
     }
   | { type: 'conversation', conversation: IMConversation<TMediaLocator> }
   | {
+      /** Native room-state pin change (not a chat message). */
+      type: 'message-pins'
+      eventId: string
+      conversation: IMConversation<TMediaLocator>
+      /** The entire upstream pin snapshot, in its native order. */
+      pinnedMessageIds: string[]
+      /** Native message IDs removed by this state event. */
+      removedMessageIds: string[]
+      timestamp: number
+    }
+  | {
       type: 'request'
       request: IMRequest<TMediaLocator>
       /** Re-attempt delivery for an already persisted request projection. */
