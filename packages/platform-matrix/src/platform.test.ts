@@ -337,7 +337,7 @@ describe('MatrixPlatform', () => {
       .toEqual({ muted: false })
   })
 
-  it('streams external pinned-state additions, removals, and reorders without local echo', async () => {
+  it('streams external pins and echoes local Matrix state IDs for durable deduplication', async () => {
     const roomId = '!room:example.org'
     let sync = 0
     let nativePins = ['$one']
@@ -397,12 +397,63 @@ describe('MatrixPlatform', () => {
       { eventId: '$external-remove', pinned: ['$two'], removed: ['$one'] },
     ])
 
-    await platform.setMessagePinned(session, { id: roomId }, '$self', true)
+    const mutation = await platform.setMessagePinned(session, { id: roomId }, '$self', true)
+    expect(mutation).toEqual({
+      changed: true, eventId: '$local', pinnedMessageIds: ['$two', '$self'],
+    })
+    // A redundant write never allocates a second Matrix state event or PTS.
+    await expect(platform.setMessagePinned(session, { id: roomId }, '$self', true))
+      .resolves.toEqual({ changed: false, pinnedMessageIds: ['$two', '$self'] })
     expect(nativePins).toEqual(['$two', '$self'])
     releaseEcho(roomSync('s5', nativePins, '$local'))
-    await vi.waitFor(() => expect(sync).toBeGreaterThanOrEqual(6))
+    await vi.waitFor(() =>
+      expect(observed.filter((item) => item.type === 'message-pins')).toHaveLength(4))
     await unsubscribe()
-    expect(observed.filter((item) => item.type === 'message-pins')).toHaveLength(3)
+    expect(observed.at(-1)).toMatchObject({
+      type: 'message-pins', eventId: '$local',
+      pinnedMessageIds: ['$two', '$self'], removedMessageIds: [],
+    })
+  })
+
+  it('retries a rejected pin event without advancing the Matrix sync token or snapshot', async () => {
+    const roomId = '!room:example.org'
+    const requestedTokens: Array<string | null> = []
+    const fetch = routeFetch((url, init) => {
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      requestedTokens.push(url.searchParams.get('since'))
+      if (requestedTokens.length === 1) {
+        return json({ next_batch: 'start', rooms: { join: {
+          [roomId]: { state: { events: [
+            ...roomState,
+            event('m.room.pinned_events', { pinned: ['$old'] }, { id: '$initial', stateKey: '' }),
+          ] },
+        } } })
+      }
+      if (url.searchParams.get('since') === 'start') {
+        return json({ next_batch: 'advance', rooms: { join: {
+          [roomId]: { state: { events: [
+            event('m.room.pinned_events', { pinned: ['$new'] }, {
+              id: '$retry-pin', stateKey: '', ts: 2_000,
+            }),
+          ] },
+        } } })
+      }
+      return pendingUntilAbort(init?.signal)
+    })
+    const platform = createPlatform(fetch, { userId: session.userId, syncTimeoutMs: 50 })
+    const delivered: Array<Extract<IMEvent, { type: 'message-pins' }>> = []
+    const unsubscribe = await platform.subscribe(session, async (value) => {
+      if (value.type !== 'message-pins') return
+      delivered.push(value)
+      if (delivered.length === 1) throw new Error('temporary delivery failure')
+    })
+    await vi.waitFor(() => expect(delivered).toHaveLength(2), { timeout: 4_000 })
+    await unsubscribe()
+    expect(requestedTokens.slice(0, 3)).toEqual([null, 'start', 'start'])
+    expect(delivered[0]).toMatchObject({
+      eventId: '$retry-pin', pinnedMessageIds: ['$new'], removedMessageIds: ['$old'],
+    })
+    expect(delivered[1]).toEqual(delivered[0])
   })
 
   it('subscribes from an initial token and emits messages, edits, redactions, receipts, and conversation changes', async () => {
