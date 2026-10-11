@@ -78,12 +78,31 @@ yarn vitest run packages/e2ee/src/replay-ledger.test.ts
 
 ```sh
 yarn vitest run packages/e2ee/src/mailbox.e2e.test.ts --config vitest.mtproto-e2e.config.mts
-yarn vitest run packages/e2ee/src/sqlite-mailbox.test.ts
+yarn vitest run packages/e2ee/src/sqlite-mailbox.test.ts packages/e2ee/src/sqlite-pins.test.ts
 ```
 
 仅覆盖模拟原生设备及本地 SQLite 生命周期，不构成上线测试或安全审计。
 
-## 五、完整实现所需工作
+## 五、账号绑定加密信封 v2 与本地信任持久化
+
+**协议变更（Breaking）**：实验性信封由 `v: 1` 升为 `v: 2`。每条密文现在显式包含并加密认证 `senderAccountId`、`recipientAccountId`。两个账号 ID 同时参与 Ed25519 签名消息、AES-GCM AAD、HKDF 信息派生。旧 v1 信封默认拒绝；**本项目还没有生产密文迁移需求，也没有启用的 E2EE 会话**。
+
+- 客户端调用 `sealMessage(plaintext, conversationId, senderIdentity, recipientDevice, { senderAccountId, recipientAccountId })` 时，必须使用**本地已经验证**的账号身份，而不能简单相信服务器提供的 `senderAccountId`。
+- 接收端 `openMessage(..., replayGuard, { senderAccountId, recipientAccountId })` 必须用本地已知的收件账号、已验证的对方账号与会话信息匹配；若字段不符，即使密文原本有效也拒绝。
+- 服务器 `MemoryEncryptedMailbox` 和 `SqliteEncryptedMailbox` 只接受账号与设备 ID 同时匹配**可信授权上下文**的信封，阻止跨账号重新标记消息。**此处的类型不是认证本身，实际认证接入仍未实现**。
+- 原始 `bundleFingerprint(bundle)` 只计算设备密钥指纹。供用户核对的绑定安全码改为 `accountDeviceFingerprint(accountId, bundle)`，包含账号 ID 与设备公钥指纹；`verifyAndPinDevice` 只接受**绑定账号的**安全码，并拒绝旧裸公钥指纹。
+- 为客户端新增 `SqliteDevicePinStore`，通过 `@mtproto-relay/e2ee/local-pins` 导入。它使用 SQLite 的原子 `INSERT OR IGNORE`、WAL、`synchronous=FULL`，防止并发静默覆盖经过验证的设备公钥。设备 pin 在进程重启后仍存在，换钥必须经过明确撤销与再次人工验证。
+- 本地 pin 的磁盘根目录必须由客户端先建立，所属用户正确、无组/其他权限（通常 `0700`），SQLite 文件须为当前用户独占（通常 `0600`），拒绝符号链接或存在其他硬链接的数据库。Windows 的磁盘版原型暂时 fail closed；支持内存测试。客户端正式实现还需要操作系统密钥库、数据库加密、备份与回滚防护。
+
+新增覆盖：账号 relabeling/换钥攻击、v1 降级拒绝、绑定安全码跨账号混淆、SQLite 信任记录跨重启保留、独立连接并发争抢同一设备 pin，以及不安全目录/文件拒绝。
+
+```sh
+yarn vitest run packages/e2ee/src/sqlite-pins.test.ts
+```
+
+**安全限定**：v2 仍然是原型自定义信封，不具备 Double Ratchet/MLS 的正式会话安全性；不能用来宣称当前 Telegram / QQ / Discord / Matrix 聊天已获得真正的 E2EE。
+
+## 六、完整实现所需工作
 
 1. **明确受保护的通信对象**：区分 CrossGram 原生 E2EE 联系人与 QQ/Discord/Matrix 外部桥接联系人。普通外部适配器不可能让其不支持此协议的终端自动解密；若桥接端解密，必须显式提示信任边界。
 2. **选择成熟协议**：对 Telegram 原生设备间聊天优先评估 Secret Chat 全套协议；对自研原生多设备消息优先考虑经过审计的 Double Ratchet、MLS 或成熟客户端库，而非扩展此演示型密文信封。
@@ -93,7 +112,7 @@ yarn vitest run packages/e2ee/src/sqlite-mailbox.test.ts
 6. **高级功能与安全性**：异步会话建立及预密钥、Double Ratchet 恢复能力、加密媒体分块、多设备同步、群成员变更重新密钥协商、密钥备份和透明迁移。
 7. **测试与发布门槛**：两端独立进程真实消息流、恶意服务器篡改和重放、断网同步、SQLite/PostgreSQL 重启场景、客户端兼容矩阵及独立密码审计。
 
-## 六、测试
+## 七、测试
 
 ```sh
 yarn vitest run packages/e2ee/src/envelope.test.ts packages/e2ee/src/devices.test.ts packages/e2ee/src/replay-ledger.test.ts packages/e2ee/src/sqlite-mailbox.test.ts
