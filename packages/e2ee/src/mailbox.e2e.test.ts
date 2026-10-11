@@ -4,7 +4,7 @@ import {
   MemoryReplayGuard, generateDeviceIdentity, openMessage, publicDevice, sealMessage,
 } from './envelope.js'
 import {
-  MemoryDevicePinStore, accountDeviceFingerprint, bundleFingerprint, exportDeviceBundle, openFromPinnedDevice,
+  MemoryDevicePinStore, accountDeviceFingerprint, exportDeviceBundle, openFromPinnedDevice,
   sealToPinnedDevices, verifyAndPinDevice,
 } from './devices.js'
 
