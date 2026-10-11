@@ -488,8 +488,9 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     }
     const pollStart = event.type === 'm.poll.start' || event.type === 'org.matrix.msc3381.poll.start'
     const pollEnd = event.type === 'm.poll.end' || event.type === 'org.matrix.msc3381.poll.end'
+    const location = event.type === 'm.location' || event.type === 'org.matrix.msc3488.location'
     // Poll responses do not have a text fallback and must not appear as separate chat messages.
-    if (!pollStart && !pollEnd && event.type !== 'm.room.message') return
+    if (!pollStart && !pollEnd && !location && event.type !== 'm.room.message') return
     const raw = event.content as MatrixRoomMessageContent
     const relation = raw['m.relates_to']
     const content = relation?.rel_type === 'm.replace' && raw['m.new_content'] ? raw['m.new_content'] : raw
@@ -566,17 +567,21 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
 
 function matrixMessageParts(content: MatrixRoomMessageContent): IMMessage<MatrixMediaLocator>['content']['parts'] {
   const body = content.body ?? ''
-  if (content.msgtype === 'm.location') {
-    const coordinates = parseMatrixGeoUri(content.geo_uri)
+  const structured = matrixObject(content['m.location'])
+    ?? matrixObject(content['org.matrix.msc3488.location'])
+  if (content.msgtype === 'm.location' || structured) {
+    const coordinates = parseMatrixGeoUri(structured?.uri) ?? parseMatrixGeoUri(content.geo_uri)
+    const title = (typeof structured?.description === 'string' && structured.description.trim())
+      || body.trim() || matrixEventText(content).trim() || '位置'
     if (!coordinates) {
-      return [{ type: 'text', text: body || content.geo_uri || '位置' }]
+      return [{ type: 'text', text: title }]
     }
     const { latitude, longitude } = coordinates
     return [{
       type: 'card',
       card: {
         kind: 'location',
-        title: body.trim() || '位置',
+        title,
         description: `${latitude}, ${longitude}`,
         source: 'Matrix',
         latitude,
@@ -641,6 +646,7 @@ function matrixEventText(value: unknown): string {
   const object = matrixObject(value)
   if (!object) return ''
   const rich = object['m.text']
+  if (typeof rich === 'string') return rich
   if (Array.isArray(rich)) {
     const block = rich.map(matrixObject).find((item) => item?.mimetype === 'text/plain')
       ?? rich.map(matrixObject).find((item) => typeof item?.body === 'string')
