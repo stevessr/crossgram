@@ -426,7 +426,7 @@ describe('MatrixPlatform', () => {
           [roomId]: { state: { events: [
             ...roomState,
             event('m.room.pinned_events', { pinned: ['$old'] }, { id: '$initial', stateKey: '' }),
-          ] },
+          ] } },
         } } })
       }
       if (url.searchParams.get('since') === 'start') {
@@ -435,7 +435,7 @@ describe('MatrixPlatform', () => {
             event('m.room.pinned_events', { pinned: ['$new'] }, {
               id: '$retry-pin', stateKey: '', ts: 2_000,
             }),
-          ] },
+          ] } },
         } } })
       }
       return pendingUntilAbort(init?.signal)
