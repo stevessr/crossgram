@@ -453,6 +453,65 @@ describe('MatrixPlatform', () => {
     expect(sent).toMatchObject([{ 'org.matrix.msc3381.poll.response': { answers: ['a'] } }])
   })
 
+
+  it('fails closed when the homeserver cannot confirm poll relations', async () => {
+    const poll = event('m.poll.start', {
+      'm.poll.start': { question: { 'm.text': [{ body: 'Are you sure?' }] },
+        answers: [{ 'm.id': 'yes', 'm.text': [{ body: 'Yes' }] }] },
+    }, { id: '$poll', sender: '@alice:example.org' })
+    let attempts = 0
+    const fetch = routeFetch((url) => {
+      if (url.pathname.includes('/event/')) return json(poll)
+      if (url.pathname.includes('/relations/')) return json({
+        errcode: 'M_UNAVAILABLE', error: 'temporarily unavailable',
+      }, { status: 503 })
+      if (url.pathname.includes('/send/')) { attempts++; return json({ event_id: '$unexpected' }) }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const response = await createPlatform(fetch).clickInlineButton(session, {
+      conversationId: '!room:example.org', messageId: '$poll',
+    }, { type: 'callback', text: 'Yes', data: 'matrix-poll-vote:0' })
+    expect(response).toMatchObject({ alert: true, message: expect.stringContaining('无法验证') })
+    expect(attempts).toBe(0)
+  })
+
+  it('updates the original poll keyboard when Matrix sync delivers a poll-end event', async () => {
+    const roomId = '!room:example.org'
+    const poll = event('m.poll.start', {
+      'm.poll.start': {
+        question: { 'm.text': [{ body: 'Lunch?' }] },
+        answers: [{ 'm.id': 'rice', 'm.text': [{ body: 'Rice' }] }],
+      },
+    }, { id: '$poll', sender: '@alice:example.org', ts: 1_000 })
+    const end = event('m.poll.end', {
+      'm.relates_to': { rel_type: 'm.reference', event_id: '$poll' },
+      'm.text': [{ body: 'Lunch poll ended' }],
+    }, { id: '$end', sender: '@alice:example.org', ts: 2_000 })
+    let sync = 0
+    const fetch = routeFetch((url, init) => {
+      if (url.pathname.includes('/event/')) return json(poll)
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      sync++
+      if (sync === 1) return json({
+        next_batch: 'start', rooms: { join: { [roomId]: { state: { events: roomState } } } },
+      })
+      if (sync === 2) return json({
+        next_batch: 'next', rooms: { join: { [roomId]: { timeline: { events: [poll, end] } } } },
+      })
+      return pendingUntilAbort(init?.signal)
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+    const events: IMEvent[] = []
+    const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
+    await vi.waitFor(() => expect(events).toHaveLength(3))
+    await unsubscribe()
+    expect(events.map((event) => event.type)).toEqual(['message', 'message', 'message-edit'])
+    if (events[0].type !== 'message' || events[2].type !== 'message-edit') throw new Error('wrong event types')
+    expect(events[0].message.content.inlineKeyboard?.rows).toHaveLength(1)
+    expect(events[2].message).toMatchObject({ id: '$poll' })
+    expect(events[2].message.content.inlineKeyboard).toBeUndefined()
+  })
+
   it('parses valid geo URIs into map cards and preserves malformed locations as text', async () => {
     const fetch = routeFetch((url) => {
       if (!url.pathname.endsWith('/messages')) throw new Error(`unexpected request: ${url}`)
