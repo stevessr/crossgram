@@ -89,15 +89,32 @@ export class RouteStore {
   async importTicket(token: Uint8Array, userId: string, dcId?: number): Promise<ExportTicket> {
     if (token.length !== 32) throw new Error('Invalid gateway authorization token')
     const key = createHash('sha256').update(token).digest('hex')
-    const value = await this.readTicket(key)
-    if (value.expiresAt < Date.now() || value.userId !== userId || (dcId !== undefined && value.dcId !== dcId) || !await this.load(value.parent)) {
-      throw new Error('Invalid or expired gateway authorization token')
+    // O_EXCL works on Windows as well as POSIX. Acquire the lock BEFORE
+    // reading/validating, so parallel importers cannot both claim one token.
+    // A crashed importer leaves the ticket locked (fail closed).
+    const lockPath = this.path(key, 'claim-lock')
+    let lock
+    try {
+      lock = await open(lockPath, 'wx', 0o600)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new Error('Invalid or expired gateway authorization token')
+      }
+      throw error
     }
-    // Atomic claim: only one concurrent importer can consume this token.
-    const claimed = this.path(key, `${randomUUID()}.claimed`)
-    await rename(this.path(key, 'ticket'), claimed)
-    await rm(claimed, { force: true })
-    return value
+    try {
+      const value = await this.readTicket(key)
+      if (value.expiresAt < Date.now() || value.userId !== userId || (dcId !== undefined && value.dcId !== dcId) || !await this.load(value.parent)) {
+        throw new Error('Invalid or expired gateway authorization token')
+      }
+      const claimed = this.path(key, `${randomUUID()}.claimed`)
+      await rename(this.path(key, 'ticket'), claimed)
+      await rm(claimed, { force: true })
+      return value
+    } finally {
+      await lock.close()
+      await rm(lockPath, { force: true })
+    }
   }
   async sessionPath(key: string): Promise<string> {
     const path = this.path(key, 'sqlite')
