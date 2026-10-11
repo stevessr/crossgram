@@ -204,7 +204,16 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
           requests.push(locallyResolved)
           continue
         }
-        if (locallyResolved) this.locallyResolvedInvites.delete(roomId)
+        if (locallyResolved) {
+          // A newer invitation replaced an already handled one before its
+          // terminal result could be recovered by the bridge.
+          requests.push(locallyResolved)
+          this.locallyResolvedInvites.delete(roomId)
+        }
+        const previous = this.pendingInvites.get(roomId)
+        if (previous && previous.id !== request.id) {
+          requests.push({ ...previous, state: 'rejected' })
+        }
         requests.push(request)
         this.pendingInvites.set(roomId, request)
       }
@@ -505,9 +514,12 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       if (!request) continue
       const locallyResolved = this.locallyResolvedInvites.get(roomId)
       if (locallyResolved?.id === request.id) continue
-      if (locallyResolved) this.locallyResolvedInvites.delete(roomId)
+      if (locallyResolved) {
+        await handler({ type: 'request', request: locallyResolved })
+        this.locallyResolvedInvites.delete(roomId)
+      }
       const previous = this.pendingInvites.get(roomId)
-      if (previous && previous.id !== request.id) {
+      if (previous && previous.id !== request.id && previous.id !== locallyResolved?.id) {
         await handler({ type: 'request', request: { ...previous, state: 'rejected' } })
       }
       if (!previous || JSON.stringify(previous) !== JSON.stringify(request)) {
