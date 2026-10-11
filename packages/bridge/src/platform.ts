@@ -401,6 +401,11 @@ export interface IMMessagePoll {
   answers: Array<{ id: string, text: string }>
   kind: 'disclosed' | 'undisclosed'
   maxSelections: number
+  /** True once a verified closing event has been observed. */
+  closed?: boolean
+  /** Only set after exhausting Matrix reference relations; never use m.poll.results hints as authoritative. */
+  counts?: Record<string, number>
+  totalVoters?: number
 }
 
 export type IMMessageInputPart =
@@ -1033,10 +1038,16 @@ export function messageText(message: IMProjectableMessage<unknown>): string {
 export function messagePartText(part: IMMessagePart<unknown>): string {
   if (part.type === 'text') return part.text
   if (part.type === 'poll') {
+    const poll = part.poll
     return [
-      `🗳️ ${part.poll.question}`,
-      ...part.poll.answers.map((answer, index) => `${index + 1}. ${answer.text}`),
-      ...(part.poll.maxSelections > 1 ? [`最多选择 ${part.poll.maxSelections} 项`] : []),
+      `🗳️ ${poll.question}`,
+      ...poll.answers.map((answer, index) => {
+        const votes = poll.closed ? poll.counts?.[answer.id] : undefined
+        return `${index + 1}. ${answer.text}${votes === undefined ? '' : ` — ${votes} 票`}`
+      }),
+      ...(poll.maxSelections > 1 ? [`最多选择 ${poll.maxSelections} 项`] : []),
+      ...(poll.closed ? [poll.totalVoters === undefined
+        ? '投票已结束' : `投票已结束 · ${poll.totalVoters} 人有效投票`] : []),
     ].join('\n')
   }
   if (part.type !== 'card') return ''
