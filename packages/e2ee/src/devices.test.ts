@@ -67,16 +67,16 @@ describe('CrossGram E2EE public-device identity exchange', () => {
     }
     const message = new TextEncoder().encode('你好，端到端加密')
     const envelopes = await sealToPinnedDevices(message, 'chat:alice-bob', sender, store,
-      'bob-account', ['bob-phone', 'bob-laptop'])
+      'bob-account', ['bob-phone', 'bob-laptop'], 'alice-account')
     expect(envelopes).toHaveLength(2)
     expect(envelopes[0].ciphertext).not.toBe(envelopes[1].ciphertext)
     for (const [index, recipient] of [bobPhone, bobLaptop].entries()) {
       const opened = await openMessage(envelopes[index], 'chat:alice-bob', recipient,
-        publicDevice(sender), new MemoryReplayGuard())
+        publicDevice(sender), new MemoryReplayGuard(), { senderAccountId: 'alice-account', recipientAccountId: 'bob-account' })
       expect(new TextDecoder().decode(opened)).toBe('你好，端到端加密')
     }
     await expect(openMessage(envelopes[0], 'chat:alice-bob', bobLaptop,
-      publicDevice(sender), new MemoryReplayGuard())).rejects.toThrow('E2EE_CONTEXT_MISMATCH')
+      publicDevice(sender), new MemoryReplayGuard(), { senderAccountId: 'alice-account', recipientAccountId: 'bob-account' })).rejects.toThrow('E2EE_CONTEXT_MISMATCH')
   })
 
   it('authenticates inbound messages against locally pinned senders and revocation', async () => {
@@ -90,17 +90,17 @@ describe('CrossGram E2EE public-device identity exchange', () => {
     const bobBundle = exportDeviceBundle(bob)
     await verifyAndPinDevice(bobPins, 'bob-account', bobBundle, bundleFingerprint(bobBundle))
     const trustedEnvelope = (await sealToPinnedDevices(new TextEncoder().encode('verified'),
-      'private', sender, bobPins, 'bob-account', ['bob']))[0]
+      'private', sender, bobPins, 'bob-account', ['bob'], 'alice-account'))[0]
     expect(new TextDecoder().decode(await openFromPinnedDevice(trustedEnvelope, 'private',
-      bob, pins, 'alice-account', new MemoryReplayGuard()))).toBe('verified')
+      bob, pins, 'alice-account', new MemoryReplayGuard(), 'bob-account'))).toBe('verified')
 
     const forgedEnvelope = (await sealToPinnedDevices(new Uint8Array([1]), 'private', attacker,
-      bobPins, 'bob-account', ['bob']))[0]
+      bobPins, 'bob-account', ['bob'], 'alice-account'))[0]
     await expect(openFromPinnedDevice(forgedEnvelope, 'private', bob, pins,
-      'alice-account', new MemoryReplayGuard())).rejects.toThrow('E2EE_SIGNATURE_INVALID')
+      'alice-account', new MemoryReplayGuard(), 'bob-account')).rejects.toThrow('E2EE_SIGNATURE_INVALID')
     await pins.revoke('alice-account', 'alice')
     await expect(openFromPinnedDevice(trustedEnvelope, 'private', bob, pins,
-      'alice-account', new MemoryReplayGuard())).rejects.toThrow('E2EE_DEVICE_UNVERIFIED')
+      'alice-account', new MemoryReplayGuard(), 'bob-account')).rejects.toThrow('E2EE_DEVICE_UNVERIFIED')
   })
 
   it('fails the whole fan-out before sealing if any target device is unverified', async () => {
@@ -109,10 +109,10 @@ describe('CrossGram E2EE public-device identity exchange', () => {
     const trusted = exportDeviceBundle(generateDeviceIdentity('trusted'))
     await verifyAndPinDevice(store, 'target', trusted, bundleFingerprint(trusted))
     await expect(sealToPinnedDevices(new TextEncoder().encode('secret'), 'chat', sender, store,
-      'target', ['trusted', 'unknown'])).rejects.toThrow('E2EE_DEVICE_UNVERIFIED')
+      'target', ['trusted', 'unknown'], 'alice-account')).rejects.toThrow('E2EE_DEVICE_UNVERIFIED')
     await expect(sealToPinnedDevices(new Uint8Array(), 'chat', sender, store,
-      'target', [])).rejects.toThrow('E2EE_NO_RECIPIENT_DEVICES')
+      'target', [], 'alice-account')).rejects.toThrow('E2EE_NO_RECIPIENT_DEVICES')
     await expect(sealToPinnedDevices(new Uint8Array(), 'chat', sender, store,
-      'target', ['trusted', 'trusted'])).rejects.toThrow('E2EE_DUPLICATE_RECIPIENT_DEVICE')
+      'target', ['trusted', 'trusted'], 'alice-account')).rejects.toThrow('E2EE_DUPLICATE_RECIPIENT_DEVICE')
   })
 })
