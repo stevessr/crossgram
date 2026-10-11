@@ -512,10 +512,16 @@ export interface IMMessageBundleProvider<TMediaLocator = unknown> {
 
 /** Whether a platform message explicitly mentions one platform user. */
 export function messageMentionsUser(message: IMMessage, userId: string): boolean {
-  return message.content.parts.some((part) =>
+  if (message.content.parts.some((part) =>
     part.type === 'text'
     && part.entities?.some((entity) => entity.type === 'mention' && entity.userId === userId),
-  )
+  )) return true
+  // Matrix notification semantics do not require a visible @name range.
+  // The Matrix adapter stores its explicit m.mentions targets here when the
+  // plain-text body cannot faithfully represent a clickable mention entity.
+  const matrixMentions = message.metadata?.matrixMentions
+  return Array.isArray(matrixMentions)
+    && matrixMentions.some((id) => typeof id === 'string' && id === userId)
 }
 
 export function telegramMessageId(message: IMMessage): number | undefined {
