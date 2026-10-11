@@ -59,7 +59,11 @@ export interface PlatformCapabilities {
       mode: 'native' | 'copy' | 'unsupported'
       preservesAuthor: boolean
     }
+    /** Platform-native message pinning, independently of member permissions. */
+    pin?: { read: boolean, write: boolean }
   }
+  /** Per-conversation notification control for the current account. */
+  notifications?: { read: boolean, mute: boolean }
   stickers?: {
     native: boolean
     upload: boolean
@@ -602,6 +606,11 @@ export class IMMediaUnavailableError extends Error {
   }
 }
 
+export interface IMConversationNotificationSettings {
+  /** True when notifications for this room are suppressed for the current account. */
+  muted: boolean
+}
+
 export interface IMReadTarget {
   conversationId: string
   /** Opaque logical platform message ID through which incoming messages were read. */
@@ -909,6 +918,30 @@ export interface IMPlatform<TMediaLocator = unknown> {
     target: { userId: string },
     count: number,
   ): Promise<IMMessage<TMediaLocator> | undefined>
+
+  /** Read platform-native pins in their upstream order (opaque message IDs). */
+  getPinnedMessageIds?(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+  ): Promise<string[]>
+  /** Add or remove one upstream pinned event without overwriting other pins. */
+  setMessagePinned?(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+    messageId: string,
+    pinned: boolean,
+  ): Promise<void>
+  /** Read notification overrides belonging to the current platform account. */
+  getConversationNotificationSettings?(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+  ): Promise<IMConversationNotificationSettings>
+  /** Change only the current platform account's room notifications. */
+  setConversationNotificationSettings?(
+    session: PlatformSession,
+    conversation: IMConversationRef,
+    settings: IMConversationNotificationSettings,
+  ): Promise<void>
 
   /**
    * Reverse-sync a conversation notification mask (e.g. QQ group message mask).
