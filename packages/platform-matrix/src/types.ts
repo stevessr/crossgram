@@ -44,6 +44,7 @@ export interface MatrixRoomMessageContent {
   body?: string
   formatted_body?: string
   format?: string
+  'm.mentions'?: { user_ids?: string[], room?: boolean }
   url?: string
   file?: { url?: string }
   filename?: string
