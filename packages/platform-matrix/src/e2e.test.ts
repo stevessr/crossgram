@@ -1,4 +1,4 @@
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { createServer, request as httpRequest, type IncomingMessage, type ServerResponse } from 'node:http'
 import { createConnection, type AddressInfo } from 'node:net'
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest'
 import type { PlatformSession } from '@mtproto-relay/bridge'
@@ -18,9 +18,31 @@ describe('Matrix platform HTTP e2e', () => {
     await route(request, response, body)
   })
   const proxyConnections: string[] = []
-  const proxy = createServer((_request, response) => {
-    response.writeHead(405)
-    response.end()
+  // HTTP proxies may forward absolute-form requests instead of tunneling
+  // HTTP origins with CONNECT (implementation/version dependent).
+  const proxy = createServer((request, response) => {
+    let target: URL
+    try {
+      target = new URL(request.url ?? '')
+      if (target.protocol !== 'http:') throw new Error('unsupported proxy target')
+    } catch {
+      response.writeHead(400)
+      response.end()
+      return
+    }
+    proxyConnections.push(target.host)
+    const upstream = httpRequest(target, {
+      method: request.method,
+      headers: { ...request.headers, host: target.host },
+    }, (incoming) => {
+      response.writeHead(incoming.statusCode ?? 502, incoming.headers)
+      incoming.pipe(response)
+    })
+    upstream.on('error', () => {
+      if (!response.headersSent) response.writeHead(502)
+      response.end()
+    })
+    request.pipe(upstream)
   })
   proxy.on('connect', (request, clientSocket, head) => {
     proxyConnections.push(request.url ?? '')
