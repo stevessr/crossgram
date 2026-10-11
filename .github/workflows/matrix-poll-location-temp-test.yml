@@ -1,0 +1,89 @@
+# Temporary PR #6 regression workflow. Remove after Matrix poll/location work is merged.
+name: "TEMP Matrix poll/location tests"
+
+on:
+  push:
+    branches:
+      - fix/matrix-poll-location-events
+    paths:
+      - ".github/workflows/matrix-poll-location-temp-test.yml"
+      - "packages/platform-matrix/**"
+      - "packages/bridge/**"
+      - "packages/merged-forward/**"
+      - "packages/platform-crossgram/**"
+      - "packages/platform-discord/**"
+      - "yarn.lock"
+      - "package.json"
+      - "tsconfig*.json"
+      - "vitest*.mts"
+  pull_request:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/matrix-poll-location-temp-test.yml"
+      - "packages/platform-matrix/**"
+      - "packages/bridge/**"
+      - "packages/merged-forward/**"
+      - "packages/platform-crossgram/**"
+      - "packages/platform-discord/**"
+      - "yarn.lock"
+      - "package.json"
+      - "tsconfig*.json"
+      - "vitest*.mts"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: temp-matrix-poll-location-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    name: Matrix & bridge tests and types (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    env:
+      HUSKY: "0"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - name: Enable Corepack
+        run: corepack enable
+      - name: Install dependencies
+        run: yarn install --immutable
+        env:
+          YARN_ENABLE_SCRIPTS: "true"
+      - name: Run focused regression tests
+        run: >-
+          yarn vitest run --config vitest.config.mts
+          packages/platform-matrix/src/client.test.ts
+          packages/platform-matrix/src/platform.test.ts
+          packages/platform-matrix/src/poll-results.test.ts
+          packages/bridge/src/platform.test.ts
+      - name: TypeScript typecheck (all packages)
+        run: yarn typecheck
+
+  matrix-http-e2e:
+    name: Matrix HTTP/proxy e2e (Linux)
+    runs-on: ubuntu-latest
+    env:
+      HUSKY: "0"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+      - run: corepack enable
+      - name: Install dependencies
+        run: yarn install --immutable
+        env:
+          YARN_ENABLE_SCRIPTS: "true"
+      - name: Run Matrix local HTTP/proxy e2e
+        run: yarn workspace @mtproto-relay/platform-matrix test:e2e
