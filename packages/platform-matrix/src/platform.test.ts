@@ -570,6 +570,56 @@ describe('MatrixPlatform', () => {
     expect((await platform.getSubdialogs(session, { id: space })).total).toBe(0)
   })
 
+  it('keeps pin events and Space hierarchy updates together in one incremental sync', async () => {
+    const space = '!space:example.org'
+    const child = '!child:example.org'
+    let sync = 0
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      const url = new URL(String(input))
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      if (++sync === 1) return json({ next_batch: 'before', rooms: { join: {
+        [space]: { state: { events: [
+          event('m.room.create', { type: 'm.space' }, { stateKey: '' }),
+          event('m.space.child', { via: ['example.org'] }, { stateKey: child }),
+          event('m.room.pinned_events', { pinned: ['$first'] }, { stateKey: '', id: '$original' }),
+        ] } },
+        [child]: { state: { events: [event('m.room.create', {}, { stateKey: '' })] } },
+      } } })
+      if (sync === 2) return json({ next_batch: 'after', rooms: { join: {
+        [space]: { state: { events: [
+          event('m.space.child', {}, { stateKey: child }),
+          event('m.room.pinned_events', { pinned: ['$first', '$second'] }, { stateKey: '', id: '$updated' }),
+        ] } },
+      } } })
+      return pendingUntilAbort(init?.signal)
+    })
+    const platform = createPlatform(fetch, { userId: session.userId, syncTimeoutMs: 50 })
+    const observed: IMEvent[] = []
+    const unsubscribe = await platform.subscribe(session, (value) => { observed.push(value) })
+    await vi.waitFor(() => {
+      expect(observed.some((value) => value.type === 'message-pins')).toBe(true)
+      expect(observed.some((value) =>
+        value.type === 'conversation' && value.conversation.id === child)).toBe(true)
+    })
+    await unsubscribe()
+    expect(observed).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'message-pins', eventId: '$updated',
+        pinnedMessageIds: ['$first', '$second'], removedMessageIds: [],
+      }),
+      expect.objectContaining({
+        type: 'conversation', conversation: expect.objectContaining({
+          id: space, metadata: expect.objectContaining({ hasSubchannels: false }),
+        }),
+      }),
+      expect.objectContaining({
+        type: 'conversation', conversation: expect.objectContaining({
+          id: child, kind: 'group', parentId: undefined,
+        }),
+      }),
+    ]))
+  })
+
   it('updates child metadata after a Space relationship is removed in incremental sync', async () => {
     const space = '!space:example.org'
     const child = '!child:example.org'
