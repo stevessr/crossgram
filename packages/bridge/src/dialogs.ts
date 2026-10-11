@@ -782,7 +782,7 @@ export class DialogRpc {
     await this._hydratePeers()
     const peerId = this._resolvePeer(req.peer)
     const conversation = this._conversation(peerId)
-    if (req.filter._ === 'inputMessagesFilterPinned') return this._emptyMessages(conversation)
+    if (req.filter._ === 'inputMessagesFilterPinned') return this._searchPinnedMessages(req, peerId, conversation)
     if (this._platform.searchMessages && !isLocalOnlyConversation(conversation)) {
       return this._searchPlatform(req, peerId, conversation)
     }
@@ -820,6 +820,47 @@ export class DialogRpc {
     } as unknown as tl.messages.TypeMessages
   }
 
+  /** Map native Matrix room pins to Telegram's pinned-message search results. */
+  private async _searchPinnedMessages(
+    req: tl.messages.RawSearchRequest, peerId: string, conversation: IMConversation,
+  ): Promise<tl.messages.TypeMessages> {
+    if (!this._platform.getPinnedMessageIds || !this._platform.getMessage) {
+      return this._emptyMessages(conversation)
+    }
+    const ids = await this._platform.getPinnedMessageIds(this._session, conversation)
+    const messages: IMMessage[] = []
+    for (const id of [...new Set(ids)]) {
+      const message = await this._platform.getMessage(this._session, conversation, id)
+      if (!message) continue
+      if (this._store) await this._store.ingest(this._session, conversation, message)
+      messages.push(message)
+    }
+    const materialized = await this._visibleMessages(await this._materializeSearchMessages(peerId, messages))
+    const q = req.q.toLocaleLowerCase()
+    const filtered = materialized.filter((item) =>
+      (!req.offsetId || item.tlId < req.offsetId)
+      && (!req.minDate || item.source.timestamp > req.minDate)
+      && (!req.maxDate || item.source.timestamp < req.maxDate)
+      && (!req.maxId || item.tlId < req.maxId)
+      && (!req.minId || item.tlId > req.minId)
+      && (!q || messageText(item.source).toLocaleLowerCase().includes(q)),
+    )
+    const start = Math.max(0, req.addOffset)
+    const page = filtered.slice(start, start + clampLimit(req.limit))
+    const projected = await this._projectMessages(page)
+    return {
+      _: 'messages.messagesSlice', count: filtered.length,
+      messages: projected.messages, topics: [],
+      chats: uniqueChats([
+        ...(conversation.kind === 'direct' ? [] : [this._makeChat(conversation)]),
+        ...projected.chats,
+      ]),
+      users: uniqueUsers([
+        ...await this._messageSenders(page.map((item) => item.source)), this._makeSelfUser(),
+      ]),
+    } as tl.messages.TypeMessages
+  }
+
   async getSearchCounters(
     req: tl.messages.RawGetSearchCountersRequest,
   ): Promise<tl.messages.RawSearchCounter[]> {
@@ -828,7 +869,7 @@ export class DialogRpc {
     }
     const counters: tl.messages.RawSearchCounter[] = []
     for (const filter of req.filters) {
-      if (!supportsSharedMediaFilter(filter)) {
+      if (!supportsSharedMediaFilter(filter) && filter._ !== 'inputMessagesFilterPinned') {
         counters.push({ _: 'messages.searchCounter', filter, count: 0 })
         continue
       }
@@ -1090,6 +1131,36 @@ export class DialogRpc {
     this._markReadInBackground(conversationId, req.maxId, excludeConnection)
     const state = await this._store?.getUpdateState(this._session.platformSessionId)
     return { _: 'messages.affectedMessages', pts: state?.pts ?? this._pts, ptsCount: 0 }
+  }
+
+  /** Persist native pinned state before returning Telegram's update to the requester. */
+  async updatePinnedMessage(req: {
+    peer: tl.TypeInputPeer, id: number, unpin?: boolean,
+  }): Promise<tl.TypeUpdates> {
+    if (!this._platform.setMessagePinned || !this._platform.capabilities.messageActions?.pin?.write) {
+      throw new RpcError(400, 'CHAT_ADMIN_REQUIRED')
+    }
+    if (!this._store) throw new RpcError(500, 'MESSAGE_STORE_UNAVAILABLE')
+    await this._hydratePeers()
+    const peerId = this._resolvePeer(req.peer)
+    this._assertWritableConversation(peerId)
+    const conversation = this._conversation(peerId)
+    if (conversation.selfPermissions?.pinMessages === false) throw new RpcError(400, 'CHAT_ADMIN_REQUIRED')
+    const projected = await this._store.findProjectedByTlId(this._session.platformSessionId, req.id, peerId)
+    if (!projected) throw new RpcError(400, 'MSG_ID_INVALID')
+    const ordinal = projected.parts.find((part) => part.tlMessageId === req.id)?.ordinal ?? 0
+    const nativeId = projected.source.sourceIds?.[ordinal] ?? projected.source.id
+    try {
+      await this._platform.setMessagePinned(this._session, conversation, nativeId, !req.unpin)
+    } catch (error) {
+      this._throwMessageAction(error, 'CHAT_ADMIN_REQUIRED')
+    }
+    const now = Math.floor(Date.now() / 1000)
+    const pts = await this._reservePts(1, now, conversation)
+    return this._updates(conversation, [{
+      _: 'updatePinnedMessages', peer: this._conversationPeer(conversation),
+      messages: [req.id], pinned: req.unpin ? undefined : true, pts, ptsCount: 1,
+    } as tl.TypeUpdate], now)
   }
 
   async getScheduledHistory(
@@ -5562,6 +5633,15 @@ export class DialogRpc {
   }> {
     await this._hydratePeers()
     const target = await this._notificationTarget(req.peer)
+    // Matrix room push rules are per-user. Sync only unmute and indefinite mute:
+    // Matrix has no expiry field for a room push rule, so finite Telegram mutes
+    // remain local instead of accidentally becoming permanent upstream.
+    if (target.type === 'peer' && this._platform.setConversationNotificationSettings
+      && (req.settings.muteUntil === 0 || req.settings.muteUntil === MUTE_FOREVER)) {
+      await this._platform.setConversationNotificationSettings(this._session, { id: target.peerId }, {
+        muted: req.settings.muteUntil !== 0,
+      })
+    }
     await this._notificationSettings?.update(
       this._session.platformSessionId, target, req.settings,
     )
@@ -5713,11 +5793,20 @@ export class DialogRpc {
     const persisted = await this._notificationSettings?.get(
       this._session.platformSessionId, target,
     ) ?? { _: 'peerNotifySettings' as const }
-    // Only peer settings mirror QQ. Topic and category targets remain Telegram-local.
+    // QQ group masks and Matrix room push rules are external sources of truth.
+    // A finite Telegram mute is local-only because Matrix push rules cannot expire.
     const policy = target.type === 'peer'
       ? qqGroupMsgMaskPolicy(this._conversations.get(target.peerId))
       : undefined
-    const merged = policy ? { ...persisted, muteUntil: policy.muteUntil } : persisted
+    let merged = policy ? { ...persisted, muteUntil: policy.muteUntil } : persisted
+    if (target.type === 'peer' && this._platform.getConversationNotificationSettings
+      && (persisted.muteUntil === undefined || persisted.muteUntil === 0
+        || persisted.muteUntil === MUTE_FOREVER)) {
+      const native = await this._platform.getConversationNotificationSettings(
+        this._session, { id: target.peerId },
+      )
+      merged = { ...merged, muteUntil: native.muted ? MUTE_FOREVER : 0 }
+    }
     if (target.type !== 'peer' || !this._notificationSettings) return merged
     // Telegram answers with the *effective* settings of a peer. Clients treat
     // fields that are missing from the answer as unknown: they then re-request
