@@ -18,25 +18,22 @@ describe('Matrix platform HTTP e2e', () => {
     await route(request, response, body)
   })
   const proxyConnections: string[] = []
-  // HTTP proxies may forward absolute-form requests instead of tunneling
-  // HTTP origins with CONNECT (implementation/version dependent).
+  // Undici ProxyAgent sends HTTP origins using absolute-form proxy requests,
+  // while HTTPS origins use CONNECT. Support both instead of replying HTTP 405.
   const proxy = createServer((request, response) => {
-    let target: URL
-    try {
-      target = new URL(request.url ?? '')
-      if (target.protocol !== 'http:') throw new Error('unsupported proxy target')
-    } catch {
-      response.writeHead(400)
+    const target = new URL(request.url ?? '/', homeserver)
+    proxyConnections.push(target.host)
+    if (target.hostname !== '127.0.0.1') {
+      response.writeHead(403)
       response.end()
       return
     }
-    proxyConnections.push(target.host)
     const upstream = httpRequest(target, {
       method: request.method,
-      headers: { ...request.headers, host: target.host },
-    }, (incoming) => {
-      response.writeHead(incoming.statusCode ?? 502, incoming.headers)
-      incoming.pipe(response)
+      headers: request.headers,
+    }, (upstreamResponse) => {
+      response.writeHead(upstreamResponse.statusCode ?? 502, upstreamResponse.headers)
+      upstreamResponse.pipe(response)
     })
     upstream.on('error', () => {
       if (!response.headersSent) response.writeHead(502)

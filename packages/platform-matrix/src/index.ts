@@ -5,13 +5,14 @@ import zhCN from './locales/zh-CN.yml'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialog,
   IMDialogPage, IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia,
-  IMMessage, IMMessageInput, IMMessageSearchPage, IMMessageSearchQuery, IMMessageTarget, IMPageQuery, IMPlatform, IMReadTarget,
+  IMInlineKeyboardButton, IMMessage, IMMessageInput, IMMessageSearchPage, IMMessageSearchQuery, IMMessageTarget, IMPageQuery, IMPlatform, IMReadTarget,
   IMRequest, IMRequestAction, IMRequestPage, IMRequestQuery,
   IMTransferOptions, IMUser, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { MatrixClient, type MatrixClientOptions } from './client.js'
 import { matrixMentionUserIds, matrixTextEntities, textContent } from './formatting.js'
+import { countClosedMatrixPoll, type MatrixPollTally } from './poll-results.js'
 import type {
   MatrixDirectAccountData, MatrixEvent, MatrixInvitedRoom, MatrixJoinedRoom, MatrixMediaLocator, MatrixRoomMemberContent,
   MatrixRoomMessageContent, MatrixSyncResponse,
@@ -90,6 +91,9 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   private readonly resolvingInvites = new Set<string>()
   /** Freeze a paginated request listing: each page must refer to the same /sync snapshot. */
   private requestPageSnapshot?: IMRequest<MatrixMediaLocator>[]
+  /** Poll closures observed in sync/history, scoped to the room to avoid cross-room event collisions. */
+  private readonly closedPolls = new Set<string>()
+  private readonly pollTallies = new Map<string, MatrixPollTally>()
 
   constructor(config: Config, logger?: MatrixLogger) {
     this.client = new MatrixClient(config satisfies MatrixClientOptions)
@@ -163,6 +167,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     const dialogs: IMDialog<MatrixMediaLocator>[] = []
     for (const [roomId, room] of Object.entries(response.rooms?.join ?? {})) {
       this.ingestState(roomId, room.state?.events ?? [])
+      this.ingestPollClosures(roomId, room.timeline?.events ?? [])
       const conversation = this.updateConversation(roomId, room)
       const lastMessage = [...(room.timeline?.events ?? [])].reverse()
         .map((event) => this.mapTimelineMessage(roomId, event))
@@ -307,6 +312,16 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       limit: clampLimit(query.limit),
     })
     this.ingestState(conversation.id, response.state ?? [])
+    this.ingestPollClosures(conversation.id, response.chunk)
+    // Only a few closed polls per page are expanded; never fetch relations
+    // for every message in a long history request.
+    await Promise.all(response.chunk.filter((event) => isMatrixPollStart(event.type)
+      && event.event_id && this.closedPolls.has(`${conversation.id}\0${event.event_id}`))
+      .slice(0, 3).map(async (event) => {
+        const pollPart = matrixPollParts(event.content).find((part) => part.type === 'poll')
+        if (pollPart?.type !== 'poll') return
+        await this.loadPollTally(conversation.id, event.event_id!, pollPart.poll).catch(() => undefined)
+      }))
     return {
       messages: response.chunk.flatMap((event) => {
         const message = this.mapTimelineMessage(conversation.id, event)
@@ -475,6 +490,113 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       timestamp: Math.floor(Date.now() / 1000),
       outgoing: true,
       replyToId: content.replyToId,
+    }
+  }
+
+  /**
+   * Telegram's ordinary poll RPC is intentionally not advertised. Single-choice
+   * Matrix polls use the bridge's callback keyboard instead, with native
+   * MSC3381 response events sent under the current Matrix account.
+   */
+  async clickInlineButton(
+    _session: PlatformSession,
+    target: { conversationId: string, messageId: string },
+    button: Extract<IMInlineKeyboardButton, { type: 'callback' }>,
+  ): Promise<{ message?: string, alert?: boolean }> {
+    const match = /^matrix-poll-vote:(0|[1-9]\d?)$/.exec(button.data)
+    if (!match) return { message: '无效的投票选项', alert: true }
+    const start = await this.client.getEvent(target.conversationId, target.messageId)
+    if (!isMatrixPollStart(start.type) || start.unsigned?.redacted_because) {
+      return { message: '投票不存在或已经撤回', alert: true }
+    }
+    const part = matrixPollParts(start.content).find((part) => part.type === 'poll')
+    if (part?.type !== 'poll' || part.poll.maxSelections !== 1) {
+      return { message: '此投票不支持单选快捷提交', alert: true }
+    }
+    const option = part.poll.answers[Number(match[1])]
+    if (!option) return { message: '投票选项已失效', alert: true }
+    const pollKey = `${target.conversationId}\0${target.messageId}`
+    // Matrix does not reject late votes automatically. Fail closed when the
+    // relation list is incomplete or the homeserver cannot verify closure.
+    const seen = new Set<string>()
+    let from: string | undefined
+    let exhausted = false
+    for (let page = 0; page < 100; page++) {
+      const relations = await this.client.getRelations(target.conversationId, target.messageId, {
+        from, limit: 100,
+      }).catch(() => undefined)
+      if (!relations || !Array.isArray(relations.chunk)) {
+        return { message: '无法验证 Matrix 投票状态，请稍后重试', alert: true }
+      }
+      if (relations.chunk.some((event) =>
+        isMatrixPollEnd(event.type) && !event.unsigned?.redacted_because
+        && matrixReference(event.content) === target.messageId)) {
+        this.rememberPollClosure(pollKey)
+        return { message: '投票已经结束', alert: true }
+      }
+      if (!relations.next_batch) {
+        exhausted = true
+        break
+      }
+      if (seen.has(relations.next_batch)) break
+      seen.add(relations.next_batch)
+      from = relations.next_batch
+    }
+    if (!exhausted) return { message: '暂时无法确认投票状态，请稍后重试', alert: true }
+    // A previously observed end event may have been redacted since the last
+    // sync. Treat the server's current relations as authoritative.
+    this.closedPolls.delete(pollKey)
+
+    const unstable = start.type === 'org.matrix.msc3381.poll.start'
+    await this.client.sendEvent(target.conversationId,
+      unstable ? 'org.matrix.msc3381.poll.response' : 'm.poll.response', {
+        'm.relates_to': { rel_type: 'm.reference', event_id: target.messageId },
+        ...(unstable
+          ? { 'org.matrix.msc3381.poll.response': { answers: [option.id] } }
+          : { 'm.selections': [option.id], 'm.poll.response': { answers: [option.id] } }),
+      })
+    return { message: '投票已提交，可再次选择修改投票' }
+  }
+
+  /** Collect every relation page before publishing counts: a partial page is misleading. */
+  private async loadPollTally(
+    roomId: string,
+    pollId: string,
+    poll: import('@mtproto-relay/bridge').IMMessagePoll,
+  ): Promise<void> {
+    const key = `${roomId}\0${pollId}`
+    const relations: MatrixEvent[] = []
+    const seen = new Set<string>()
+    let from: string | undefined
+    let exhausted = false
+    for (let page = 0; page < 100; page++) {
+      const response = await this.client.getRelations(roomId, pollId, { from, limit: 100 })
+      if (!Array.isArray(response.chunk)) return
+      relations.push(...response.chunk)
+      if (!response.next_batch) {
+        exhausted = true
+        break
+      }
+      if (seen.has(response.next_batch)) break
+      seen.add(response.next_batch)
+      from = response.next_batch
+    }
+    if (!exhausted) return
+    const tally = countClosedMatrixPoll(pollId, poll, relations)
+    if (!tally) return
+    this.pollTallies.delete(key)
+    this.pollTallies.set(key, tally)
+    if (this.pollTallies.size > 2_000) {
+      const oldest = this.pollTallies.keys().next().value
+      if (oldest !== undefined) this.pollTallies.delete(oldest)
+    }
+  }
+
+  private rememberPollClosure(key: string): void {
+    this.closedPolls.add(key)
+    if (this.closedPolls.size > 2_000) {
+      const oldest = this.closedPolls.values().next().value
+      if (oldest !== undefined) this.closedPolls.delete(oldest)
     }
   }
 
@@ -657,6 +779,22 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         } else {
           await handler({ type: 'message', conversation, message })
         }
+        if (isMatrixPollEnd(event.type) && relation?.rel_type === 'm.reference' && relation.event_id) {
+          // Refresh the parent poll so Telegram removes its voting keyboard.
+          // A missing/redacted parent must not block the Matrix sync loop.
+          const original = await this.client.getEvent(roomId, relation.event_id).catch(() => undefined)
+          const pollPart = original && matrixPollParts(original.content).find((part) => part.type === 'poll')
+          if (pollPart?.type === 'poll') {
+            await this.loadPollTally(roomId, relation.event_id, pollPart.poll).catch(() => undefined)
+          }
+          const closed = original && this.mapTimelineMessage(roomId, original)
+          if (closed?.content.parts.some((part) => part.type === 'poll')) {
+            await handler({
+              type: 'message-edit', eventId: `matrix-poll-end:${event.event_id}`,
+              conversation, message: closed,
+            })
+          }
+        }
       }
       const receipt = room.ephemeral?.events?.find((event) => event.type === 'm.receipt')
       const receiptEventId = receipt && latestReadReceipt(receipt.content, userId)
@@ -724,6 +862,14 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     }
   }
 
+  private ingestPollClosures(roomId: string, events: readonly MatrixEvent[]): void {
+    for (const event of events) {
+      if (!isMatrixPollEnd(event.type) || event.unsigned?.redacted_because) continue
+      const parent = matrixReference(event.content)
+      if (parent) this.rememberPollClosure(`${roomId}\0${parent}`)
+    }
+  }
+
   private ingestState(roomId: string, events: MatrixEvent[]): void {
     const state = this.roomState.get(roomId) ?? new Map<string, MatrixEvent>()
     for (const event of events) {
@@ -778,14 +924,34 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         metadata: { matrixEncrypted: true },
       }
     }
-    if (event.type !== 'm.room.message') return
-    const raw = event.content as MatrixRoomMessageContent
+    const pollStart = isMatrixPollStart(event.type)
+    const pollEnd = isMatrixPollEnd(event.type)
+    if (event.unsigned?.redacted_because && (pollStart || pollEnd)) return
+    const location = event.type === 'm.location' || event.type === 'org.matrix.msc3488.location'
+    // Poll responses do not have a text fallback and must not appear as separate chat messages.
+    if (!pollStart && !pollEnd && !location && event.type !== 'm.room.message') return
+    const raw = matrixObject(event.content) as MatrixRoomMessageContent | undefined
+    if (!raw) return
     const relation = raw['m.relates_to']
+    if (pollEnd && !event.unsigned?.redacted_because
+      && relation?.rel_type === 'm.reference' && relation.event_id) {
+      this.rememberPollClosure(`${roomId}\0${relation.event_id}`)
+    }
     const content = relation?.rel_type === 'm.replace' && raw['m.new_content'] ? raw['m.new_content'] : raw
-    const parts = matrixMessageParts(content)
+    const parts: IMMessage<MatrixMediaLocator>['content']['parts'] = pollStart ? matrixPollParts(content)
+      : pollEnd ? [{ type: 'text' as const, text: matrixEventText(event.content) || '投票已结束' }]
+        : matrixMessageParts(content)
     if (!parts.length) return
     const mentionIds = matrixMentionUserIds(content)
     const messageId = relation?.rel_type === 'm.replace' && relation.event_id ? relation.event_id : event.event_id
+    const pollKey = `${roomId}\0${messageId}`
+    if (pollStart && parts[0]?.type === 'poll' && this.closedPolls.has(pollKey)) {
+      const tally = this.pollTallies.get(pollKey)
+      parts[0] = { type: 'poll', poll: {
+        ...parts[0].poll, closed: true,
+        ...(tally ? { counts: { ...tally.counts }, totalVoters: tally.totalVoters } : {}),
+      } }
+    }
     return {
       id: messageId,
       sourceIds: [messageId],
@@ -794,8 +960,18 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       sender: this.memberUser(roomId, event.sender),
       timestamp: matrixTimestamp(event),
       outgoing: event.sender === this.accountUserId,
-      replyToId: content['m.relates_to']?.['m.in_reply_to']?.event_id,
-      content: { parts },
+      replyToId: pollEnd && relation?.rel_type === 'm.reference'
+        ? relation.event_id
+        : content['m.relates_to']?.['m.in_reply_to']?.event_id,
+      content: {
+        parts,
+        ...(pollStart && parts[0]?.type === 'poll' && parts[0].poll.maxSelections === 1
+          && !this.closedPolls.has(`${roomId}\0${messageId}`)
+          ? { inlineKeyboard: { rows: parts[0].poll.answers.map((answer, index) => ({
+              buttons: [{ type: 'callback' as const, text: answer.text.slice(0, 60), data: `matrix-poll-vote:${index}` }],
+            })) } }
+          : {}),
+      },
       ...(mentionIds.length ? { metadata: { matrixMentions: mentionIds } } : {}),
     }
   }
@@ -853,6 +1029,29 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
 
 function matrixMessageParts(content: MatrixRoomMessageContent): IMMessage<MatrixMediaLocator>['content']['parts'] {
   const body = content.body ?? ''
+  const structured = matrixObject(content['m.location'])
+    ?? matrixObject(content['org.matrix.msc3488.location'])
+  if (content.msgtype === 'm.location' || structured) {
+    const coordinates = parseMatrixGeoUri(structured?.uri) ?? parseMatrixGeoUri(content.geo_uri)
+    const title = (typeof structured?.description === 'string' && structured.description.trim())
+      || body.trim() || matrixEventText(content).trim() || '位置'
+    if (!coordinates) {
+      return [{ type: 'text', text: title }]
+    }
+    const { latitude, longitude } = coordinates
+    return [{
+      type: 'card',
+      card: {
+        kind: 'location',
+        title,
+        description: `${latitude}, ${longitude}`,
+        source: 'Matrix',
+        latitude,
+        longitude,
+        url: `https://www.openstreetmap.org/?mlat=${latitude}&mlon=${longitude}`,
+      },
+    }]
+  }
   if (content.msgtype === 'm.text' || content.msgtype === 'm.notice' || content.msgtype === 'm.emote') {
     if (!body) return []
     const prefix = content.msgtype === 'm.emote' ? '* ' : ''
@@ -888,6 +1087,86 @@ function matrixMessageParts(content: MatrixRoomMessageContent): IMMessage<Matrix
         height: info.thumbnail_info.h ?? 0,
       } : undefined,
       locator: { mxc },
+    },
+  }]
+}
+
+function isMatrixPollStart(type: string): boolean {
+  return type === 'm.poll.start' || type === 'org.matrix.msc3381.poll.start'
+}
+
+function isMatrixPollEnd(type: string): boolean {
+  return type === 'm.poll.end' || type === 'org.matrix.msc3381.poll.end'
+}
+
+function matrixReference(content: unknown): string | undefined {
+  const relation = matrixObject(matrixObject(content)?.['m.relates_to'])
+  return relation?.rel_type === 'm.reference' && typeof relation.event_id === 'string'
+    ? relation.event_id : undefined
+}
+
+/** Parse only RFC 5870 point coordinates; malformed or out-of-range locations stay textual. */
+function parseMatrixGeoUri(uri: unknown): { latitude: number, longitude: number } | undefined {
+  if (typeof uri !== 'string') return
+  const match = /^geo:([+-]?\d+(?:\.\d+)?),([+-]?\d+(?:\.\d+)?)(?:,[+-]?\d+(?:\.\d+)?)?(?:;[^?#]*)?$/i.exec(uri)
+  if (!match) return
+  const latitude = Number(match[1])
+  const longitude = Number(match[2])
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)
+    || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return
+  return { latitude, longitude }
+}
+
+function matrixObject(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown> : undefined
+}
+
+/** Both stable MSC3381 m.text arrays and legacy single-text payloads. */
+function matrixEventText(value: unknown): string {
+  const object = matrixObject(value)
+  if (!object) return ''
+  const rich = object['m.text']
+  if (typeof rich === 'string') return rich
+  if (Array.isArray(rich)) {
+    const block = rich.map(matrixObject).find((item) => item?.mimetype === 'text/plain')
+      ?? rich.map(matrixObject).find((item) => typeof item?.body === 'string')
+    if (typeof block?.body === 'string') return block.body
+  }
+  if (typeof object['org.matrix.msc1767.text'] === 'string') return object['org.matrix.msc1767.text']
+  return typeof object.body === 'string' ? object.body : ''
+}
+
+/** Preserve structured poll questions and option IDs, with a plain-text fallback. */
+function matrixPollParts(value: unknown): IMMessage<MatrixMediaLocator>['content']['parts'] {
+  const content = matrixObject(value)
+  const poll = matrixObject(content?.['m.poll.start'])
+    ?? matrixObject(content?.['m.poll'])
+    ?? matrixObject(content?.['org.matrix.msc3381.poll.start'])
+  const fallback = matrixEventText(content)
+  if (!poll) return [{ type: 'text', text: fallback || '[无法识别的 Matrix 投票]' }]
+  const question = matrixEventText(poll.question).trim()
+  const options = Array.isArray(poll.answers) ? poll.answers.slice(0, 20) : []
+  const seen = new Set<string>()
+  const answers = options.flatMap((value) => {
+    const answer = matrixObject(value)
+    const id = answer?.['m.id'] ?? answer?.id
+    const text = matrixEventText(answer).trim()
+    if (typeof id !== 'string' || !id || !text || seen.has(id)) return []
+    seen.add(id)
+    return [{ id, text }]
+  })
+  if (!question || !answers.length) return [{ type: 'text', text: fallback || question || '[无法解析的 Matrix 投票]' }]
+  const max = poll.max_selections
+  const maxSelections = typeof max === 'number' && Number.isSafeInteger(max) && max > 0
+    ? Math.min(max, answers.length) : 1
+  return [{
+    type: 'poll',
+    poll: {
+      question, answers, maxSelections,
+      kind: poll.kind === 'm.disclosed' || poll.kind === 'm.poll.disclosed'
+        || poll.kind === 'org.matrix.msc3381.poll.disclosed'
+        ? 'disclosed' : 'undisclosed',
     },
   }]
 }

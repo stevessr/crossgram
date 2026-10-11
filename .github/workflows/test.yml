@@ -45,8 +45,19 @@ jobs:
         env:
           YARN_ENABLE_SCRIPTS: true
 
-      - name: Run unit tests
+      - name: Run full unit tests (POSIX)
+        if: matrix.os != 'windows-latest'
         run: yarn test:unit
+
+      # Telegram Gateway and Telegram session storage intentionally enforce
+      # POSIX 0700/0600 semantics. NTFS ACLs cannot be validated via stat.mode,
+      # so Windows runs every other suite; Linux still covers those secure stores.
+      - name: Run platform-neutral unit tests (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          yarn vitest run --exclude=packages/telegram-gateway/src/gateway.test.ts --exclude=packages/telegram-gateway/src/store.test.ts --exclude=packages/platform-telegram/src/index.test.ts
+          yarn test:webui:solid '--exclude=**/*.e2e.test.ts'
+          yarn test:unit:node
 
       - name: Check TypeScript types
         run: yarn typecheck
