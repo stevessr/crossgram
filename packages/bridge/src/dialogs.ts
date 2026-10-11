@@ -1568,7 +1568,10 @@ export class DialogRpc {
     if (parent.kind !== 'channel') throw new RpcError(400, 'CHANNEL_FORUM_MISSING')
     let count: number
     let page: Array<{ topic: tl.RawForumTopic, top: MaterializedMessage }>
-    if (req._ === 'messages.getForumTopics' && this._platform.getSubdialogs) {
+    // A title search must inspect all lazy pages, otherwise a matching room
+    // that happens to be on a later Space page is silently omitted.
+    const searchAllChildren = req._ === 'messages.getForumTopics' && Boolean(req.q)
+    if (req._ === 'messages.getForumTopics' && this._platform.getSubdialogs && !searchAllChildren) {
       if (req.offsetTopic && !this._topicToConversation.has(req.offsetTopic)) await this._ensureTopics(parentId)
       const afterId = req.offsetTopic ? this._topicToConversation.get(req.offsetTopic) : undefined
       const loaded = await this._loadSubdialogPage(parentId, { limit: clampLimit(req.limit), afterId })
@@ -1577,7 +1580,7 @@ export class DialogRpc {
       page = await Promise.all(children.map((child) => this._materializeTopic(parent, child)))
       count = loaded.total ?? page.length
     } else {
-      await this._ensureTopics(parentId)
+      await this._ensureTopics(parentId, searchAllChildren || req._ === 'messages.getForumTopicsByID')
       const children = this._subchannels(parentId)
       const selected = req._ === 'messages.getForumTopicsByID'
         ? children.filter((child) => req.topics.includes(this._conversationToTopic.get(child.id) ?? -1))
@@ -5463,8 +5466,23 @@ export class DialogRpc {
       .sort((left, right) => left.title.localeCompare(right.title))
   }
 
-  private async _ensureTopics(parentId: string): Promise<void> {
+  private async _ensureTopics(parentId: string, hydrateAll = false): Promise<void> {
     const parent = this._conversation(parentId)
+    // Direct getReplies / ByID requests can precede a getForumTopics listing.
+    // Discover lazy children before resolving their topic IDs, including
+    // later pages for title searches. All child IDs stay inside the bridge.
+    if (this._platform.getSubdialogs && (hydrateAll || !this._subchannels(parentId).length)) {
+      let afterId: string | undefined
+      const seen = new Set<string>()
+      for (let index = 0; index < 100; index++) {
+        const page = await this._loadSubdialogPage(parentId, { limit: 200, afterId })
+        const lastId = page.dialogs.at(-1)?.conversation.id
+        if (!lastId || seen.has(lastId)) break
+        seen.add(lastId)
+        if (!page.nextCursor) break
+        afterId = lastId
+      }
+    }
     for (const child of this._subchannels(parentId)) await this._materializeTopic(parent, child)
   }
 
