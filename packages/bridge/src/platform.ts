@@ -1048,7 +1048,7 @@ export function messagePartText(part: IMMessagePart<unknown>): string {
       ...(poll.maxSelections > 1 ? [`最多选择 ${poll.maxSelections} 项`] : []),
       ...(poll.closed ? [poll.totalVoters === undefined
         ? '投票已结束' : `投票已结束 · ${poll.totalVoters} 人有效投票`] : []),
-    ].join('\n')
+    ].join('\n').slice(0, 4_000)
   }
   if (part.type !== 'card') return ''
   if (part.card.kind === 'location') return part.card.title.trim() || '位置'
