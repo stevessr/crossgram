@@ -57,6 +57,7 @@ describe('Matrix platform HTTP e2e', () => {
   let proxyUrl: string
   let activePlatform: MatrixPlatform | undefined
   let invitationScenario = false
+  let encryptedRoomScenario = false
   const invitedRooms = new Set<string>()
   const joinedRooms = new Set<string>()
 
@@ -78,6 +79,7 @@ describe('Matrix platform HTTP e2e', () => {
     await activePlatform?.stop()
     activePlatform = undefined
     invitationScenario = false
+    encryptedRoomScenario = false
     invitedRooms.clear()
     joinedRooms.clear()
   })
@@ -139,6 +141,29 @@ describe('Matrix platform HTTP e2e', () => {
     })
   })
 
+  it('rejects plaintext and media uploads in encrypted rooms over authenticated HTTP', async () => {
+    encryptedRoomScenario = true
+    const from = requests.length
+    const platform = activePlatform = new MatrixPlatform({
+      homeserver, accessToken: 'e2e-token', proxy: proxyUrl, userId: '@bot:test',
+      requestTimeoutMs: 2_000, syncTimeoutMs: 100,
+    })
+    const session: PlatformSession = {
+      platformSessionId: 'e2ee-guard', platformId: 'matrix',
+      userId: '@bot:test', credentials: {}, metadata: {},
+    }
+    await expect(platform.sendMessage(session, { id: '!e2e:test' }, {
+      parts: [{ type: 'media', media: {
+        kind: 'file', name: 'private.bin', mimeType: 'application/octet-stream',
+        source: { size: 1, async *stream() { yield new Uint8Array([42]) } },
+      } }],
+    })).rejects.toThrow(/end-to-end encrypted/)
+    const trace = requests.slice(from)
+    expect(trace.filter((item) => item.path.endsWith('/state'))).toHaveLength(1)
+    expect(trace.every((item) => item.authorization === 'Bearer e2e-token')).toBe(true)
+    expect(trace.some((item) => item.path.includes('/upload') || item.path.includes('/send/'))).toBe(false)
+  })
+
   it('handles Matrix invitation accept/reject over real authenticated HTTP', async () => {
     invitationScenario = true
     invitedRooms.add('!accept:test')
@@ -186,6 +211,9 @@ describe('Matrix platform HTTP e2e', () => {
   async function route(request: IncomingMessage, response: ServerResponse, _body: Uint8Array): Promise<void> {
     const url = new URL(request.url ?? '/', homeserver || 'http://127.0.0.1')
     if (url.pathname.endsWith('/account/whoami')) return sendJson(response, { user_id: '@bot:test' })
+    if (url.pathname.endsWith('/state')) return sendJson(response, encryptedRoomScenario
+      ? [{ type: 'm.room.encryption', state_key: '', content: { algorithm: 'm.megolm.v1.aes-sha2' } }]
+      : [])
     if (url.pathname.includes('/profile/')) return sendJson(response, {
       displayname: 'E2E Bot', avatar_url: 'mxc://test/avatar',
     })
