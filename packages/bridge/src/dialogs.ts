@@ -1580,7 +1580,11 @@ export class DialogRpc {
       page = await Promise.all(children.map((child) => this._materializeTopic(parent, child)))
       count = loaded.total ?? page.length
     } else {
-      await this._ensureTopics(parentId, searchAllChildren || req._ === 'messages.getForumTopicsByID')
+      if (searchAllChildren) {
+        await this._hydrateSubdialogs(parentId)
+      } else {
+        await this._ensureTopics(parentId, req._ === 'messages.getForumTopicsByID')
+      }
       const children = this._subchannels(parentId)
       const selected = req._ === 'messages.getForumTopicsByID'
         ? children.filter((child) => req.topics.includes(this._conversationToTopic.get(child.id) ?? -1))
@@ -5466,22 +5470,27 @@ export class DialogRpc {
       .sort((left, right) => left.title.localeCompare(right.title))
   }
 
+  private async _hydrateSubdialogs(parentId: string): Promise<void> {
+    if (!this._platform.getSubdialogs) return
+    // Matrix Spaces can hold more than one page. Only load the directory here:
+    // search must not fetch the histories of every non-matching child room.
+    let afterId: string | undefined
+    const seen = new Set<string>()
+    for (let index = 0; index < 100; index++) {
+      const page = await this._loadSubdialogPage(parentId, { limit: 200, afterId })
+      const lastId = page.dialogs.at(-1)?.conversation.id
+      if (!lastId || seen.has(lastId)) break
+      seen.add(lastId)
+      if (!page.nextCursor) break
+      afterId = lastId
+    }
+  }
+
   private async _ensureTopics(parentId: string, hydrateAll = false): Promise<void> {
     const parent = this._conversation(parentId)
-    // Direct getReplies / ByID requests can precede a getForumTopics listing.
-    // Discover lazy children before resolving their topic IDs, including
-    // later pages for title searches. All child IDs stay inside the bridge.
-    if (this._platform.getSubdialogs && (hydrateAll || !this._subchannels(parentId).length)) {
-      let afterId: string | undefined
-      const seen = new Set<string>()
-      for (let index = 0; index < 100; index++) {
-        const page = await this._loadSubdialogPage(parentId, { limit: 200, afterId })
-        const lastId = page.dialogs.at(-1)?.conversation.id
-        if (!lastId || seen.has(lastId)) break
-        seen.add(lastId)
-        if (!page.nextCursor) break
-        afterId = lastId
-      }
+    // Direct getReplies / ByID requests can precede a forum listing.
+    if (hydrateAll || (this._platform.getSubdialogs && !this._subchannels(parentId).length)) {
+      await this._hydrateSubdialogs(parentId)
     }
     for (const child of this._subchannels(parentId)) await this._materializeTopic(parent, child)
   }
