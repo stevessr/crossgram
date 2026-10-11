@@ -338,6 +338,121 @@ describe('MatrixPlatform', () => {
     })
   })
 
+
+  it('submits stable single-choice poll votes through Matrix reference events', async () => {
+    const poll = event('m.poll.start', {
+      'm.text': [{ body: 'Choose a dessert' }],
+      'm.poll.start': {
+        kind: 'm.poll.disclosed',
+        question: { 'm.text': [{ body: 'Dessert?' }] },
+        answers: [
+          { id: '🍓', 'm.text': [{ body: 'Strawberries' }] },
+          { id: '🍰', 'm.text': [{ body: 'Cake' }] },
+        ],
+      },
+    }, { id: '$dessert', sender: '@alice:example.org' })
+    const sent: Array<{ path: string, body: Record<string, unknown> }> = []
+    const fetch = routeFetch((url, init) => {
+      if (url.pathname.endsWith('/messages')) return json({ chunk: [poll] })
+      if (url.pathname.includes('/event/')) return json(poll)
+      if (url.pathname.includes('/relations/')) return json({ chunk: [] })
+      if (url.pathname.includes('/send/')) {
+        sent.push({ path: url.pathname, body: JSON.parse(String(init?.body)) })
+        return json({ event_id: '$vote' })
+      }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch)
+    const history = await platform.getHistory(session, { id: '!room:example.org' })
+    expect(history.messages[0].content.parts[0]).toMatchObject({
+      type: 'poll', poll: { question: 'Dessert?', kind: 'disclosed' },
+    })
+    const buttons = history.messages[0].content.inlineKeyboard?.rows
+      .flatMap((row) => row.buttons)
+    expect(buttons).toMatchObject([
+      { type: 'callback', text: 'Strawberries', data: 'matrix-poll-vote:0' },
+      { type: 'callback', text: 'Cake', data: 'matrix-poll-vote:1' },
+    ])
+    const result = await platform.clickInlineButton(session, {
+      conversationId: '!room:example.org', messageId: '$dessert',
+    }, { type: 'callback', text: 'Cake', data: 'matrix-poll-vote:1' })
+    expect(result).toMatchObject({ message: expect.stringContaining('投票已提交') })
+    expect(sent).toHaveLength(1)
+    expect(sent[0].path).toContain('/send/m.poll.response/')
+    expect(sent[0].body).toMatchObject({
+      'm.relates_to': { rel_type: 'm.reference', event_id: '$dessert' },
+      'm.selections': ['🍰'],
+      'm.poll.response': { answers: ['🍰'] },
+    })
+    await expect(platform.clickInlineButton(session, {
+      conversationId: '!room:example.org', messageId: '$dessert',
+    }, { type: 'callback', text: 'Nope', data: 'matrix-poll-vote:35' }))
+      .resolves.toMatchObject({ alert: true })
+    expect(sent).toHaveLength(1)
+  })
+
+  it('prevents late votes and omits keyboards on closed or multi-choice Matrix polls', async () => {
+    const poll = event('org.matrix.msc3381.poll.start', {
+      'org.matrix.msc3381.poll.start': {
+        kind: 'org.matrix.msc3381.poll.disclosed', max_selections: 1,
+        question: { 'org.matrix.msc1767.text': 'Go?' },
+        answers: [{ id: 'yes', 'org.matrix.msc1767.text': 'Yes' }],
+      },
+    }, { id: '$poll', sender: '@alice:example.org' })
+    const end = event('org.matrix.msc3381.poll.end', {
+      'm.relates_to': { rel_type: 'm.reference', event_id: '$poll' },
+      'org.matrix.msc3381.poll.end': {},
+    }, { id: '$end', sender: '@alice:example.org' })
+    let sends = 0
+    const fetch = routeFetch((url) => {
+      if (url.pathname.endsWith('/messages')) return json({ chunk: [poll, end] })
+      if (url.pathname.includes('/event/')) return json(poll)
+      if (url.pathname.includes('/relations/')) return json({ chunk: [end] })
+      if (url.pathname.includes('/send/')) { sends++; return json({ event_id: '$nope' }) }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch)
+    const history = await platform.getHistory(session, { id: '!room:example.org' })
+    expect(history.messages[0].content.inlineKeyboard).toBeUndefined()
+    expect(await platform.clickInlineButton(session, {
+      conversationId: '!room:example.org', messageId: '$poll',
+    }, { type: 'callback', text: 'Yes', data: 'matrix-poll-vote:0' })).toMatchObject({
+      alert: true, message: '投票已经结束',
+    })
+    expect(sends).toBe(0)
+  })
+
+  it('sends unstable MSC3381 votes only after paginated relation checks succeed', async () => {
+    const poll = event('org.matrix.msc3381.poll.start', {
+      'org.matrix.msc3381.poll.start': {
+        question: { 'org.matrix.msc1767.text': 'Question' },
+        answers: [{ id: 'a', 'org.matrix.msc1767.text': 'Answer' }],
+      },
+    }, { id: '$poll', sender: '@alice:example.org' })
+    const paths: string[] = []
+    const sent: Record<string, unknown>[] = []
+    const fetch = routeFetch((url, init) => {
+      paths.push(`${url.pathname}${url.search}`)
+      if (url.pathname.includes('/event/')) return json(poll)
+      if (url.pathname.includes('/relations/')) {
+        return json(url.searchParams.has('from') ? { chunk: [] } : { chunk: [], next_batch: 'more' })
+      }
+      if (url.pathname.includes('/send/')) {
+        sent.push(JSON.parse(String(init?.body)))
+        return json({ event_id: '$vote' })
+      }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch)
+    expect(await platform.clickInlineButton(session, {
+      conversationId: '!room:example.org', messageId: '$poll',
+    }, { type: 'callback', text: 'Answer', data: 'matrix-poll-vote:0' }))
+      .toMatchObject({ message: expect.stringContaining('投票已提交') })
+    expect(paths.filter((value) => value.includes('/relations/'))).toHaveLength(2)
+    expect(paths.find((value) => value.includes('from=more'))).toBeDefined()
+    expect(sent).toMatchObject([{ 'org.matrix.msc3381.poll.response': { answers: ['a'] } }])
+  })
+
   it('parses valid geo URIs into map cards and preserves malformed locations as text', async () => {
     const fetch = routeFetch((url) => {
       if (!url.pathname.endsWith('/messages')) throw new Error(`unexpected request: ${url}`)
