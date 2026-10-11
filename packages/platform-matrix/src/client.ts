@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { fetch as undiciFetch, ProxyAgent as UndiciProxyAgent } from 'undici'
 import type {
   MatrixDirectAccountData, MatrixEvent, MatrixEventContextResponse, MatrixJoinedRoomsResponse, MatrixMembersResponse,
-  MatrixMessagesResponse, MatrixProfile, MatrixSyncResponse, MatrixWhoAmI,
+  MatrixMessagesResponse, MatrixRelationsResponse, MatrixProfile, MatrixSyncResponse, MatrixWhoAmI,
 } from './types.js'
 
 export interface MatrixClientOptions {
@@ -94,6 +94,13 @@ export class MatrixClient {
 
   getEvent(roomId: string, eventId: string): Promise<MatrixEvent> {
     return this.request(`/_matrix/client/v3/rooms/${segment(roomId)}/event/${segment(eventId)}`)
+  }
+
+  /** Matrix /relations may be paginated: callers must follow next_batch before allowing a vote. */
+  getRelations(roomId: string, eventId: string, options: { from?: string, limit?: number } = {}): Promise<MatrixRelationsResponse> {
+    return this.request(`/_matrix/client/v1/rooms/${segment(roomId)}/relations/${segment(eventId)}/m.reference`, {
+      query: { from: options.from, limit: options.limit ?? 100 },
+    })
   }
 
   getEventContext(roomId: string, eventId: string): Promise<MatrixEventContextResponse> {
