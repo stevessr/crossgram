@@ -195,7 +195,15 @@ export async function openMessage(
     key.fill(0)
   }
   const replayId = createHash('sha256').update(signedBytes(envelope)).update(signature).digest('hex')
-  if (!await replayGuard.acceptOnce(replayId)) {
+  let accepted: boolean
+  try {
+    accepted = await replayGuard.acceptOnce(replayId)
+  } catch (error) {
+    // Ledger failures must not accidentally release a decrypted plaintext.
+    plaintext.fill(0)
+    throw error
+  }
+  if (!accepted) {
     plaintext.fill(0)
     throw new Error('E2EE_REPLAY_DETECTED')
   }
