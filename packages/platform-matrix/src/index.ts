@@ -201,12 +201,11 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       && query.minTimestamp > query.maxTimestamp)) return { messages: [] }
 
     const term = query.query.trim()
-    const hasFilters = query.fromUserId !== undefined || query.minTimestamp !== undefined
-      || query.maxTimestamp !== undefined || query.mediaKind !== undefined
-    // The Matrix full-text endpoint requires a non-empty search term. For
-    // filter-only searches, paginate room history instead of sending an invalid
-    // /search request. An empty, unfiltered search is not a history request.
-    if (!term && !hasFilters) return { messages: [] }
+    // Telegram can search with an empty term and a filter that the generic
+    // bridge query does not encode (e.g. links or combined photos/videos).
+    // Scan room history for *all* empty-term queries and let the bridge apply
+    // the remaining Telegram-native filters to the projected messages.
+    // Matrix /search requires a non-empty search_term.
 
     const messages: IMMessage<MatrixMediaLocator>[] = []
     const seen = new Set<string>()
