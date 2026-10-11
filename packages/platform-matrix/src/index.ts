@@ -146,6 +146,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     const dialogs: IMDialog<MatrixMediaLocator>[] = []
     for (const [roomId, room] of Object.entries(response.rooms?.join ?? {})) {
       this.ingestState(roomId, room.state?.events ?? [])
+      this.ingestPollClosures(roomId, room.timeline?.events ?? [])
       const conversation = this.updateConversation(roomId, room)
       const lastMessage = [...(room.timeline?.events ?? [])].reverse()
         .map((event) => this.mapTimelineMessage(roomId, event))
@@ -183,6 +184,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       limit: clampLimit(query.limit),
     })
     this.ingestState(conversation.id, response.state ?? [])
+    this.ingestPollClosures(conversation.id, response.chunk)
     return {
       messages: response.chunk.flatMap((event) => {
         const message = this.mapTimelineMessage(conversation.id, event)
@@ -284,7 +286,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     }
     const option = part.poll.answers[Number(match[1])]
     if (!option) return { message: '投票选项已失效', alert: true }
-    const pollKey = `${target.conversationId}\0${start.event_id}`
+    const pollKey = `${target.conversationId}\0${target.messageId}`
     if (this.closedPolls.has(pollKey)) return { message: '投票已经结束', alert: true }
 
     // Matrix does not reject late votes automatically. Fail closed when the
@@ -483,6 +485,15 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         } else {
           await handler({ type: 'message', conversation, message })
         }
+        if (isMatrixPollEnd(event.type) && relation?.rel_type === 'm.reference' && relation.event_id) {
+          // Refresh the parent poll so Telegram removes its voting keyboard.
+          // A missing/redacted parent must not block the Matrix sync loop.
+          const original = await this.client.getEvent(roomId, relation.event_id).catch(() => undefined)
+          const closed = original && this.mapTimelineMessage(roomId, original)
+          if (closed?.content.parts.some((part) => part.type === 'poll')) {
+            await handler({ type: 'message-edit', eventId: event.event_id, conversation, message: closed })
+          }
+        }
       }
       const receipt = room.ephemeral?.events?.find((event) => event.type === 'm.receipt')
       const receiptEventId = receipt && latestReadReceipt(receipt.content, userId)
@@ -500,6 +511,14 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     this.directRoomIds.clear()
     for (const roomIds of Object.values(direct)) {
       for (const roomId of roomIds) this.directRoomIds.add(roomId)
+    }
+  }
+
+  private ingestPollClosures(roomId: string, events: readonly MatrixEvent[]): void {
+    for (const event of events) {
+      if (!isMatrixPollEnd(event.type) || event.unsigned?.redacted_because) continue
+      const parent = matrixReference(event.content)
+      if (parent) this.rememberPollClosure(`${roomId}\0${parent}`)
     }
   }
 
@@ -588,7 +607,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       content: {
         parts,
         ...(pollStart && parts[0]?.type === 'poll' && parts[0].poll.maxSelections === 1
-          && !this.closedPolls.has(`${roomId}\\0${messageId}`)
+          && !this.closedPolls.has(`${roomId}\0${messageId}`)
           ? { inlineKeyboard: { rows: parts[0].poll.answers.map((answer, index) => ({
               buttons: [{ type: 'callback' as const, text: answer.text.slice(0, 128), data: `matrix-poll-vote:${index}` }],
             })) } }
