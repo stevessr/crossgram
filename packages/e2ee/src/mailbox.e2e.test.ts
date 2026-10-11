@@ -32,7 +32,7 @@ describe('opaque E2EE mailbox transport', () => {
     60_000, () => time)
     const privateText = 'this message must never appear as server plaintext'
     const outgoing = await sealToPinnedDevices(new TextEncoder().encode(privateText),
-      'native:chat:1', sender, receiverPins, 'bob', [bobPhone.deviceId, bobLaptop.deviceId])
+      'native:chat:1', sender, receiverPins, 'bob', [bobPhone.deviceId, bobLaptop.deviceId], 'alice')
     expect(outgoing).toHaveLength(2)
 
     const ids = []
@@ -47,7 +47,7 @@ describe('opaque E2EE mailbox transport', () => {
 
     const acceptedPhone = await relay.list(bobPhone)
     const opened = await openFromPinnedDevice(acceptedPhone[0].envelope,
-      'native:chat:1', receiverPhone, senderPins, 'alice', new MemoryReplayGuard())
+      'native:chat:1', receiverPhone, senderPins, 'alice', new MemoryReplayGuard(), 'bob')
     expect(new TextDecoder().decode(opened)).toBe(privateText)
     expect(await relay.acknowledge(bobPhone, ids)).toBe(1)
     expect(await relay.list(bobPhone)).toEqual([])
@@ -55,9 +55,9 @@ describe('opaque E2EE mailbox transport', () => {
     expect((await relay.publish(alice, bobPhone, outgoing[0])).duplicate).toBe(true)
 
     await expect(openMessage(outgoing[1], 'native:chat:1', receiverPhone,
-      publicDevice(sender), new MemoryReplayGuard())).rejects.toThrow('E2EE_CONTEXT_MISMATCH')
+      publicDevice(sender), new MemoryReplayGuard(), { senderAccountId: 'alice', recipientAccountId: 'bob' })).rejects.toThrow('E2EE_CONTEXT_MISMATCH')
     expect(new TextDecoder().decode(await openFromPinnedDevice((await relay.list(bobLaptop))[0].envelope,
-      'native:chat:1', receiverLaptop, senderPins, 'alice', new MemoryReplayGuard()))).toBe(privateText)
+      'native:chat:1', receiverLaptop, senderPins, 'alice', new MemoryReplayGuard(), 'bob'))).toBe(privateText)
     time += 60_001
     expect(await relay.list(bobLaptop)).toEqual([])
   })
@@ -65,7 +65,7 @@ describe('opaque E2EE mailbox transport', () => {
   it('rejects forged sender sessions, recipient mismatches, and unauthorized conversations', async () => {
     const aliceKey = generateDeviceIdentity(alice.deviceId)
     const bobKey = generateDeviceIdentity(bobPhone.deviceId)
-    const envelope = sealMessage(new TextEncoder().encode('secret'), 'known', aliceKey, publicDevice(bobKey))
+    const envelope = sealMessage(new TextEncoder().encode('secret'), 'known', aliceKey, publicDevice(bobKey), { senderAccountId: 'alice', recipientAccountId: 'bob' })
     const relay = new MemoryEncryptedMailbox(async (from, to, conversation) =>
       from.accountId === 'alice' && to.accountId === 'bob' && conversation === 'known')
     await expect(relay.publish({ accountId: 'alice', deviceId: 'other' }, bobPhone, envelope))
@@ -85,7 +85,7 @@ describe('opaque E2EE mailbox transport', () => {
     const a = generateDeviceIdentity(alice.deviceId)
     const b = generateDeviceIdentity(bobPhone.deviceId)
     const mailbox = new MemoryEncryptedMailbox(async () => true)
-    const data = sealMessage(new Uint8Array([1, 2, 3]), 'chat', a, publicDevice(b))
+    const data = sealMessage(new Uint8Array([1, 2, 3]), 'chat', a, publicDevice(b), { senderAccountId: 'alice', recipientAccountId: 'bob' })
     const accepted = await mailbox.publish(alice, bobPhone, data)
     const foreign = { accountId: 'stranger', deviceId: bobPhone.deviceId }
     expect(await mailbox.acknowledge(foreign, [accepted.id])).toBe(0)
@@ -102,11 +102,11 @@ describe('opaque E2EE mailbox transport', () => {
     const b = generateDeviceIdentity(bobPhone.deviceId)
     const mailbox = new MemoryEncryptedMailbox(async () => true)
     for (let i = 0; i < 100; i++) {
-      await mailbox.publish(alice, bobPhone, sealMessage(new Uint8Array([i]), 'chat', a, publicDevice(b)))
+      await mailbox.publish(alice, bobPhone, sealMessage(new Uint8Array([i]), 'chat', a, publicDevice(b), { senderAccountId: 'alice', recipientAccountId: 'bob' }))
     }
     expect((await mailbox.list(bobPhone)).length).toBe(50)
     expect((await mailbox.list(bobPhone, 100)).length).toBe(100)
-    await expect(mailbox.publish(alice, bobPhone, sealMessage(new Uint8Array([101]), 'chat', a, publicDevice(b))))
+    await expect(mailbox.publish(alice, bobPhone, sealMessage(new Uint8Array([101]), 'chat', a, publicDevice(b), { senderAccountId: 'alice', recipientAccountId: 'bob' })))
       .rejects.toThrow('E2EE_MAILBOX_FULL')
     await expect(mailbox.list(bobPhone, 101)).rejects.toThrow('E2EE_INVALID_MAILBOX_LIMIT')
     await expect(mailbox.acknowledge(bobPhone, ['../escape'])).rejects.toThrow('E2EE_INVALID_DELIVERY_IDS')
