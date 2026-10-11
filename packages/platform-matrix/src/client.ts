@@ -69,6 +69,25 @@ export class MatrixClient {
     return this.request(`/_matrix/client/v3/user/${segment(userId)}/account_data/m.direct`)
   }
 
+  /**
+   * Probe the authoritative state, rather than assuming the room is cleartext
+   * when an incremental /sync omitted its encryption state.
+   *
+   * Only M_NOT_FOUND means no encryption state; timeouts, permission errors,
+   * malformed responses, and other 404s must stop plaintext writes.
+   */
+  async hasRoomEncryption(roomId: string): Promise<boolean> {
+    try {
+      await this.request<unknown>(`/_matrix/client/v3/rooms/${segment(roomId)}/state/m.room.encryption`)
+      return true
+    } catch (error) {
+      if (error instanceof MatrixHttpError && error.status === 404 && error.errcode === 'M_NOT_FOUND') {
+        return false
+      }
+      throw error
+    }
+  }
+
   getRoomState(roomId: string): Promise<MatrixEvent[]> {
     return this.request(`/_matrix/client/v3/rooms/${segment(roomId)}/state`)
   }
