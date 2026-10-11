@@ -379,6 +379,7 @@ export type IMMessagePart<TMediaLocator = unknown> =
   | { type: 'media', media: IMMedia<TMediaLocator> }
   | { type: 'sticker', sticker: import('./sticker-provider.js').IMSticker }
   | { type: 'card', card: IMMessageCard }
+  | { type: 'poll', poll: IMMessagePoll }
   | { type: 'message-bundle', bundle: IMMessageBundle }
 
 /** Platform share metadata projected as Telegram's native WebPage preview. */
@@ -389,6 +390,17 @@ export interface IMMessageCard {
   source?: string
   url?: string
   thumbnailUrl?: string
+  /** WGS84 coordinates when a location can be projected as native Telegram geo media. */
+  latitude?: number
+  longitude?: number
+}
+
+/** Read-only poll metadata; adapters can retain choices without pretending voting is supported. */
+export interface IMMessagePoll {
+  question: string
+  answers: Array<{ id: string, text: string }>
+  kind: 'disclosed' | 'undisclosed'
+  maxSelections: number
 }
 
 export type IMMessageInputPart =
@@ -1020,7 +1032,15 @@ export function messageText(message: IMProjectableMessage<unknown>): string {
 
 export function messagePartText(part: IMMessagePart<unknown>): string {
   if (part.type === 'text') return part.text
+  if (part.type === 'poll') {
+    return [
+      `🗳️ ${part.poll.question}`,
+      ...part.poll.answers.map((answer, index) => `${index + 1}. ${answer.text}`),
+      ...(part.poll.maxSelections > 1 ? [`最多选择 ${part.poll.maxSelections} 项`] : []),
+    ].join('\n')
+  }
   if (part.type !== 'card') return ''
+  if (part.card.kind === 'location') return part.card.title.trim() || '位置'
   const label = cardKindLabel(part.card.kind)
   const source = part.card.source?.trim()
   return source ? `${label} · ${source}` : label

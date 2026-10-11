@@ -41,6 +41,8 @@ export interface MatrixRoomMemberContent {
 export interface MatrixRoomMessageContent {
   msgtype?: string
   body?: string
+  /** RFC 5870 geo URI for m.location room messages. */
+  geo_uri?: string
   formatted_body?: string
   format?: string
   url?: string

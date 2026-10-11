@@ -6138,7 +6138,17 @@ export function stableId(value: string): number {
 export function makeTlCardPreview(
   card: import('./platform.js').IMMessageCard,
   dcId = 1,
-): tl.RawMessageMediaWebPage {
+): tl.TypeMessageMedia {
+  if (card.kind === 'location'
+    && typeof card.latitude === 'number' && Number.isFinite(card.latitude)
+    && card.latitude >= -90 && card.latitude <= 90
+    && typeof card.longitude === 'number' && Number.isFinite(card.longitude)
+    && card.longitude >= -180 && card.longitude <= 180) {
+    return {
+      _: 'messageMediaGeo',
+      geo: { _: 'geoPoint', lat: card.latitude, long: card.longitude, accessHash: Long.ZERO },
+    }
+  }
   const url = cardUrl(card) ?? 'https://im.qq.com/'
   let displayUrl = card.source || card.title
   try {

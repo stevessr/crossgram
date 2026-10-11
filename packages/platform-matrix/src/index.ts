@@ -486,11 +486,16 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         metadata: { matrixEncrypted: true },
       }
     }
-    if (event.type !== 'm.room.message') return
+    const pollStart = event.type === 'm.poll.start' || event.type === 'org.matrix.msc3381.poll.start'
+    const pollEnd = event.type === 'm.poll.end' || event.type === 'org.matrix.msc3381.poll.end'
+    // Poll responses do not have a text fallback and must not appear as separate chat messages.
+    if (!pollStart && !pollEnd && event.type !== 'm.room.message') return
     const raw = event.content as MatrixRoomMessageContent
     const relation = raw['m.relates_to']
     const content = relation?.rel_type === 'm.replace' && raw['m.new_content'] ? raw['m.new_content'] : raw
-    const parts = matrixMessageParts(content)
+    const parts = pollStart ? matrixPollParts(event.content)
+      : pollEnd ? [{ type: 'text' as const, text: matrixEventText(event.content) || '投票已结束' }]
+        : matrixMessageParts(content)
     if (!parts.length) return
     const messageId = relation?.rel_type === 'm.replace' && relation.event_id ? relation.event_id : event.event_id
     return {
@@ -501,7 +506,9 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       sender: this.memberUser(roomId, event.sender),
       timestamp: matrixTimestamp(event),
       outgoing: event.sender === this.accountUserId,
-      replyToId: content['m.relates_to']?.['m.in_reply_to']?.event_id,
+      replyToId: pollEnd && relation?.rel_type === 'm.reference'
+        ? relation.event_id
+        : content['m.relates_to']?.['m.in_reply_to']?.event_id,
       content: { parts },
     }
   }
@@ -559,6 +566,25 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
 
 function matrixMessageParts(content: MatrixRoomMessageContent): IMMessage<MatrixMediaLocator>['content']['parts'] {
   const body = content.body ?? ''
+  if (content.msgtype === 'm.location') {
+    const coordinates = parseMatrixGeoUri(content.geo_uri)
+    if (!coordinates) {
+      return [{ type: 'text', text: body || content.geo_uri || '位置' }]
+    }
+    const { latitude, longitude } = coordinates
+    return [{
+      type: 'card',
+      card: {
+        kind: 'location',
+        title: body.trim() || '位置',
+        description: `${latitude}, ${longitude}`,
+        source: 'Matrix',
+        latitude,
+        longitude,
+        url: `https://www.openstreetmap.org/?mlat=${latitude}&mlon=${longitude}`,
+      },
+    }]
+  }
   if (content.msgtype === 'm.text' || content.msgtype === 'm.notice' || content.msgtype === 'm.emote') {
     return body ? [{ type: 'text', text: content.msgtype === 'm.emote' ? `* ${body}` : body }] : []
   }
@@ -589,6 +615,69 @@ function matrixMessageParts(content: MatrixRoomMessageContent): IMMessage<Matrix
         height: info.thumbnail_info.h ?? 0,
       } : undefined,
       locator: { mxc },
+    },
+  }]
+}
+
+/** Parse only RFC 5870 point coordinates; malformed or out-of-range locations stay textual. */
+function parseMatrixGeoUri(uri: unknown): { latitude: number, longitude: number } | undefined {
+  if (typeof uri !== 'string') return
+  const match = /^geo:([+-]?\\d+(?:\\.\\d+)?),([+-]?\\d+(?:\\.\\d+)?)(?:,[+-]?\\d+(?:\\.\\d+)?)?(?:;[^?#]*)?$/i.exec(uri)
+  if (!match) return
+  const latitude = Number(match[1])
+  const longitude = Number(match[2])
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)
+    || latitude < -90 || latitude > 90 || longitude < -180 || longitude > 180) return
+  return { latitude, longitude }
+}
+
+function matrixObject(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown> : undefined
+}
+
+/** Both stable MSC3381 m.text arrays and legacy single-text payloads. */
+function matrixEventText(value: unknown): string {
+  const object = matrixObject(value)
+  if (!object) return ''
+  const rich = object['m.text']
+  if (Array.isArray(rich)) {
+    const block = rich.map(matrixObject).find((item) => item?.mimetype === 'text/plain')
+      ?? rich.map(matrixObject).find((item) => typeof item?.body === 'string')
+    if (typeof block?.body === 'string') return block.body
+  }
+  if (typeof object['org.matrix.msc1767.text'] === 'string') return object['org.matrix.msc1767.text']
+  return typeof object.body === 'string' ? object.body : ''
+}
+
+/** Preserve structured poll questions and option IDs, with a plain-text fallback. */
+function matrixPollParts(value: unknown): IMMessage<MatrixMediaLocator>['content']['parts'] {
+  const content = matrixObject(value)
+  const poll = matrixObject(content?.['m.poll'])
+    ?? matrixObject(content?.['org.matrix.msc3381.poll.start'])
+  const fallback = matrixEventText(content)
+  if (!poll) return fallback ? [{ type: 'text', text: fallback }] : []
+  const question = matrixEventText(poll.question).trim()
+  const options = Array.isArray(poll.answers) ? poll.answers.slice(0, 20) : []
+  const seen = new Set<string>()
+  const answers = options.flatMap((value) => {
+    const answer = matrixObject(value)
+    const id = answer?.['m.id'] ?? answer?.id
+    const text = matrixEventText(answer).trim()
+    if (typeof id !== 'string' || !id || !text || seen.has(id)) return []
+    seen.add(id)
+    return [{ id, text }]
+  })
+  if (!question || !answers.length) return fallback ? [{ type: 'text', text: fallback }] : []
+  const max = poll.max_selections
+  const maxSelections = typeof max === 'number' && Number.isSafeInteger(max) && max > 0
+    ? Math.min(max, answers.length) : 1
+  return [{
+    type: 'poll',
+    poll: {
+      question, answers, maxSelections,
+      kind: poll.kind === 'm.disclosed' || poll.kind === 'org.matrix.msc3381.poll.disclosed'
+        ? 'disclosed' : 'undisclosed',
     },
   }]
 }
