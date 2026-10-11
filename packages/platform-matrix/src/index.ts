@@ -524,7 +524,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   }
 
   private cachedPinnedIds(roomId: string): string[] {
-    return matrixPinnedIds(this.roomState.get(roomId)?.get('m.room.pinned_events\\0')?.content)
+    return matrixPinnedIds(this.roomState.get(roomId)?.get('m.room.pinned_events\0')?.content)
   }
 
   private updateConversation(roomId: string, room?: MatrixJoinedRoom): IMConversation<MatrixMediaLocator> {
