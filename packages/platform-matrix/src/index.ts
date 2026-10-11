@@ -129,8 +129,9 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
             timeout: this.syncTimeoutMs,
             signal: controller.signal,
           })
-          since = response.next_batch
           await this.dispatchSync(response, userId, handler)
+          // Only advance the token after the bridge has durably handled the batch.
+          since = response.next_batch
         } catch (error) {
           if (controller.signal.aborted) return
           this.logger?.warn('Matrix sync failed: %s', formatError(error))
@@ -450,16 +451,16 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       if (previous && previous.id !== request.id) {
         await handler({ type: 'request', request: { ...previous, state: 'rejected' } })
       }
-      this.pendingInvites.set(roomId, request)
       if (!previous || JSON.stringify(previous) !== JSON.stringify(request)) {
         await handler({ type: 'request', request })
       }
+      this.pendingInvites.set(roomId, request)
     }
     for (const [roomId, room] of Object.entries(response.rooms?.join ?? {})) {
       const invite = this.pendingInvites.get(roomId)
       if (invite) {
-        this.pendingInvites.delete(roomId)
         await handler({ type: 'request', request: { ...invite, state: 'accepted' } })
+        this.pendingInvites.delete(roomId)
       }
       const stateEvents = [
         ...(room.state?.events ?? []),
@@ -498,8 +499,8 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     for (const roomId of Object.keys(response.rooms?.leave ?? {})) {
       const invite = this.pendingInvites.get(roomId)
       if (!invite) continue
-      this.pendingInvites.delete(roomId)
       await handler({ type: 'request', request: { ...invite, state: 'rejected' } })
+      this.pendingInvites.delete(roomId)
     }
   }
 
