@@ -37,6 +37,7 @@ jobs:
           packages/platform-matrix/src/client.test.ts
           packages/platform-matrix/src/platform.test.ts
           packages/platform-matrix/src/formatting.test.ts
+          packages/platform-matrix/src/search.test.ts
           packages/bridge/src/conversation-kinds.test.ts
           packages/bridge/src/update-manager.test.ts
           packages/bridge/src/notification-settings.e2e.test.ts
