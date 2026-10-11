@@ -101,6 +101,27 @@ describe('MatrixPlatform', () => {
     expect(paths).toEqual(['/_matrix/client/v3/sync'])
   })
 
+  it('observes encryption upgrades from timeline-only state in initial sync', async () => {
+    const calls: string[] = []
+    const platform = createPlatform(routeFetch((url) => {
+      calls.push(url.pathname)
+      if (url.pathname.endsWith('/sync')) return json({
+        next_batch: 's2', rooms: { join: {
+          '!upgraded:example.org': { state: { events: [] }, timeline: { events: [
+            event('m.room.encryption', { algorithm: 'm.megolm.v1.aes-sha2' }, { stateKey: '', id: '$upgrade' }),
+          ] } },
+        } },
+      })
+      throw new Error('unexpected: ' + url.pathname)
+    }), { userId: '@me:example.org' })
+    const dialogs = await platform.getDialogs(session)
+    expect(dialogs.dialogs[0]?.conversation.metadata).toMatchObject({ encrypted: true })
+    await expect(platform.sendMessage(session, { id: '!upgraded:example.org' }, {
+      parts: [{ type: 'text', text: 'no downgrade' }],
+    })).rejects.toBeInstanceOf(MatrixEncryptionRequiredError)
+    expect(calls).toEqual(['/_matrix/client/v3/sync'])
+  })
+
   it('reads and synchronizes Matrix annotation reactions using the typed relations endpoint', async () => {
     const calls: string[] = []
     const fetch = routeFetch((url, init) => {
