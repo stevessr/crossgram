@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
-  bundleFingerprint, exportDeviceBundle, getPinnedDevice, MemoryDevicePinStore,
+  accountDeviceFingerprint, bundleFingerprint, exportDeviceBundle, getPinnedDevice, MemoryDevicePinStore,
   openFromPinnedDevice, parseDeviceBundle, sealToPinnedDevices, verifyAndPinDevice,
 } from './devices.js'
 import {
@@ -32,13 +32,13 @@ describe('CrossGram E2EE public-device identity exchange', () => {
     const store = new MemoryDevicePinStore()
     const bob = exportDeviceBundle(generateDeviceIdentity('bob-phone'))
     const attacker = exportDeviceBundle(generateDeviceIdentity('bob-phone'))
-    await expect(verifyAndPinDevice(store, 'bob-account', attacker, bundleFingerprint(bob)))
+    await expect(verifyAndPinDevice(store, 'bob-account', attacker, accountDeviceFingerprint('bob-account', bob)))
       .rejects.toThrow('E2EE_FINGERPRINT_MISMATCH')
     await expect(getPinnedDevice(store, 'bob-account', bob.deviceId))
       .rejects.toThrow('E2EE_DEVICE_UNVERIFIED')
-    await verifyAndPinDevice(store, 'bob-account', bob, bundleFingerprint(bob))
-    await verifyAndPinDevice(store, 'bob-account', bob, bundleFingerprint(bob))
-    await expect(verifyAndPinDevice(store, 'bob-account', attacker, bundleFingerprint(attacker)))
+    await verifyAndPinDevice(store, 'bob-account', bob, accountDeviceFingerprint('bob-account', bob))
+    await verifyAndPinDevice(store, 'bob-account', bob, accountDeviceFingerprint('bob-account', bob))
+    await expect(verifyAndPinDevice(store, 'bob-account', attacker, accountDeviceFingerprint('bob-account', attacker)))
       .rejects.toThrow('E2EE_DEVICE_KEY_CHANGED')
     expect(bundleFingerprint(exportDeviceBundle(
       await getPinnedDevice(store, 'bob-account', bob.deviceId),
@@ -48,7 +48,7 @@ describe('CrossGram E2EE public-device identity exchange', () => {
   it('isolates pins by local account ID and does not auto-enroll any device', async () => {
     const store = new MemoryDevicePinStore()
     const bob = exportDeviceBundle(generateDeviceIdentity('bob-phone'))
-    await verifyAndPinDevice(store, 'bob-account-1', bob, bundleFingerprint(bob))
+    await verifyAndPinDevice(store, 'bob-account-1', bob, accountDeviceFingerprint('bob-account-1', bob))
     await expect(getPinnedDevice(store, 'bob-account-2', bob.deviceId))
       .rejects.toThrow('E2EE_DEVICE_UNVERIFIED')
     await store.revoke('bob-account-1', bob.deviceId)
@@ -63,7 +63,7 @@ describe('CrossGram E2EE public-device identity exchange', () => {
     const store = new MemoryDevicePinStore()
     for (const device of [bobPhone, bobLaptop]) {
       const bundle = exportDeviceBundle(device)
-      await verifyAndPinDevice(store, 'bob-account', bundle, bundleFingerprint(bundle))
+      await verifyAndPinDevice(store, 'bob-account', bundle, accountDeviceFingerprint('bob-account', bundle))
     }
     const message = new TextEncoder().encode('你好，端到端加密')
     const envelopes = await sealToPinnedDevices(message, 'chat:alice-bob', sender, store,
@@ -85,10 +85,10 @@ describe('CrossGram E2EE public-device identity exchange', () => {
     const bob = generateDeviceIdentity('bob')
     const pins = new MemoryDevicePinStore()
     const aliceBundle = exportDeviceBundle(sender)
-    await verifyAndPinDevice(pins, 'alice-account', aliceBundle, bundleFingerprint(aliceBundle))
+    await verifyAndPinDevice(pins, 'alice-account', aliceBundle, accountDeviceFingerprint('alice-account', aliceBundle))
     const bobPins = new MemoryDevicePinStore()
     const bobBundle = exportDeviceBundle(bob)
-    await verifyAndPinDevice(bobPins, 'bob-account', bobBundle, bundleFingerprint(bobBundle))
+    await verifyAndPinDevice(bobPins, 'bob-account', bobBundle, accountDeviceFingerprint('bob-account', bobBundle))
     const trustedEnvelope = (await sealToPinnedDevices(new TextEncoder().encode('verified'),
       'private', sender, bobPins, 'bob-account', ['bob'], 'alice-account'))[0]
     expect(new TextDecoder().decode(await openFromPinnedDevice(trustedEnvelope, 'private',
@@ -107,7 +107,7 @@ describe('CrossGram E2EE public-device identity exchange', () => {
     const store = new MemoryDevicePinStore()
     const sender = generateDeviceIdentity('sender')
     const trusted = exportDeviceBundle(generateDeviceIdentity('trusted'))
-    await verifyAndPinDevice(store, 'target', trusted, bundleFingerprint(trusted))
+    await verifyAndPinDevice(store, 'target', trusted, accountDeviceFingerprint('target', trusted))
     await expect(sealToPinnedDevices(new TextEncoder().encode('secret'), 'chat', sender, store,
       'target', ['trusted', 'unknown'], 'alice-account')).rejects.toThrow('E2EE_DEVICE_UNVERIFIED')
     await expect(sealToPinnedDevices(new Uint8Array(), 'chat', sender, store,
