@@ -85,7 +85,9 @@ export class SqliteEncryptedMailbox {
     validateDevice(authenticatedSender)
     validateDevice(recipient)
     const envelope = parseEnvelope(untrustedEnvelope)
-    if (envelope.senderDeviceId !== authenticatedSender.deviceId
+    if (envelope.senderAccountId !== authenticatedSender.accountId
+      || envelope.recipientAccountId !== recipient.accountId
+      || envelope.senderDeviceId !== authenticatedSender.deviceId
       || envelope.recipientDeviceId !== recipient.deviceId) {
       throw new Error('E2EE_MAILBOX_DEVICE_MISMATCH')
     }
