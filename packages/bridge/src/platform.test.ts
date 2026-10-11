@@ -41,6 +41,21 @@ describe('Matrix content projection', () => {
     } })).toBe('🗳️ Tea or coffee?\n1. Tea\n2. Coffee\n最多选择 2 项')
   })
 
+  it('shows only confirmed final counts on a closed poll', () => {
+    const question = { type: 'poll' as const, poll: {
+      question: 'Lunch?', kind: 'undisclosed' as const, maxSelections: 1,
+      answers: [{ id: 'rice', text: 'Rice' }, { id: 'pasta', text: 'Pasta' }],
+      counts: { rice: 3, pasta: 2 }, totalVoters: 5,
+    } }
+    expect(messagePartText(question)).not.toContain('票')
+    const result = messagePartText({
+      ...question, poll: { ...question.poll, closed: true },
+    })
+    expect(result).toContain('Rice — 3 票')
+    expect(result).toContain('Pasta — 2 票')
+    expect(result).toContain('投票已结束 · 5 人有效投票')
+  })
+
   it('renders location cards as native Telegram geolocation media', () => {
     const card = {
       kind: 'location' as const, title: 'A place', latitude: -23.5, longitude: 140.2,
