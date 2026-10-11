@@ -42,6 +42,13 @@ export interface MatrixRoomMemberContent {
 export interface MatrixRoomMessageContent {
   msgtype?: string
   body?: string
+  /** RFC 5870 geo URI for m.location room messages. */
+  geo_uri?: string
+  /** MSC3488 extensible location content. */
+  'm.location'?: { uri?: string, description?: string }
+  'org.matrix.msc3488.location'?: { uri?: string, description?: string }
+  'm.text'?: string | Array<{ body?: string, mimetype?: string }>
+  'org.matrix.msc1767.text'?: string
   formatted_body?: string
   format?: string
   'm.mentions'?: { user_ids?: string[], room?: boolean }
@@ -102,6 +109,11 @@ export interface MatrixMessagesResponse {
   end?: string
   chunk: MatrixEvent[]
   state?: MatrixEvent[]
+}
+
+export interface MatrixRelationsResponse {
+  chunk: MatrixEvent[]
+  next_batch?: string
 }
 
 export interface MatrixEventContextResponse {
