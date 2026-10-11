@@ -18,11 +18,24 @@ to one named Cordis platform entry and exposes joined rooms to Telegram clients.
 ```
 
 The adapter supports account profiles, direct and group rooms, Matrix Spaces,
-room history, incremental `/sync`, text/image/file/audio/video messages, replies,
+room history, room-scoped message search, incremental `/sync`, text/image/file/audio/video messages, replies,
 media upload/download, read markers, text edits, redactions, members, power-level
 permissions, user/room avatars, and Matrix room invitations in the shared request inbox
 (with accept/reject actions). Mixed Telegram messages are represented by
 multiple ordered Matrix events and retained as one logical bridge message.
+
+## Message search
+
+The adapter uses the Matrix Client-Server API `POST /_matrix/client/v3/search` for
+non-empty text searches, with room and sender constraints applied by the homeserver.
+Indexed attachment filenames are also searchable without being injected into the
+visible Telegram message text. Result ordering is newest first and pagination uses the homeserver's opaque
+`next_batch` token. Date ranges and image/file-type filters are evaluated after
+retrieval, so counts may be unavailable and pages may be shorter if very few
+messages match. Searches without keywords scan paginated room history, including
+links and combined photo/video filters applied by the Telegram bridge.
+Full-text results depend on the homeserver's search-index configuration; encrypted
+messages cannot be searched by a server that does not have their plaintext.
 
 ## Current limitations
 

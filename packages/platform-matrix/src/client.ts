@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { fetch as undiciFetch, ProxyAgent as UndiciProxyAgent } from 'undici'
 import type {
   MatrixDirectAccountData, MatrixEvent, MatrixEventContextResponse, MatrixJoinedRoomsResponse, MatrixMembersResponse,
-  MatrixMessagesResponse, MatrixProfile, MatrixSyncResponse, MatrixWhoAmI,
+  MatrixMessagesResponse, MatrixProfile, MatrixRoomEventFilter, MatrixSearchResponse, MatrixSyncResponse, MatrixWhoAmI,
 } from './types.js'
 
 export interface MatrixClientOptions {
@@ -81,13 +81,43 @@ export class MatrixClient {
 
   getMessages(
     roomId: string,
-    options: { from?: string, dir?: 'b' | 'f', limit?: number } = {},
+    options: { from?: string, dir?: 'b' | 'f', limit?: number, filter?: MatrixRoomEventFilter } = {},
   ): Promise<MatrixMessagesResponse> {
     return this.request(`/_matrix/client/v3/rooms/${segment(roomId)}/messages`, {
       query: {
         from: options.from,
         dir: options.dir ?? 'b',
         limit: options.limit ?? 20,
+        filter: options.filter ? JSON.stringify(options.filter) : undefined,
+      },
+    })
+  }
+
+  /** Search text indexed by the homeserver. Media type and time are filtered by the adapter. */
+  searchRoomEvents(options: {
+    searchTerm: string
+    roomId: string
+    fromUserId?: string
+    limit: number
+    nextBatch?: string
+  }): Promise<MatrixSearchResponse> {
+    return this.request('/_matrix/client/v3/search', {
+      method: 'POST',
+      query: { next_batch: options.nextBatch },
+      body: {
+        search_categories: {
+          room_events: {
+            search_term: options.searchTerm,
+            keys: ['content.body'],
+            order_by: 'recent',
+            filter: {
+              rooms: [options.roomId],
+              types: ['m.room.message'],
+              limit: options.limit,
+              ...(options.fromUserId ? { senders: [options.fromUserId] } : {}),
+            },
+          },
+        },
       },
     })
   }
