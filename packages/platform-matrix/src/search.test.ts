@@ -194,6 +194,51 @@ describe('Matrix room message search', () => {
     expect(fetch).toHaveBeenCalledTimes(2)
   })
 
+  it('rejects out-of-room, wrong-sender and out-of-range events before projection', async () => {
+    const wrongSender = {
+      ...message('$sender', 'm.image', 'image', 5_000),
+      sender: '@mallory:example.org',
+    }
+    const fetch = vi.fn<typeof globalThis.fetch>(async () => Response.json({
+      search_categories: { room_events: { results: [
+        { result: message('$wrong-room', 'm.image', 'image', 5_000, '!other:example.org') },
+        { result: wrongSender },
+        { result: message('$old', 'm.image', 'image', 4_000) },
+        { result: message('$valid', 'm.image', 'image', 5_000) },
+        { result: message('$valid', 'm.image', 'image', 5_000) },
+      ] } },
+    }))
+    const platform = new MatrixPlatform({
+      homeserver: 'https://matrix.example.org', accessToken: 'token', fetch,
+    })
+    const result = await platform.searchMessages(session, room, {
+      query: 'image', fromUserId: '@alice:example.org',
+      minTimestamp: 5, maxTimestamp: 5, mediaKind: 'image',
+    })
+    expect(result.messages.map((item) => item.id)).toEqual(['$valid'])
+    expect(result.total).toBeUndefined()
+    expect(result.nextCursor).toBeUndefined()
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
+  it('treats repeated upstream pagination tokens as exhausted, avoiding bridge retry loops', async () => {
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input) => {
+      expect(new URL(String(input)).searchParams.get('next_batch')).toBe('stalled')
+      return Response.json({ search_categories: { room_events: {
+        next_batch: 'stalled',
+        results: [{ result: message('$text', 'm.text', 'hello', 5_000) }],
+      } } })
+    })
+    const platform = new MatrixPlatform({
+      homeserver: 'https://matrix.example.org', accessToken: 'token', fetch,
+    })
+    const result = await platform.searchMessages(session, room, {
+      query: 'hello', cursor: 'stalled', mediaKind: 'image', limit: 1,
+    })
+    expect(result).toEqual({ messages: [], nextCursor: undefined })
+    expect(fetch).toHaveBeenCalledOnce()
+  })
+
   it('does not dispatch inverted time ranges or zero-limit searches', async () => {
     const fetch = vi.fn<typeof globalThis.fetch>()
     const platform = new MatrixPlatform({
