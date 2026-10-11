@@ -41,6 +41,14 @@ describe('Matrix content projection', () => {
     } })).toBe('🗳️ Tea or coffee?\n1. Tea\n2. Coffee\n最多选择 2 项')
   })
 
+  it('caps oversized poll fallback text for Telegram clients', () => {
+    const rendered = messagePartText({ type: 'poll', poll: {
+      question: 'Q'.repeat(10_000), maxSelections: 1, kind: 'disclosed',
+      answers: [{ id: 'x', text: 'Yes' }],
+    } })
+    expect(rendered.length).toBeLessThanOrEqual(4_000)
+  })
+
   it('shows only confirmed final counts on a closed poll', () => {
     const question = { type: 'poll' as const, poll: {
       question: 'Lunch?', kind: 'undisclosed' as const, maxSelections: 1,
