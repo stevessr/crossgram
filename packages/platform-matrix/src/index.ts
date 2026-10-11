@@ -5,7 +5,7 @@ import zhCN from './locales/zh-CN.yml'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialog,
   IMDialogPage, IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia,
-  IMMessage, IMMessageInput, IMMessageSearchPage, IMMessageSearchQuery, IMMessageTarget, IMPageQuery, IMPlatform, IMReadTarget,
+  IMMessage, IMMessageInput, IMMessagePinMutation, IMMessageSearchPage, IMMessageSearchQuery, IMMessageTarget, IMPageQuery, IMPlatform, IMReadTarget,
   IMTransferOptions, IMUser, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
@@ -130,8 +130,10 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
             timeout: this.syncTimeoutMs,
             signal: controller.signal,
           })
-          since = response.next_batch
           await this.dispatchSync(response, userId, handler)
+          // Advance only after successful event publication. If the handler
+          // fails, retry the same token rather than losing the state change.
+          since = response.next_batch
         } catch (error) {
           if (controller.signal.aborted) return
           this.logger?.warn('Matrix sync failed: %s', formatError(error))
@@ -410,20 +412,20 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
 
   async setMessagePinned(
     _session: PlatformSession, conversation: IMConversationRef, messageId: string, pinned: boolean,
-  ): Promise<void> {
-    await this.mutatePinnedEvents(conversation.id, (existing) => pinned
+  ): Promise<IMMessagePinMutation> {
+    return this.mutatePinnedEvents(conversation.id, (existing) => pinned
       ? existing.includes(messageId) ? existing : [...existing, messageId]
       : existing.filter((id) => id !== messageId))
   }
 
-  async clearPinnedMessages(_session: PlatformSession, conversation: IMConversationRef): Promise<void> {
-    await this.mutatePinnedEvents(conversation.id, () => [])
+  async clearPinnedMessages(_session: PlatformSession, conversation: IMConversationRef): Promise<IMMessagePinMutation> {
+    return this.mutatePinnedEvents(conversation.id, () => [])
   }
 
   /** Serialize room-state mutations, including clear-all, to avoid lost local writes. */
   private async mutatePinnedEvents(
     roomId: string, mutate: (existing: string[]) => string[],
-  ): Promise<void> {
+  ): Promise<IMMessagePinMutation> {
     const previous = this.pinMutations.get(roomId)
     let release!: () => void
     const turn = new Promise<void>((resolve) => { release = resolve })
@@ -432,12 +434,12 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     try {
       const existing = await this.client.getRoomPinnedEvents(roomId)
       const next = mutate(existing)
-      if (next.length !== existing.length || next.some((id, index) => id !== existing[index])) {
-        await this.client.setRoomPinnedEvents(roomId, next)
-        // The server will echo this same state event on /sync. The RPC caller
-        // already gets an MTProto update; do not allocate a second PTS for it.
-        this.pinSnapshots.set(roomId, [...next])
-      }
+      if (samePinnedIds(existing, next)) return { changed: false, pinnedMessageIds: next }
+      const eventId = await this.client.setRoomPinnedEvents(roomId, next)
+      // Do not advance the /sync baseline here: an unrelated external pin
+      // update may be in flight. The shared event ID deduplicates the RPC
+      // publication and its Matrix sync echo in the durable update journal.
+      return { changed: true, eventId, pinnedMessageIds: [...next] }
     } finally {
       release()
       if (this.pinMutations.get(roomId) === turn) this.pinMutations.delete(roomId)
@@ -551,9 +553,9 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       if (stateChanged) await handler({ type: 'conversation', conversation })
       if (pinState) {
         const current = matrixPinnedIds(pinState.content)
-        this.pinSnapshots.set(roomId, current)
-        // First observation establishes a baseline; subsequent changes,
-        // including external reordering, must propagate to Telegram clients.
+        // First observation establishes a baseline. Every subsequent Matrix
+        // state event (including our own echo) uses the same event ID as the
+        // matching local RPC publication, so replay is safe and idempotent.
         if (previousPins && !samePinnedIds(previousPins, current) && pinState.event_id) {
           const currentIds = new Set(current)
           await handler({
@@ -563,6 +565,9 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
             timestamp: matrixTimestamp(pinState),
           })
         }
+        // Only commit the snapshot after the handler succeeds; a failed
+        // publication must re-emit the change on the next /sync retry.
+        this.pinSnapshots.set(roomId, current)
       } else if (!previousPins) {
         this.pinSnapshots.set(roomId, this.cachedPinnedIds(roomId))
       }
