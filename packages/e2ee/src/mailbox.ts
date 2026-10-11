@@ -74,7 +74,9 @@ export class MemoryEncryptedMailbox {
     validateDevice(authenticatedSender)
     validateDevice(recipient)
     const envelope = parseEnvelope(untrustedEnvelope)
-    if (envelope.senderDeviceId !== authenticatedSender.deviceId
+    if (envelope.senderAccountId !== authenticatedSender.accountId
+      || envelope.recipientAccountId !== recipient.accountId
+      || envelope.senderDeviceId !== authenticatedSender.deviceId
       || envelope.recipientDeviceId !== recipient.deviceId) {
       throw new Error('E2EE_MAILBOX_DEVICE_MISMATCH')
     }
@@ -164,8 +166,9 @@ export class MemoryEncryptedMailbox {
 export function deliveryId(senderAccountId: string, recipientAccountId: string, e: EncryptedEnvelope): string {
   // Fixed field ordering also deduplicates semantically identical JSON objects.
   return createHash('sha256').update(JSON.stringify([
-    'crossgram/e2ee-mailbox/v1', senderAccountId, recipientAccountId,
-    e.v, e.conversationId, e.senderDeviceId, e.recipientDeviceId,
+    'crossgram/e2ee-mailbox/v2', senderAccountId, recipientAccountId,
+    e.v, e.senderAccountId, e.recipientAccountId,
+    e.conversationId, e.senderDeviceId, e.recipientDeviceId,
     e.recipientKeyId, e.ephemeralPublicKey, e.salt, e.nonce,
     e.ciphertext, e.tag, e.signature,
   ])).digest('hex')
