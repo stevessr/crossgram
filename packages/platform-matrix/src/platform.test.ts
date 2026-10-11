@@ -28,6 +28,26 @@ const roomState = [
 ]
 
 describe('MatrixPlatform', () => {
+  it('reads and synchronizes Matrix annotation reactions using the typed relations endpoint', async () => {
+    const calls: string[] = []
+    const fetch = routeFetch((url, init) => {
+      calls.push(`${url.pathname}${url.search}`)
+      if (url.pathname.endsWith('/account/whoami')) return json({ user_id: '@me:example.org' })
+      if (url.pathname.endsWith('/m.annotation')) return json({ chunk: [
+        event('m.reaction', { 'm.relates_to': { rel_type: 'm.annotation', event_id: '$target', key: '🔥' } }, { id: '$reaction', sender: '@alice:example.org', ts: 5_000 }),
+      ] })
+      if (url.pathname.includes('/send/m.reaction/')) return json({ event_id: '$mine' })
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch)
+    const context = await platform.getMessageReactions(session, { conversationId: '!room:example.org', messageId: '$target', targetId: '$target' })
+    expect(context.reactions).toMatchObject([{ key: '🔥', count: 1, selected: false }])
+    expect(calls.find((call) => call.includes('/relations/'))).toContain('/relations/%24target/m.annotation?')
+    await platform.setMessageReactions(session, { conversationId: '!room:example.org', messageId: '$target', targetId: '$target' }, ['🔥'])
+    expect(calls.some((call) => call.includes('/send/m.reaction/'))).toBe(true)
+    await platform.stop()
+  })
+
   it('maps account profiles, direct rooms, state, unread counts, and media timelines', async () => {
     const fetch = routeFetch((url) => {
       if (url.pathname.endsWith('/account/whoami')) return json({ user_id: '@me:example.org' })
@@ -126,6 +146,7 @@ describe('MatrixPlatform', () => {
       requests.push({ path: `${url.pathname}${url.search}`, method: init?.method ?? 'GET', body })
       if (url.pathname.endsWith('/upload')) return json({ content_uri: 'mxc://example.org/uploaded' })
       if (url.pathname.includes('/send/')) return json({ event_id: `$sent-${++sent}` })
+      if (url.pathname.includes('/event/')) return json({ type: 'm.room.message', content: { msgtype: 'm.file', body: 'original.txt', url: 'mxc://example.org/original', filename: 'original.txt', info: { mimetype: 'text/plain', size: 9 } } })
       if (url.pathname.includes('/redact/')) return json({ event_id: '$redaction' })
       if (url.pathname.endsWith('/read_markers')) return json({})
       if (url.pathname.includes('/download/')) return new Response(new Uint8Array([1, 2, 3, 4, 5]))
@@ -164,7 +185,8 @@ describe('MatrixPlatform', () => {
     expect(requests.find((request) => request.path.includes('/send/') &&
       (request.body as { 'm.relates_to'?: { rel_type?: string } } | undefined)
         ?.['m.relates_to']?.rel_type === 'm.replace')?.body).toMatchObject({
-        'm.new_content': { body: 'edited' }, 'm.relates_to': { event_id: '$physical' },
+        'm.new_content': { msgtype: 'm.file', body: 'edited', url: 'mxc://example.org/original', filename: 'original.txt' },
+        'm.relates_to': { event_id: '$physical' },
       })
 
     await platform.deleteMessages(session, { id: '!room:example.org' }, ['$one', '$one', '$two'])
@@ -187,6 +209,7 @@ describe('MatrixPlatform', () => {
         outgoing.push(JSON.parse(String(init?.body)) as MatrixRoomMessageContent)
         return json({ event_id: '$sent-' + outgoing.length })
       }
+      if (url.pathname.includes('/event/')) return json({ type: 'm.room.message', content: { msgtype: 'm.text', body: 'before' } })
       if (url.pathname.endsWith('/messages')) return json({
         end: 'next', chunk: [
           event('m.room.message', {

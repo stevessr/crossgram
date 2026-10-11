@@ -7,7 +7,8 @@ import type {
   IMDialogPage, IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia,
   IMInlineKeyboardButton, IMMessage, IMMessageInput, IMMessageSearchPage, IMMessageSearchQuery, IMMessageTarget, IMPageQuery, IMPlatform, IMReadTarget,
   IMRequest, IMRequestAction, IMRequestPage, IMRequestQuery,
-  IMTransferOptions, IMUser, PlatformCapabilities, PlatformSession, Unsubscribe,
+  IMReactionActorPage, IMReactionActorPageRequest, IMReactionContext, IMReactionDefinition, IMReactionTarget,
+  IMStickerSendPlan, IMTransferOptions, IMUser, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { MatrixClient, type MatrixClientOptions } from './client.js'
@@ -15,8 +16,12 @@ import { matrixMentionUserIds, matrixTextEntities, textContent } from './formatt
 import { countClosedMatrixPoll, type MatrixPollTally } from './poll-results.js'
 import type {
   MatrixDirectAccountData, MatrixEvent, MatrixInvitedRoom, MatrixJoinedRoom, MatrixMediaLocator, MatrixRoomMemberContent,
-  MatrixRoomMessageContent, MatrixSyncResponse,
+  MatrixAnnotation, MatrixRoomMessageContent, MatrixSyncResponse,
 } from './types.js'
+import { isRecord } from './guards.js'
+
+const STANDARD_REACTIONS = ['👍', '👎', '❤️', '😂', '😮', '😢', '😡', '🔥', '🎉', '👏', '🤔'] as const
+const MAX_SELECTED_REACTIONS = 20
 
 export interface Config {
   homeserver: string
@@ -74,6 +79,8 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       edit: { mode: 'native' },
       forward: { mode: 'unsupported', preservesAuthor: false },
     },
+    stickers: { native: false, upload: true, formats: ['static', 'animated'] },
+    reactions: { read: true, write: true, events: true, actorList: true, maxSelected: 20 },
   }
 
   readonly client: MatrixClient
@@ -94,6 +101,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   /** Poll closures observed in sync/history, scoped to the room to avoid cross-room event collisions. */
   private readonly closedPolls = new Set<string>()
   private readonly pollTallies = new Map<string, MatrixPollTally>()
+  private readonly reactionEventTargets = new Map<string, string>()
 
   constructor(config: Config, logger?: MatrixLogger) {
     this.client = new MatrixClient(config satisfies MatrixClientOptions)
@@ -134,6 +142,12 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     for (const [roomId, room] of Object.entries(initial.rooms?.join ?? {})) {
       this.ingestState(roomId, room.state?.events ?? [])
       this.updateConversation(roomId, room)
+      for (const event of room.timeline?.events ?? []) {
+        const relation = event.type === 'm.reaction' ? relationFromValue(event.content['m.relates_to']) : undefined
+        if (event.event_id && relation?.rel_type === 'm.annotation' && relation.event_id) {
+          this.rememberReaction(event.event_id, relation.event_id)
+        }
+      }
     }
     let since = initial.next_batch
     const running = (async () => {
@@ -477,7 +491,25 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
           },
         })
       } else {
-        throw new Error('Matrix native stickers are not supported')
+        const sticker = part.sticker
+        if (sticker.type !== 'upload') throw new Error('Matrix cannot send native sticker references')
+        if (sticker.format === 'video') throw new Error('Matrix sticker events do not support video stickers')
+        let transferredBytes = 0
+        const mxc = await this.client.upload(sticker.source.stream({ signal: options.signal }), {
+          filename: `${sticker.stickerId}.${mediaExtension(sticker.mimeType)}`,
+          contentType: sticker.mimeType,
+          signal: options.signal,
+          onChunk: async (size) => {
+            transferredBytes += size
+            await options.onProgress?.({ phase: 'upload', mediaIndex: index, transferredBytes, totalBytes: sticker.source.size })
+          },
+        })
+        sourceIds.push(await this.client.sendEvent(conversation.id, 'm.sticker', stickerContent(sticker, mxc, content.replyToId)))
+        parts.push({ type: 'media', media: {
+          id: mxc, kind: sticker.mimeType.startsWith('image/') ? 'image' : 'file',
+          name: `${sticker.stickerId}.${mediaExtension(sticker.mimeType)}`, mimeType: sticker.mimeType,
+          size: sticker.source.size, width: sticker.width, height: sticker.height, locator: { mxc },
+        } })
       }
     }
     if (!sourceIds.length) throw new Error('Matrix cannot send an empty message')
@@ -608,13 +640,18 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     if (content.parts.length !== 1 || content.parts[0]?.type !== 'text') {
       throw new Error('Matrix edits currently support exactly one text part')
     }
-    const body = content.parts[0].text
-    const entities = content.parts[0].entities
+    const text = content.parts[0]
+    const originalEvent = await this.client.getEvent(target.conversationId, target.targetId)
+    if (originalEvent.type !== 'm.room.message') throw new Error(`Matrix cannot edit event type ${originalEvent.type}`)
+    const raw = matrixRoomMessageContent(originalEvent.content)
+    const original = raw['m.new_content'] ?? raw
+    const originalReplyTo = (original['m.relates_to'] ?? raw['m.relates_to'])?.['m.in_reply_to']?.event_id
+    const newContent = formattedContent(original, text.text, text.entities)
+    if (originalReplyTo) newContent['m.relates_to'] = { 'm.in_reply_to': { event_id: originalReplyTo } }
+    const fallback = formattedContent(newContent, `* ${text.text}`, text.entities?.map((entity) => ({ ...entity, offset: entity.offset + 2 })))
     const replacement: MatrixRoomMessageContent = {
-      ...textContent(`* ${body}`, undefined, entities?.map((entity) => ({
-        ...entity, offset: entity.offset + 2,
-      }))),
-      'm.new_content': textContent(body, undefined, entities),
+      ...fallback,
+      'm.new_content': newContent,
       'm.relates_to': { rel_type: 'm.replace', event_id: target.targetId },
     }
     await this.client.sendEvent(target.conversationId, 'm.room.message', replacement)
@@ -625,7 +662,8 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       senderId: session.userId,
       timestamp: Math.floor(Date.now() / 1000),
       outgoing: true,
-      content: { parts: [{ type: 'text', text: body, entities: content.parts[0].entities }] },
+      replyToId: originalReplyTo,
+      content: { parts: matrixMessageParts(newContent) },
     }
   }
 
@@ -639,6 +677,71 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
 
   async markRead(_session: PlatformSession, target: IMReadTarget): Promise<void> {
     await this.client.markRead(target.conversationId, target.messageId)
+  }
+
+  async getAvailableReactions(_session: PlatformSession, target: IMReactionTarget): Promise<IMReactionContext> {
+    const userId = await this.getAccountUserId()
+    if (!target.targetId && !target.messageId) return reactionContext([], userId)
+    return reactionContext(await this.loadReactionEvents(target.conversationId, target.targetId ?? target.messageId!), userId)
+  }
+
+  async getMessageReactions(_session: PlatformSession, target: IMMessageTarget): Promise<IMReactionContext> {
+    const userId = await this.getAccountUserId()
+    return reactionContext(await this.loadReactionEvents(target.conversationId, target.targetId), userId)
+  }
+
+  async setMessageReactions(session: PlatformSession, target: IMMessageTarget, reactionKeys: readonly string[]): Promise<IMReactionContext> {
+    const userId = await this.getAccountUserId()
+    if (reactionKeys.length > MAX_SELECTED_REACTIONS) throw new Error(`Matrix supports at most ${MAX_SELECTED_REACTIONS} selected reactions`)
+    const requested = new Set(reactionKeys)
+    if ([...requested].some((key) => !reactionDefinition(key))) throw new Error('Matrix reactions must be emoji keys')
+    const existing = await this.loadReactionEvents(target.conversationId, target.targetId)
+    const selected = new Set<string>()
+    for (const event of existing) {
+      const relation = relationFromValue(event.content['m.relates_to'])
+      if (event.sender !== userId || relation?.rel_type !== 'm.annotation' || !relation.key) continue
+      if (requested.has(relation.key) && !selected.has(relation.key)) selected.add(relation.key)
+      else if (event.event_id) await this.client.redactEvent(target.conversationId, event.event_id)
+    }
+    for (const key of requested) if (!selected.has(key)) await this.client.sendEvent(target.conversationId, 'm.reaction', {
+      'm.relates_to': { rel_type: 'm.annotation', event_id: target.targetId, key },
+    })
+    return this.getMessageReactions(session, target)
+  }
+
+  async getMessageReactionActors(_session: PlatformSession, target: IMMessageTarget, request: IMReactionActorPageRequest): Promise<IMReactionActorPage> {
+    const userId = await this.getAccountUserId()
+    const events = await this.loadReactionEvents(target.conversationId, target.targetId)
+    const actors = events.flatMap((event) => {
+      const relation = relationFromValue(event.content['m.relates_to'])
+      if (!event.sender || relation?.rel_type !== 'm.annotation' || !relation.key || (request.reactionKey && request.reactionKey !== relation.key)) return []
+      return [{ reactionKey: relation.key, actor: { userId: event.sender, timestamp: matrixTimestamp(event) } }]
+    }).sort((a, b) => (b.actor.timestamp ?? 0) - (a.actor.timestamp ?? 0))
+    const offset = request.offset === undefined ? 0 : Number(request.offset)
+    if (!Number.isSafeInteger(offset) || offset < 0) throw new Error(`invalid Matrix reaction offset: ${request.offset}`)
+    const limit = Math.max(0, Math.min(Math.trunc(request.limit), 1_000))
+    const page = actors.slice(offset, offset + limit)
+    return { context: reactionContext(events, userId), actors: page, nextOffset: offset + page.length < actors.length ? String(offset + page.length) : undefined }
+  }
+
+  private async loadReactionEvents(roomId: string, targetId: string): Promise<MatrixEvent[]> {
+    const events: MatrixEvent[] = [], cursors = new Set<string>()
+    let from: string | undefined
+    do {
+      const page = await this.client.getRelations(roomId, targetId, 'm.annotation', { from, limit: 100 })
+      for (const event of page.chunk) {
+        if (event.type !== 'm.reaction' || event.unsigned?.redacted_because) continue
+        const relation = relationFromValue(event.content['m.relates_to'])
+        if (relation?.rel_type === 'm.annotation' && relation.event_id === targetId && relation.key) {
+          events.push(event)
+          if (event.event_id) this.rememberReaction(event.event_id, targetId)
+        }
+      }
+      if (!page.next_batch || cursors.has(page.next_batch)) break
+      from = page.next_batch
+      cursors.add(from)
+    } while (true)
+    return events
   }
 
   async getUser(_session: PlatformSession, userId: string): Promise<IMUser<MatrixMediaLocator> | null> {
@@ -762,13 +865,22 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         if (!event.event_id || event.state_key !== undefined) continue
         const redacts = event.redacts ?? (event.content as { redacts?: string }).redacts
         if (event.type === 'm.room.redaction' && redacts) {
-          await handler({
-            type: 'message-delete',
-            eventId: event.event_id,
-            conversation,
-            messageIds: [redacts],
-            timestamp: matrixTimestamp(event),
-          })
+          const reactionTargetId = this.reactionEventTargets.get(redacts)
+          if (reactionTargetId) {
+            this.reactionEventTargets.delete(redacts)
+            await handler({ type: 'message-reactions', eventId: event.event_id, conversation,
+              target: { conversationId: roomId, messageId: reactionTargetId, targetId: reactionTargetId },
+              context: reactionContext(await this.loadReactionEvents(roomId, reactionTargetId), userId), timestamp: matrixTimestamp(event) })
+          } else await handler({ type: 'message-delete', eventId: event.event_id, conversation, messageIds: [redacts], timestamp: matrixTimestamp(event) })
+          continue
+        }
+        if (event.type === 'm.reaction') {
+          const relation = relationFromValue(event.content['m.relates_to'])
+          if (relation?.rel_type !== 'm.annotation' || !relation.event_id || !relation.key) continue
+          this.rememberReaction(event.event_id, relation.event_id)
+          await handler({ type: 'message-reactions', eventId: event.event_id, conversation,
+            target: { conversationId: roomId, messageId: relation.event_id, targetId: relation.event_id },
+            context: reactionContext(await this.loadReactionEvents(roomId, relation.event_id), userId), timestamp: matrixTimestamp(event) })
           continue
         }
         const message = this.mapTimelineMessage(roomId, event)
@@ -846,6 +958,14 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       message: reason,
       createdAt: membership.origin_server_ts,
       metadata: { matrixRoomInvite: true, matrixRoomId: roomId },
+    }
+  }
+
+  private rememberReaction(eventId: string, targetId: string): void {
+    this.reactionEventTargets.set(eventId, targetId)
+    if (this.reactionEventTargets.size > 10_000) {
+      const oldest = this.reactionEventTargets.keys().next().value
+      if (oldest) this.reactionEventTargets.delete(oldest)
     }
   }
 
@@ -929,7 +1049,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     if (event.unsigned?.redacted_because && (pollStart || pollEnd)) return
     const location = event.type === 'm.location' || event.type === 'org.matrix.msc3488.location'
     // Poll responses do not have a text fallback and must not appear as separate chat messages.
-    if (!pollStart && !pollEnd && !location && event.type !== 'm.room.message') return
+    if (!pollStart && !pollEnd && !location && event.type !== 'm.room.message' && event.type !== 'm.sticker') return
     const raw = matrixObject(event.content) as MatrixRoomMessageContent | undefined
     if (!raw) return
     const relation = raw['m.relates_to']
@@ -972,7 +1092,11 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
             })) } }
           : {}),
       },
-      ...(mentionIds.length ? { metadata: { matrixMentions: mentionIds } } : {}),
+      ...((mentionIds.length || event.unsigned?.['m.relations']?.['m.annotation']?.length) ? { metadata: {
+        ...(mentionIds.length ? { matrixMentions: mentionIds } : {}),
+        ...(event.unsigned?.['m.relations']?.['m.annotation']?.length
+          ? { reactionContext: JSON.parse(JSON.stringify(bundledReactionContext(event.unsigned['m.relations']['m.annotation']!))) as never } : {}),
+      } } : {}),
     }
   }
 
@@ -1029,6 +1153,16 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
 
 function matrixMessageParts(content: MatrixRoomMessageContent): IMMessage<MatrixMediaLocator>['content']['parts'] {
   const body = content.body ?? ''
+  if (content.msgtype === 'm.sticker') {
+    const mxc = content.url ?? content.file?.url
+    if (!mxc) return body ? [{ type: 'text', text: body }] : []
+    const mimeType = content.info?.mimetype ?? 'image/webp'
+    return [{ type: 'media', media: {
+      id: mxc, kind: mimeType.startsWith('image/') ? 'image' : 'file',
+      name: looksLikeFilename(body) ? body : `sticker.${mediaExtension(mimeType)}`,
+      mimeType, size: content.info?.size, width: content.info?.w, height: content.info?.h, locator: { mxc },
+    } }]
+  }
   const structured = matrixObject(content['m.location'])
     ?? matrixObject(content['org.matrix.msc3488.location'])
   if (content.msgtype === 'm.location' || structured) {
@@ -1089,6 +1223,57 @@ function matrixMessageParts(content: MatrixRoomMessageContent): IMMessage<Matrix
       locator: { mxc },
     },
   }]
+}
+
+function formattedContent(base: MatrixRoomMessageContent, body: string, entities?: readonly { type: string, offset: number, length: number, url?: string, language?: string }[]): MatrixRoomMessageContent {
+  const content = { ...base, ...textContent(body, undefined, entities as never), msgtype: base.msgtype ?? 'm.text' }
+  delete content['m.relates_to']; delete content['m.new_content']
+  return content
+}
+function stickerContent(sticker: Extract<IMStickerSendPlan, { type: 'upload' }>, mxc: string, replyToId?: string): MatrixRoomMessageContent {
+  return { body: sticker.emoji?.[0] || sticker.stickerId, url: mxc, info: { mimetype: sticker.mimeType, size: sticker.source.size, w: sticker.width, h: sticker.height }, ...(replyToId ? { 'm.relates_to': { 'm.in_reply_to': { event_id: replyToId } } } : {}) }
+}
+function mediaExtension(mime: string): string {
+  return ({ 'image/apng': 'apng', 'image/gif': 'gif', 'image/png': 'png', 'image/webp': 'webp', 'application/x-tgsticker': 'tgs' } as Record<string, string>)[mime.toLowerCase()] ?? 'bin'
+}
+function looksLikeFilename(value: string): boolean { return /^[^/\\\r\n]{1,200}\.(?:apng|avif|bmp|gif|jpe?g|png|svg|webp|aac|m4a|mp3|ogg|wav|webm|mp4|mov|pdf|txt|zip|docx?|xlsx?|pptx?)$/iu.test(value) }
+function relationFromValue(value: unknown): MatrixRoomMessageContent['m.relates_to'] | undefined {
+  if (!isRecord(value)) return
+  const reply = value['m.in_reply_to']
+  return { rel_type: typeof value.rel_type === 'string' ? value.rel_type : undefined, event_id: typeof value.event_id === 'string' ? value.event_id : undefined, key: typeof value.key === 'string' ? value.key : undefined,
+    'm.in_reply_to': isRecord(reply) && typeof reply.event_id === 'string' ? { event_id: reply.event_id } : undefined }
+}
+function matrixRoomMessageContent(value: unknown): MatrixRoomMessageContent {
+  if (!isRecord(value)) return {}
+  const info = isRecord(value.info) ? value.info : {}
+  const file = isRecord(value.file) && typeof value.file.url === 'string' ? { url: value.file.url } : undefined
+  return { ...value, info: { mimetype: typeof info.mimetype === 'string' ? info.mimetype : undefined, size: typeof info.size === 'number' ? info.size : undefined, w: typeof info.w === 'number' ? info.w : undefined, h: typeof info.h === 'number' ? info.h : undefined }, file, 'm.relates_to': relationFromValue(value['m.relates_to']), 'm.new_content': isRecord(value['m.new_content']) ? matrixRoomMessageContent(value['m.new_content']) : undefined } as MatrixRoomMessageContent
+}
+function reactionDefinition(key: string): IMReactionDefinition | undefined {
+  return /\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(key) && key.length <= 32 && !/[\s\r\n]/u.test(key) ? { key, presentation: { type: 'emoji', emoticon: key } } : undefined
+}
+function reactionDefinitions(keys: Iterable<string>): IMReactionDefinition[] {
+  const all = new Map<string, IMReactionDefinition>()
+  for (const key of STANDARD_REACTIONS) all.set(key, reactionDefinition(key)!)
+  for (const key of keys) { const definition = reactionDefinition(key); if (definition) all.set(key, definition) }
+  return [...all.values()]
+}
+function reactionContext(events: readonly MatrixEvent[], userId: string): IMReactionContext {
+  const grouped = new Map<string, { count: number, actors: Array<{ userId: string, timestamp: number }>, selectedAt?: number }>()
+  for (const event of events) {
+    const relation = relationFromValue(event.content['m.relates_to'])
+    if (!event.sender || relation?.rel_type !== 'm.annotation' || !relation.key) continue
+    const group = grouped.get(relation.key) ?? { count: 0, actors: [] }; grouped.set(relation.key, group)
+    const timestamp = matrixTimestamp(event); group.count++; group.actors.push({ userId: event.sender, timestamp })
+    if (event.sender === userId) group.selectedAt = Math.max(group.selectedAt ?? 0, timestamp)
+  }
+  const selected = [...grouped].filter(([, x]) => x.selectedAt !== undefined).sort((a,b) => a[1].selectedAt! - b[1].selectedAt!)
+  return { available: reactionDefinitions(grouped.keys()), maxSelected: MAX_SELECTED_REACTIONS, reactions: [...grouped].flatMap(([key, group]) => reactionDefinition(key) ? [{ key, count: group.count, selected: group.selectedAt !== undefined, selectedOrder: group.selectedAt === undefined ? undefined : selected.findIndex(([k]) => k === key) + 1, recentActors: group.actors.sort((a,b) => b.timestamp-a.timestamp).slice(0,3) }] : []) }
+}
+function bundledReactionContext(annotations: readonly MatrixAnnotation[]): IMReactionContext {
+  const reactions = annotations.flatMap((item) => typeof item.count === 'number' && reactionDefinition(item.key)
+    ? [{ key: item.key, count: item.count }] : [])
+  return { available: reactionDefinitions(annotations.map((item) => item.key)), reactions, maxSelected: MAX_SELECTED_REACTIONS }
 }
 
 function isMatrixPollStart(type: string): boolean {
