@@ -8,7 +8,8 @@
 import { createPublicKey, timingSafeEqual } from 'node:crypto'
 import {
   deviceFingerprint, type DeviceIdentity, type VerifiedDevice,
-  sealMessage, type EncryptedEnvelope,
+  sealMessage, openMessage, parseEnvelope,
+  type EncryptedEnvelope, type ReplayGuard,
 } from './envelope.js'
 
 export interface PublicDeviceBundle {
@@ -157,6 +158,23 @@ export async function sealToPinnedDevices(
     id => getPinnedDevice(store, recipientAccountId, id),
   ))
   return devices.map(device => sealMessage(plaintext, conversationId, sender, device))
+}
+
+/**
+ * Resolve a sender from independently pinned local keys, then authenticate and
+ * decrypt. A server-supplied unknown device is never silently accepted.
+ */
+export async function openFromPinnedDevice(
+  untrustedEnvelope: unknown,
+  conversationId: string,
+  recipient: DeviceIdentity,
+  store: DevicePinStore,
+  senderAccountId: string,
+  replayGuard: ReplayGuard,
+): Promise<Uint8Array> {
+  const envelope = parseEnvelope(untrustedEnvelope)
+  const sender = await getPinnedDevice(store, senderAccountId, envelope.senderDeviceId)
+  return openMessage(envelope, conversationId, recipient, sender, replayGuard)
 }
 
 function validateIdentifier(value: string): void {
