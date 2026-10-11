@@ -1443,7 +1443,9 @@ function committedEventSummary(committed: CommittedPlatformEvent): string {
   if (event.type === 'message-pins') {
     return `type=message-pins conversation=${event.conversation.id} eventId=${event.eventId} pinned=${event.pinnedMessageIds.length} removed=${event.removedMessageIds.length}`
   }
-  const { result } = committed as Exclude<CommittedPlatformEvent, { event: { type: 'voice-call' } }>
+  const { result } = committed as Exclude<
+    CommittedPlatformEvent, { event: { type: 'voice-call' | 'message-pins' } }
+  >
   if (event.type === 'message' || event.type === 'message-edit') {
     const ingest = result as import('./message-store.js').IngestResult
     return `type=${event.type} conversation=${event.conversation.id} message=${event.message.id} created=${ingest.created} changed=${ingest.changed} projection=${ingest.projection.length}`
