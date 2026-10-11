@@ -198,6 +198,51 @@ describe('MatrixPlatform', () => {
     })
   })
 
+  it('pins and unpins Matrix events without losing other pins in concurrent writes', async () => {
+    let pinned: string[] = []
+    let muted = false
+    const requests: string[] = []
+    const fetch = routeFetch(async (url, init) => {
+      const method = init?.method ?? 'GET'
+      requests.push(`${method} ${url.pathname}`)
+      if (url.pathname.endsWith('/state/m.room.pinned_events')) {
+        if (method === 'GET') return json({ pinned })
+        pinned = (JSON.parse(init?.body as string) as { pinned: string[] }).pinned
+        return json({ event_id: '$pins' })
+      }
+      if (url.pathname.includes('/pushrules/global/room/')) {
+        if (method === 'GET') return muted
+          ? json({ actions: ['dont_notify'], enabled: true })
+          : json({ errcode: 'M_NOT_FOUND' }, { status: 404 })
+        muted = method === 'PUT'
+        return json({})
+      }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch)
+    const conversation = { id: '!room:example.org' }
+    expect(platform.capabilities.messageActions?.pin).toEqual({ read: true, write: true })
+    expect(platform.capabilities.notifications).toEqual({ read: true, mute: true })
+
+    await Promise.all([
+      platform.setMessagePinned(session, conversation, '$one', true),
+      platform.setMessagePinned(session, conversation, '$two', true),
+    ])
+    expect(await platform.getPinnedMessageIds(session, conversation)).toEqual(['$one', '$two'])
+    await platform.setMessagePinned(session, conversation, '$one', true)
+    expect(requests.filter((request) => request.startsWith('PUT ') && request.includes('/state/')))
+      .toHaveLength(2)
+    await platform.setMessagePinned(session, conversation, '$one', false)
+    expect(await platform.getPinnedMessageIds(session, conversation)).toEqual(['$two'])
+
+    await platform.setConversationNotificationSettings(session, conversation, { muted: true })
+    expect(await platform.getConversationNotificationSettings(session, conversation))
+      .toEqual({ muted: true })
+    await platform.setConversationNotificationSettings(session, conversation, { muted: false })
+    expect(await platform.getConversationNotificationSettings(session, conversation))
+      .toEqual({ muted: false })
+  })
+
   it('subscribes from an initial token and emits messages, edits, redactions, receipts, and conversation changes', async () => {
     let sync = 0
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
