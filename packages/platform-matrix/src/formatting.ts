@@ -65,29 +65,31 @@ export function matrixTextEntities(content: MatrixRoomMessageContent): IMTextEnt
   const mentioned = new Set(matrixMentionUserIds(content))
   if (!body || !mentioned.size) return undefined
   const entities: MentionEntity[] = []
-  const linked = new Set<string>()
 
   if (content.format === 'org.matrix.custom.html' && content.formatted_body) {
     const anchors = /<a\b([^>]*)>([\s\S]*?)<\/a\s*>/giu
     let match: RegExpExecArray | null
-    let cursor = 0
+    // Match the complete HTML prefix, not merely the next occurrence of a
+    // label: "@Alice wrote @Alice" must attach to the linked second @Alice.
+    let htmlCursor = 0
+    let textCursor = 0
     while ((match = anchors.exec(content.formatted_body)) !== null) {
       const href = /\bhref\s*=\s*(?:"([^"]*)"|'([^']*)')/iu.exec(match[1]!)
       const id = href ? matrixUserIdFromLink(decodeHtml(href[1] ?? href[2] ?? '')) : undefined
       if (!id || !mentioned.has(id)) continue
-      const label = decodeHtml(match[2]!.replace(/<br\s*\/?>/giu, '\n').replace(/<[^>]*>/gu, ''))
-      if (!label) continue
-      const offset = body.indexOf(label, cursor)
-      if (offset < 0) continue
+      const prefix = htmlPlainText(content.formatted_body.slice(htmlCursor, match.index))
+      const label = htmlPlainText(match[2]!)
+      if (!label || !body.startsWith(prefix, textCursor)) continue
+      const offset = textCursor + prefix.length
+      if (!body.startsWith(label, offset)) continue
       entities.push({ type: 'mention', offset, length: label.length, userId: id })
-      linked.add(id)
-      cursor = offset + label.length
+      htmlCursor = anchors.lastIndex
+      textCursor = offset + label.length
     }
   }
 
   // Older/plain Matrix clients may include only m.mentions + literal MXIDs.
   for (const id of mentioned) {
-    if (linked.has(id)) continue
     let cursor = 0
     while (cursor < body.length) {
       const offset = body.indexOf(id, cursor)
@@ -98,6 +100,10 @@ export function matrixTextEntities(content: MatrixRoomMessageContent): IMTextEnt
     }
   }
   return entities.length ? entities.sort((a, b) => a.offset - b.offset) : undefined
+}
+
+function htmlPlainText(html: string): string {
+  return decodeHtml(html.replace(/<br\s*\/?>/giu, '\n').replace(/<[^>]*>/gu, ''))
 }
 
 function isMatrixUserId(id: string): boolean {
