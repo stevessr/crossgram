@@ -198,6 +198,135 @@ describe('MatrixPlatform', () => {
     })
   })
 
+  it('shows Matrix invites in the request inbox, paginates them, and accepts or rejects rooms', async () => {
+    const actions: Array<{ path: string, method: string }> = []
+    const invite = (roomId: string, inviter: string, title: string) => ({
+      invite_state: { events: [
+        event('m.room.name', { name: title }, { stateKey: '' }),
+        event('m.room.avatar', { url: 'mxc://example.org/invite-avatar' }, { stateKey: '' }),
+        event('m.room.member', { membership: 'join', displayname: 'Inviter' }, {
+          stateKey: inviter, sender: inviter,
+        }),
+        event('m.room.member', { membership: 'invite', reason: 'Welcome!' }, {
+          id: `$invite-${title}`, stateKey: '@me:example.org', sender: inviter, ts: 123_000,
+        }),
+      ] },
+    })
+    const fetch = routeFetch((url, init) => {
+      if (url.pathname.endsWith('/sync')) return json({
+        next_batch: 'initial',
+        rooms: { invite: {
+          '!alpha:example.org': invite('!alpha:example.org', '@alice:example.org', 'Alpha'),
+          '!beta:example.org': invite('!beta:example.org', '@bob:example.org', 'Beta'),
+        } },
+      } satisfies MatrixSyncResponse)
+      if (/\\/(join|leave)$/.test(url.pathname)) {
+        actions.push({ path: url.pathname, method: init?.method ?? 'GET' })
+        return json({})
+      }
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+    const first = await platform.getRequests(session, { kind: 'group-join', limit: 1 })
+    expect(first.requests).toHaveLength(1)
+    expect(first.nextCursor).toBe('1')
+    const second = await platform.getRequests(session, { kind: 'group-join', limit: 1, cursor: first.nextCursor })
+    expect(second.requests).toHaveLength(1)
+    expect(second.nextCursor).toBeUndefined()
+    expect(await platform.getRequests(session, { kind: 'friend' })).toEqual({ requests: [] })
+    await expect(platform.getRequests(session, { cursor: '-1' })).rejects.toThrow(/invalid Matrix request cursor/)
+    const requests = [...first.requests, ...second.requests]
+    expect(requests.map((request) => request.group?.title)).toEqual(['Alpha', 'Beta'])
+    expect(requests[0]).toMatchObject({
+      kind: 'group-join', state: 'pending',
+      requester: { id: '@alice:example.org', firstName: 'Inviter' },
+      group: {
+        id: '!alpha:example.org', kind: 'group',
+        avatar: { locator: { mxc: 'mxc://example.org/invite-avatar' } },
+      },
+      message: 'Welcome!', createdAt: 123_000,
+      metadata: { matrixRoomInvite: true, matrixRoomId: '!alpha:example.org' },
+    })
+    expect((await platform.getDialogs(session)).total).toBe(0)
+    const accepted = await platform.resolveRequest(session, requests[0]!.id, 'accept')
+    const rejected = await platform.resolveRequest(session, requests[1]!.id, 'reject')
+    expect(accepted.state).toBe('accepted')
+    expect(rejected.state).toBe('rejected')
+    expect(actions).toEqual([
+      { path: '/_matrix/client/v3/rooms/!alpha%3Aexample.org/join', method: 'POST' },
+      { path: '/_matrix/client/v3/rooms/!beta%3Aexample.org/leave', method: 'POST' },
+    ])
+    await expect(platform.resolveRequest(session, requests[0]!.id, 'accept'))
+      .rejects.toThrow(/no longer pending/)
+  })
+
+  it('keeps an invitation pending when an accept operation fails', async () => {
+    let attempts = 0
+    const fetch = routeFetch((url) => {
+      if (url.pathname.endsWith('/sync')) return json({
+        next_batch: 's1', rooms: { invite: { '!room:example.org': { invite_state: { events: [
+          event('m.room.member', { membership: 'invite' }, {
+            stateKey: '@me:example.org', sender: '@alice:example.org',
+          }),
+        ] } } } },
+      })
+      if (url.pathname.endsWith('/join')) {
+        attempts++
+        return json({ errcode: 'M_FORBIDDEN', error: 'not allowed' }, { status: 403 })
+      }
+      if (url.pathname.endsWith('/leave')) return json({})
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+    const { requests: [request] } = await platform.getRequests(session)
+    await expect(platform.resolveRequest(session, request!.id, 'accept')).rejects.toThrow('not allowed')
+    await expect(platform.resolveRequest(session, request!.id, 'accept')).rejects.toThrow('not allowed')
+    expect(attempts).toBe(2)
+    await expect(platform.resolveRequest(session, request!.id, 'reject'))
+      .resolves.toMatchObject({ state: 'rejected' })
+  })
+
+  it('emits new invites and resolves remotely joined or withdrawn invites', async () => {
+    let sync = 0
+    const membership = (roomId: string, sender: string) => ({
+      [roomId]: { invite_state: { events: [
+        event('m.room.name', { name: 'Invitation' }, { stateKey: '' }),
+        event('m.room.member', { membership: 'invite' }, {
+          stateKey: '@me:example.org', sender, id: `$invite-${roomId}`,
+        }),
+      ] } },
+    })
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      const url = new URL(String(input))
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      sync++
+      if (sync === 1) return json({
+        next_batch: 's0', rooms: { invite: membership('!old:example.org', '@alice:example.org') },
+      })
+      if (sync === 2) return json({
+        next_batch: 's1', rooms: { invite: membership('!new:example.org', '@bob:example.org') },
+      })
+      if (sync === 3) return json({
+        next_batch: 's2', rooms: { join: { '!old:example.org': {} }, leave: { '!new:example.org': {} } },
+      })
+      return pendingUntilAbort(init?.signal)
+    })
+    const platform = createPlatform(fetch, { syncTimeoutMs: 50, userId: '@me:example.org' })
+    const requests: Array<{ state: string, roomId?: string }> = []
+    const unsubscribe = await platform.subscribe(session, (value) => {
+      if (value.type === 'request') {
+        requests.push({ state: value.request.state, roomId: value.request.group?.id })
+      }
+    })
+    await vi.waitFor(() => expect(requests).toHaveLength(3))
+    await unsubscribe()
+    expect(requests).toEqual([
+      { state: 'pending', roomId: '!new:example.org' },
+      { state: 'accepted', roomId: '!old:example.org' },
+      { state: 'rejected', roomId: '!new:example.org' },
+    ])
+  })
+
   it('subscribes from an initial token and emits messages, edits, redactions, receipts, and conversation changes', async () => {
     let sync = 0
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
