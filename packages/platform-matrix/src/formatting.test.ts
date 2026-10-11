@@ -60,6 +60,43 @@ describe('Matrix mention formatting', () => {
     } })).toEqual(['@alice:example.org'])
   })
 
+  it('uses HTML position rather than a repeated visible label to restore mention offsets', () => {
+    const body = '@Alice said hello to @Alice'
+    expect(matrixTextEntities({
+      msgtype: 'm.text', body,
+      format: 'org.matrix.custom.html',
+      formatted_body: '@Alice said hello to <a href="https://matrix.to/#/%40alice%3Aexample.org">@Alice</a>',
+      'm.mentions': { user_ids: ['@alice:example.org'] },
+    })).toEqual([{
+      type: 'mention', offset: body.lastIndexOf('@Alice'), length: 6, userId: '@alice:example.org',
+    }])
+  })
+
+  it('preserves offsets across HTML escapes and ordinary formatting markup', () => {
+    const body = 'A & B @Alice'
+    expect(matrixTextEntities({
+      msgtype: 'm.text', body,
+      format: 'org.matrix.custom.html',
+      formatted_body: '<strong>A &amp; B</strong> <a href="https://matrix.to/#/%40alice%3Aexample.org">@Alice</a>',
+      'm.mentions': { user_ids: ['@alice:example.org'] },
+    })).toEqual([{
+      type: 'mention', offset: body.indexOf('@Alice'), length: 6, userId: '@alice:example.org',
+    }])
+  })
+
+  it('still finds additional literal Matrix user IDs after a rich user link', () => {
+    const body = '@Alice and @alice:example.org'
+    expect(matrixTextEntities({
+      msgtype: 'm.text', body,
+      format: 'org.matrix.custom.html',
+      formatted_body: '<a href="https://matrix.to/#/%40alice%3Aexample.org">@Alice</a> and @alice:example.org',
+      'm.mentions': { user_ids: ['@alice:example.org'] },
+    })).toEqual([
+      { type: 'mention', offset: 0, length: 6, userId: '@alice:example.org' },
+      { type: 'mention', offset: body.indexOf('@alice:example.org'), length: '@alice:example.org'.length, userId: '@alice:example.org' },
+    ])
+  })
+
   it('does not infer notifications from unannotated plain @words or untrusted HTML links', () => {
     expect(matrixTextEntities({ msgtype: 'm.text', body: '@alice:example.org' })).toBeUndefined()
     expect(matrixTextEntities({
