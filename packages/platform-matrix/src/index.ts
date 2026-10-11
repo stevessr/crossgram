@@ -10,6 +10,7 @@ import type {
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { MatrixClient, type MatrixClientOptions } from './client.js'
+import { countClosedMatrixPoll, type MatrixPollTally } from './poll-results.js'
 import type {
   MatrixDirectAccountData, MatrixEvent, MatrixJoinedRoom, MatrixMediaLocator, MatrixRoomMemberContent,
   MatrixRoomMessageContent, MatrixSyncResponse,
@@ -82,6 +83,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   private readonly directRoomIds = new Set<string>()
   /** Poll closures observed in sync/history, scoped to the room to avoid cross-room event collisions. */
   private readonly closedPolls = new Set<string>()
+  private readonly pollTallies = new Map<string, MatrixPollTally>()
 
   constructor(config: Config, logger?: MatrixLogger) {
     this.client = new MatrixClient(config satisfies MatrixClientOptions)
@@ -185,6 +187,15 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     })
     this.ingestState(conversation.id, response.state ?? [])
     this.ingestPollClosures(conversation.id, response.chunk)
+    // Only a few closed polls per page are expanded; never fetch relations
+    // for every message in a long history request.
+    await Promise.all(response.chunk.filter((event) => isMatrixPollStart(event.type)
+      && event.event_id && this.closedPolls.has(`${conversation.id}\0${event.event_id}`))
+      .slice(0, 3).map(async (event) => {
+        const pollPart = matrixPollParts(event.content).find((part) => part.type === 'poll')
+        if (pollPart?.type !== 'poll') return
+        await this.loadPollTally(conversation.id, event.event_id!, pollPart.poll).catch(() => undefined)
+      }))
     return {
       messages: response.chunk.flatMap((event) => {
         const message = this.mapTimelineMessage(conversation.id, event)
@@ -327,6 +338,40 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
           : { 'm.selections': [option.id], 'm.poll.response': { answers: [option.id] } }),
       })
     return { message: '投票已提交，可再次选择修改投票' }
+  }
+
+  /** Collect every relation page before publishing counts: a partial page is misleading. */
+  private async loadPollTally(
+    roomId: string,
+    pollId: string,
+    poll: import('@mtproto-relay/bridge').IMMessagePoll,
+  ): Promise<void> {
+    const key = `${roomId}\0${pollId}`
+    const relations: MatrixEvent[] = []
+    const seen = new Set<string>()
+    let from: string | undefined
+    let exhausted = false
+    for (let page = 0; page < 100; page++) {
+      const response = await this.client.getRelations(roomId, pollId, { from, limit: 100 })
+      if (!Array.isArray(response.chunk)) return
+      relations.push(...response.chunk)
+      if (!response.next_batch) {
+        exhausted = true
+        break
+      }
+      if (seen.has(response.next_batch)) break
+      seen.add(response.next_batch)
+      from = response.next_batch
+    }
+    if (!exhausted) return
+    const tally = countClosedMatrixPoll(pollId, poll, relations)
+    if (!tally) return
+    this.pollTallies.delete(key)
+    this.pollTallies.set(key, tally)
+    if (this.pollTallies.size > 2_000) {
+      const oldest = this.pollTallies.keys().next().value
+      if (oldest !== undefined) this.pollTallies.delete(oldest)
+    }
   }
 
   private rememberPollClosure(key: string): void {
@@ -493,9 +538,16 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
           // Refresh the parent poll so Telegram removes its voting keyboard.
           // A missing/redacted parent must not block the Matrix sync loop.
           const original = await this.client.getEvent(roomId, relation.event_id).catch(() => undefined)
+          const pollPart = original && matrixPollParts(original.content).find((part) => part.type === 'poll')
+          if (pollPart?.type === 'poll') {
+            await this.loadPollTally(roomId, relation.event_id, pollPart.poll).catch(() => undefined)
+          }
           const closed = original && this.mapTimelineMessage(roomId, original)
           if (closed?.content.parts.some((part) => part.type === 'poll')) {
-            await handler({ type: 'message-edit', eventId: event.event_id, conversation, message: closed })
+            await handler({
+              type: 'message-edit', eventId: `matrix-poll-end:${event.event_id}`,
+              conversation, message: closed,
+            })
           }
         }
       }
@@ -599,6 +651,14 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         : matrixMessageParts(content)
     if (!parts.length) return
     const messageId = relation?.rel_type === 'm.replace' && relation.event_id ? relation.event_id : event.event_id
+    const pollKey = `${roomId}\0${messageId}`
+    if (pollStart && parts[0]?.type === 'poll' && this.closedPolls.has(pollKey)) {
+      const tally = this.pollTallies.get(pollKey)
+      parts[0] = { type: 'poll', poll: {
+        ...parts[0].poll, closed: true,
+        ...(tally ? { counts: { ...tally.counts }, totalVoters: tally.totalVoters } : {}),
+      } }
+    }
     return {
       id: messageId,
       sourceIds: [messageId],
