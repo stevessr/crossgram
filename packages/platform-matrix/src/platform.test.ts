@@ -495,6 +495,43 @@ describe('MatrixPlatform', () => {
     })
   })
 
+  it('promotes a joined child back to a root when its parent Space is left', async () => {
+    const space = '!space:example.org'
+    const child = '!child:example.org'
+    let incremental = 0
+    const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
+      const url = new URL(String(input))
+      if (!url.pathname.endsWith('/sync')) throw new Error(`unexpected request: ${url}`)
+      if (!url.searchParams.has('since')) {
+        const initial = incremental === 0
+        return json({ next_batch: 's0', rooms: { join: {
+          ...(initial ? { [space]: { state: { events: [
+            event('m.room.create', { type: 'm.space' }, { stateKey: '' }),
+            event('m.space.child', { via: ['example.org'] }, { stateKey: child }),
+          ] } } } : {}),
+          [child]: { state: { events: [event('m.room.create', {}, { stateKey: '' })] } },
+        } } })
+      }
+      if (++incremental === 1) return json({
+        next_batch: 's1', rooms: { leave: { [space]: {} } },
+      })
+      return pendingUntilAbort(init?.signal)
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org', syncTimeoutMs: 50 })
+    const events: IMEvent[] = []
+    const unsubscribe = await platform.subscribe(session, (value) => { events.push(value) })
+    await vi.waitFor(() => expect(events.some((value) =>
+      value.type === 'conversation' && value.conversation.id === child)).toBe(true))
+    await unsubscribe()
+
+    expect(events).toMatchObject([{
+      type: 'conversation', conversation: { id: child, kind: 'group', parentId: undefined },
+    }])
+    const roots = await platform.getDialogs(session)
+    expect(roots.dialogs.map((dialog) => dialog.conversation.id)).toEqual([child])
+    expect((await platform.getSubdialogs(session, { id: space })).total).toBe(0)
+  })
+
   it('updates child metadata after a Space relationship is removed in incremental sync', async () => {
     const space = '!space:example.org'
     const child = '!child:example.org'
