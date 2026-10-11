@@ -219,28 +219,33 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   /** A full-state snapshot resolves parents before mapping any individual room. */
   private async fetchJoinedDialogs(): Promise<IMDialog<MatrixMediaLocator>[]> {
     await this.getAccountUserId()
-    const revision = this.dialogsRevision
-    let response = await this.client.sync({ timeout: 0, fullState: true })
-    // A streaming sync may have changed membership or parent links during
-    // the fetch. Retry once rather than replace newer state with old state.
-    if (revision !== this.dialogsRevision) {
-      response = await this.client.sync({ timeout: 0, fullState: true })
+    // Do not replace newer /sync state with a response that was issued before
+    // another device/event changed membership or a Space child relationship.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const revision = this.dialogsRevision
+      const response = await this.client.sync({ timeout: 0, fullState: true })
+      if (revision !== this.dialogsRevision) continue
+      this.ingestAccountData(response)
+      this.refreshJoinedRoomState(response.rooms?.join ?? {}, true)
+      const dialogs: IMDialog<MatrixMediaLocator>[] = []
+      for (const [roomId, room] of Object.entries(response.rooms?.join ?? {})) {
+        const conversation = this.updateConversation(roomId, room)
+        const lastMessage = [...(room.timeline?.events ?? [])].reverse()
+          .map((event) => this.mapTimelineMessage(roomId, event))
+          .find((message): message is IMMessage<MatrixMediaLocator> => Boolean(message))
+        dialogs.push({
+          conversation,
+          unreadCount: room.unread_notifications?.notification_count ?? 0,
+          lastMessage,
+        })
+      }
+      return dialogs
     }
-    this.ingestAccountData(response)
-    this.refreshJoinedRoomState(response.rooms?.join ?? {}, true)
-    const dialogs: IMDialog<MatrixMediaLocator>[] = []
-    for (const [roomId, room] of Object.entries(response.rooms?.join ?? {})) {
-      const conversation = this.updateConversation(roomId, room)
-      const lastMessage = [...(room.timeline?.events ?? [])].reverse()
-        .map((event) => this.mapTimelineMessage(roomId, event))
-        .find((message): message is IMMessage<MatrixMediaLocator> => Boolean(message))
-      dialogs.push({
-        conversation,
-        unreadCount: room.unread_notifications?.notification_count ?? 0,
-        lastMessage,
-      })
-    }
-    return dialogs
+    // Continuous incremental updates can outpace a full-state fetch. Preserve
+    // current live conversations instead of overwriting them with old state.
+    return [...this.conversations.values()]
+      .filter((conversation) => this.joinedRoomIds.has(conversation.id))
+      .map((conversation) => ({ conversation, unreadCount: 0 }))
   }
 
   private invalidateDialogsSnapshot(): void {
@@ -466,7 +471,11 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     userId: string,
     handler: (event: IMEvent<MatrixMediaLocator>) => void | Promise<void>,
   ): Promise<void> {
-    this.invalidateDialogsSnapshot()
+    if (Object.keys(response.rooms?.join ?? {}).length
+      || Object.keys(response.rooms?.leave ?? {}).length
+      || (response.account_data?.events?.length ?? 0) > 0) {
+      this.invalidateDialogsSnapshot()
+    }
     this.ingestAccountData(response)
     const previous = new Map(this.conversations)
     for (const roomId of Object.keys(response.rooms?.leave ?? {})) {
