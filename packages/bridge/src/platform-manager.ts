@@ -297,6 +297,7 @@ export class PlatformSubscriptionManager {
   }
 
   private async _reconcileSession(platform: IMPlatform, session: PlatformSession): Promise<void> {
+    const authoritativeJoinedRoomIds = new Set<string>()
     if (platform.capabilities.history && platform.getDialogs) {
       const data = new PlatformDataService(
         platform, session, this._store, this._onTrace, undefined,
@@ -307,6 +308,13 @@ export class PlatformSubscriptionManager {
       while (!visited.has(afterId)) {
         visited.add(afterId)
         const page = await data.getDialogsPage({ limit: 500, afterId })
+        if (platform.platformKind === 'matrix') {
+          for (const dialog of page.dialogs) {
+            if (dialog.conversation.metadata?.matrixRoomId === dialog.conversation.id) {
+              authoritativeJoinedRoomIds.add(dialog.conversation.id)
+            }
+          }
+        }
         if (!page.dialogs.length) break
         const lastId = page.dialogs.at(-1)!.conversation.id
         const hasMore = Boolean(page.nextCursor)
@@ -317,6 +325,8 @@ export class PlatformSubscriptionManager {
       }
     }
     if (!platform.getRequests) return
+    // All cursor pages must be collected before comparing against durable state.
+    const currentRequestIds = new Set<string>()
     let cursor: string | undefined
     const visitedCursors = new Set<string | undefined>()
     while (!visitedCursors.has(cursor)) {
@@ -326,10 +336,28 @@ export class PlatformSubscriptionManager {
       // no-op, while a later duplicate can carry its terminal state and must
       // edit the pending inbox projection rather than being discarded.
       for (const request of page.requests) {
+        currentRequestIds.add(request.id)
         await this._enqueue(session, { type: 'request', request })
       }
       if (!page.nextCursor || page.nextCursor === cursor) break
       cursor = page.nextCursor
+    }
+    // Matrix /sync only lists *currently* invited rooms. A bridge restart can
+    // miss a join, decline or revoke transition while preserving an old pending
+    // inbox row. Reconcile only Matrix invites, not other platform request kinds.
+    if (platform.platformKind === 'matrix') {
+      const pending = await this._store.listPendingRequests(session.platformSessionId)
+      for (const request of pending) {
+        if (request.metadata?.matrixRoomInvite !== true || currentRequestIds.has(request.id)) continue
+        const roomId = request.group?.id
+        await this._enqueue(session, {
+          type: 'request',
+          request: {
+            ...request,
+            state: roomId && authoritativeJoinedRoomIds.has(roomId) ? 'accepted' : 'rejected',
+          },
+        })
+      }
     }
   }
 
