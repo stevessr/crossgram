@@ -218,8 +218,13 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         })
         this.pendingInvites.delete(roomId)
       }
-      for (const roomId of this.locallyResolvedInvites.keys()) {
-        if (!seen.has(roomId)) this.locallyResolvedInvites.delete(roomId)
+      for (const [roomId, resolved] of this.locallyResolvedInvites) {
+        if (seen.has(roomId)) continue
+        // Reconcile the terminal state once even if an out-of-band /sync
+        // snapshot has already removed the invite. The bridge may not have
+        // persisted the preceding inline button callback yet.
+        requests.push(resolved)
+        this.locallyResolvedInvites.delete(roomId)
       }
       requests.sort((a, b) =>
         Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0) || a.id.localeCompare(b.id))
