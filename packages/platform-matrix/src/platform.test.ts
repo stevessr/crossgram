@@ -48,6 +48,66 @@ describe('MatrixPlatform', () => {
     await platform.stop()
   })
 
+  it('fails closed for encrypted rooms before media upload, text, edit, reaction and poll writes', async () => {
+    const paths: string[] = []
+    let streamed = false
+    const encrypted = event('m.room.encryption', { algorithm: 'm.megolm.v1.aes-sha2' }, { stateKey: '' })
+    const fetch = routeFetch((url) => {
+      paths.push(url.pathname)
+      if (url.pathname.endsWith('/sync')) return json({
+        next_batch: 'stale', rooms: { join: { '!room:example.org': { state: { events: [] } } },
+        },
+      })
+      throw new Error('unexpected request: ' + url)
+    }, () => json([encrypted]))
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+    // The last /sync snapshot was unencrypted, but the live room state has changed.
+    await platform.getDialogs(session)
+    const conversation = { id: '!room:example.org' }
+    const encryptedError = /end-to-end encrypted/
+    await expect(platform.sendMessage(session, conversation, {
+      parts: [{ type: 'text', text: 'secret' }],
+    })).rejects.toThrow(encryptedError)
+    await expect(platform.sendMessage(session, conversation, {
+      parts: [{ type: 'media', media: {
+        kind: 'file', name: 'secret.txt', mimeType: 'text/plain', size: 1,
+        source: { size: 1, async *stream() { streamed = true; yield new Uint8Array([1]) } },
+      } }],
+    })).rejects.toThrow(encryptedError)
+    await expect(platform.editMessage(session, {
+      conversationId: conversation.id, messageId: '$old', targetId: '$old',
+    }, { parts: [{ type: 'text', text: 'replacement' }] })).rejects.toThrow(encryptedError)
+    await expect(platform.setMessageReactions(session, {
+      conversationId: conversation.id, messageId: '$old', targetId: '$old',
+    }, ['👍'])).rejects.toThrow(encryptedError)
+    await expect(platform.clickInlineButton(session, {
+      conversationId: conversation.id, messageId: '$poll',
+    }, { type: 'callback', text: 'Vote', data: 'matrix-poll-vote:0' })).rejects.toThrow(encryptedError)
+    expect(streamed).toBe(false)
+    expect(paths).toEqual(['/_matrix/client/v3/sync'])
+  })
+
+  it('does not downgrade to plaintext when room-state verification fails or is malformed', async () => {
+    const attempts: string[] = []
+    let response: Response = json({ errcode: 'M_UNAVAILABLE' }, { status: 503 })
+    const fetch = routeFetch((url) => {
+      attempts.push(url.pathname)
+      if (url.pathname.includes('/send/')) return json({ event_id: '$sent' })
+      throw new Error('unexpected request: ' + url)
+    }, () => response)
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+    const send = () => platform.sendMessage(session, { id: '!room:example.org' }, {
+      parts: [{ type: 'text', text: 'normal room message' }],
+    })
+    await expect(send()).rejects.toThrow(/Cannot verify Matrix room encryption state/)
+    response = json({ malformed: true })
+    await expect(send()).rejects.toThrow(/Cannot verify Matrix room encryption state/)
+    expect(attempts).toEqual([])
+    response = json([])
+    await expect(send()).resolves.toMatchObject({ sourceIds: ['$sent'] })
+    expect(attempts).toEqual([expect.stringContaining('/send/')])
+  })
+
   it('maps account profiles, direct rooms, state, unread counts, and media timelines', async () => {
     const fetch = routeFetch((url) => {
       if (url.pathname.endsWith('/account/whoami')) return json({ user_id: '@me:example.org' })
@@ -1037,8 +1097,13 @@ function json(value: unknown, init?: ResponseInit): Response {
 
 function routeFetch(
   handler: (url: URL, init?: RequestInit) => Response | Promise<Response>,
+  roomState: (url: URL, init?: RequestInit) => Response | Promise<Response> = () => json([]),
 ): typeof globalThis.fetch {
-  return async (input, init) => handler(new URL(String(input)), init)
+  return async (input, init) => {
+    const url = new URL(String(input))
+    if (url.pathname.endsWith('/state')) return roomState(url, init)
+    return handler(url, init)
+  }
 }
 
 function pendingUntilAbort(signal?: AbortSignal | null): Promise<Response> {
