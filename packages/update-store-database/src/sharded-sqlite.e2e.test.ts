@@ -168,7 +168,7 @@ describe('account-sharded SQLite delivery store', () => {
     const dir = await mkdtemp(join(tmpdir(), 'crossgram-shards-idle-'))
     cleanups.push(() => rm(dir, { recursive: true, force: true }))
     const directory = join(dir, 'shards')
-    const { updates } = await start(join(dir, 'main.db'), {
+    const { updates, stop } = await start(join(dir, 'main.db'), {
       enabled: true, directory, batchWindowMs: 10,
     })
     expect(await updates.getPending('offline-account')).toEqual([])
@@ -179,6 +179,10 @@ describe('account-sharded SQLite delivery store', () => {
     expect(await readdir(directory)).toEqual([])
     await updates.create(record('online:1', 'online-account', 1))
     expect((await readdir(directory)).filter((name) => name.endsWith('.db'))).toHaveLength(1)
+    await stop()
+    cleanups.pop()
+    await expect(updates.create(record('after-stop', 'online-account', 2)))
+      .rejects.toThrow(/closed/)
   })
 
   it('applies page-cache budgets individually to hot and cold adapter accounts', async () => {
