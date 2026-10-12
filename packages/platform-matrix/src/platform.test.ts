@@ -461,34 +461,22 @@ describe('MatrixPlatform', () => {
     })
     const platform = createPlatform(fetch, { userId: '@me:example.org' })
 
-    expect(platform.capabilities.conversations.subchannels).toBe(true)
+    expect(platform.capabilities.conversations.subchannels).toBe(false)
     const roots = await platform.getDialogs(session)
-    expect(roots.total).toBe(2)
-    expect(roots.dialogs.map((dialog) => dialog.conversation.id)).toEqual([space, standalone])
-    expect(roots.dialogs[0]?.conversation).toMatchObject({
-      kind: 'channel', spaceId: space,
-      metadata: { matrixSpace: true, hasSubchannels: true },
+    expect(roots.total).toBe(3)
+    expect(roots.dialogs.map((dialog) => dialog.conversation.id))
+      .toEqual([general, leaf, standalone])
+    expect(roots.dialogs[0]).toMatchObject({
+      unreadCount: 2, conversation: { id: general, kind: 'group', title: 'General' },
     })
-
-    const first = await platform.getSubdialogs(session, { id: space }, { limit: 1 })
-    expect(first).toMatchObject({ total: 2, nextCursor: '1' })
-    expect(first.dialogs[0]).toMatchObject({
-      unreadCount: 2, conversation: {
-        id: general, kind: 'channel', parentId: space, spaceId: space,
-      },
-    })
-    const second = await platform.getSubdialogs(session, { id: space }, { afterId: general, limit: 10 })
-    expect(second.dialogs.map((dialog) => dialog.conversation.id)).toEqual([nested])
-    expect(second.dialogs[0]?.conversation.metadata).toMatchObject({
-      matrixSpace: true, hasSubchannels: true,
-    })
-    const nestedPage = await platform.getSubdialogs(session, { id: nested })
-    expect(nestedPage.dialogs[0]?.conversation).toMatchObject({
-      id: leaf, kind: 'channel', parentId: nested, spaceId: space,
-    })
-    expect((await platform.getSubdialogs(session, { id: general })).total).toBe(0)
+    expect(roots.dialogs[0]!.conversation.parentId).toBeUndefined()
+    expect(await platform.getChatFolders(session)).toEqual([
+      { id: nested, title: 'Nested', conversationIds: [leaf] },
+      { id: space, title: 'Workspace', conversationIds: [general, leaf] },
+    ])
+    await expect(platform.getConversation(session, space)).resolves.toBeNull()
     await expect(platform.getConversation(session, leaf)).resolves.toMatchObject({
-      id: leaf, kind: 'channel', parentId: nested, spaceId: space,
+      id: leaf, kind: 'group', parentId: undefined,
     })
     await expect(platform.getConversation(session, '!not-joined:example.org')).resolves.toBeNull()
   })
@@ -501,18 +489,18 @@ describe('MatrixPlatform', () => {
     internal.refreshJoinedRoomState({ [room]: { state: { events: [
       event('m.room.create', { type: 'm.space' }, { stateKey: '' }),
     ] } }, [child]: { state: { events: [] } } }, true)
-    const existingParents = internal.spaceParents
-    const existingChildren = internal.spaceChildren
+    const existingFolders = internal.spaceFolders
     internal.refreshJoinedRoomState({ [room]: { timeline: { events: [
       event('m.room.message', { body: 'hello' }),
     ] } } }, false)
-    expect(internal.spaceParents).toBe(existingParents)
-    expect(internal.spaceChildren).toBe(existingChildren)
+    expect(internal.spaceFolders).toBe(existingFolders)
     internal.refreshJoinedRoomState({ [room]: { state: { events: [
       event('m.space.child', { via: ['example.org'] }, { stateKey: child }),
     ] } } }, false)
-    expect(internal.spaceParents).not.toBe(existingParents)
-    expect(internal.spaceParents.get(child)).toBe(room)
+    expect(internal.spaceFolders).not.toBe(existingFolders)
+    expect(internal.spaceFolders).toEqual([{
+      id: room, title: room, conversationIds: [child],
+    }])
   })
 
   it('shares one full-state request across concurrent Space and dialog reads', async () => {
@@ -534,13 +522,13 @@ describe('MatrixPlatform', () => {
       })
     })
     const platform = createPlatform(fetch, { userId: '@me:example.org' })
-    const [roots, children] = await Promise.all([
-      platform.getDialogs(session), platform.getSubdialogs(session, { id: space }),
+    const [roots, folders] = await Promise.all([
+      platform.getDialogs(session), platform.getChatFolders(session),
     ])
-    expect(roots.dialogs.map((dialog) => dialog.conversation.id)).toEqual([space])
-    expect(children.dialogs.map((dialog) => dialog.conversation.id)).toEqual([child])
+    expect(roots.dialogs.map((dialog) => dialog.conversation.id)).toEqual([child])
+    expect(folders).toEqual([{ id: space, title: space, conversationIds: [child] }])
     expect(reads).toBe(1)
-    await platform.getSubdialogs(session, { id: space }, { cursor: '0', limit: 1 })
+    await platform.getChatFolders(session)
     expect(reads).toBe(1)
   })
 
@@ -576,15 +564,17 @@ describe('MatrixPlatform', () => {
     releaseStale!(json(stale))
     const result = await pending
     await unsubscribe()
-    expect(result.dialogs.map((dialog) => dialog.conversation.id)).toEqual(['!space:example.org'])
-    expect((await platform.getSubdialogs(session, { id: '!space:example.org' }))
-      .dialogs.map((dialog) => dialog.conversation.id)).toEqual(['!child:example.org'])
-    // A subsequent subdialog read may require a fresh snapshot after an
+    expect(result.dialogs.map((dialog) => dialog.conversation.id)).toEqual(['!child:example.org'])
+    expect(await platform.getChatFolders(session)).toEqual([{
+      id: '!space:example.org', title: '!space:example.org',
+      conversationIds: ['!child:example.org'],
+    }])
+    // A subsequent folder read may require a fresh snapshot after an
     // incremental invalidation; only correctness, not an exact count, matters.
     expect(fullReads).toBeGreaterThanOrEqual(3)
   })
 
-  it('emits child parent changes even when the child has a timeline in the same sync batch', async () => {
+  it('updates folders without changing a room peer when a Space link and message arrive together', async () => {
     const space = '!space:example.org'
     const child = '!child:example.org'
     let sync = 0
@@ -614,25 +604,21 @@ describe('MatrixPlatform', () => {
     const platform = createPlatform(fetch, { userId: '@me:example.org', syncTimeoutMs: 50 })
     const events: IMEvent[] = []
     const unsubscribe = await platform.subscribe(session, (value) => { events.push(value) })
-    await vi.waitFor(() => expect(events.filter((value) =>
-      value.type === 'conversation' && value.conversation.id === child)).toHaveLength(1))
+    await vi.waitFor(() => expect(events.some((value) => value.type === 'message')).toBe(true))
     await unsubscribe()
 
-    expect(events.map((value) => value.type)).toEqual([
-      'conversation', 'conversation', 'message',
-    ])
-    expect(events[1]).toMatchObject({
-      type: 'conversation', conversation: {
-        id: child, kind: 'channel', parentId: space, spaceId: space,
-      },
-    })
-    expect(events[2]).toMatchObject({
-      type: 'message', conversation: { id: child, parentId: space },
+    // Space membership changes the folder only, not the room's chat identity.
+    expect(events.map((value) => value.type)).toEqual(['message'])
+    expect(events[0]).toMatchObject({
+      type: 'message', conversation: { id: child, kind: 'group' },
       message: { id: '$child-message' },
     })
+    expect((platform as any).spaceFolders).toEqual([{
+      id: space, title: space, conversationIds: [child],
+    }])
   })
 
-  it('promotes a joined child back to a root when its parent Space is left', async () => {
+  it('removes the folder but preserves its chat when a Space is left', async () => {
     const space = '!space:example.org'
     const child = '!child:example.org'
     let incremental = 0
@@ -657,19 +643,16 @@ describe('MatrixPlatform', () => {
     const platform = createPlatform(fetch, { userId: '@me:example.org', syncTimeoutMs: 50 })
     const events: IMEvent[] = []
     const unsubscribe = await platform.subscribe(session, (value) => { events.push(value) })
-    await vi.waitFor(() => expect(events.some((value) =>
-      value.type === 'conversation' && value.conversation.id === child)).toBe(true))
+    await vi.waitFor(() => expect((platform as any).joinedRoomIds.has(space)).toBe(false))
     await unsubscribe()
 
-    expect(events).toMatchObject([{
-      type: 'conversation', conversation: { id: child, kind: 'group', parentId: undefined },
-    }])
+    expect(events).toEqual([])
     const roots = await platform.getDialogs(session)
     expect(roots.dialogs.map((dialog) => dialog.conversation.id)).toEqual([child])
-    expect((await platform.getSubdialogs(session, { id: space })).total).toBe(0)
+    expect(await platform.getChatFolders(session)).toEqual([])
   })
 
-  it('keeps pin events and Space hierarchy updates together in one incremental sync', async () => {
+  it('keeps room pin updates when Space membership changes in the same sync', async () => {
     const space = '!space:example.org'
     const child = '!child:example.org'
     let sync = 0
@@ -680,13 +663,17 @@ describe('MatrixPlatform', () => {
         [space]: { state: { events: [
           event('m.room.create', { type: 'm.space' }, { stateKey: '' }),
           event('m.space.child', { via: ['example.org'] }, { stateKey: child }),
+        ] } },
+        [child]: { state: { events: [
+          event('m.room.create', {}, { stateKey: '' }),
           event('m.room.pinned_events', { pinned: ['$first'] }, { stateKey: '', id: '$original' }),
         ] } },
-        [child]: { state: { events: [event('m.room.create', {}, { stateKey: '' })] } },
       } } })
       if (sync === 2) return json({ next_batch: 'after', rooms: { join: {
         [space]: { state: { events: [
           event('m.space.child', {}, { stateKey: child }),
+        ] } },
+        [child]: { state: { events: [
           event('m.room.pinned_events', { pinned: ['$first', '$second'] }, { stateKey: '', id: '$updated' }),
         ] } },
       } } })
@@ -697,29 +684,21 @@ describe('MatrixPlatform', () => {
     const unsubscribe = await platform.subscribe(session, (value) => { observed.push(value) })
     await vi.waitFor(() => {
       expect(observed.some((value) => value.type === 'message-pins')).toBe(true)
-      expect(observed.some((value) =>
-        value.type === 'conversation' && value.conversation.id === child)).toBe(true)
+      expect((platform as any).spaceFolders).toEqual([{
+        id: space, title: space, conversationIds: [],
+      }])
     })
     await unsubscribe()
-    expect(observed).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        type: 'message-pins', eventId: '$updated',
-        pinnedMessageIds: ['$first', '$second'], removedMessageIds: [],
-      }),
-      expect.objectContaining({
-        type: 'conversation', conversation: expect.objectContaining({
-          id: space, metadata: expect.objectContaining({ hasSubchannels: false }),
-        }),
-      }),
-      expect.objectContaining({
-        type: 'conversation', conversation: expect.objectContaining({
-          id: child, kind: 'group', parentId: undefined,
-        }),
-      }),
-    ]))
+    expect(observed).toEqual(expect.arrayContaining([expect.objectContaining({
+      type: 'message-pins', eventId: '$updated',
+      conversation: expect.objectContaining({ id: child, kind: 'group' }),
+      pinnedMessageIds: ['$first', '$second'], removedMessageIds: [],
+    })]))
+    expect(observed.every((value) => value.type === 'conversation' || value.type === 'message-pins'))
+      .toBe(true)
   })
 
-  it('updates child metadata after a Space relationship is removed in incremental sync', async () => {
+  it('removes a room from a Space folder without mutating its chat metadata', async () => {
     const space = '!space:example.org'
     const child = '!child:example.org'
     let sync = 0
@@ -743,15 +722,15 @@ describe('MatrixPlatform', () => {
     const platform = createPlatform(fetch, { userId: '@me:example.org', syncTimeoutMs: 50 })
     const events: IMEvent[] = []
     const unsubscribe = await platform.subscribe(session, (value) => { events.push(value) })
-    await vi.waitFor(() => expect(events.some((value) =>
-      value.type === 'conversation' && value.conversation.id === child)).toBe(true))
+    await vi.waitFor(() => expect((platform as any).spaceFolders).toEqual([{
+      id: space, title: space, conversationIds: [],
+    }]))
     await unsubscribe()
-    const root = events.find((value) =>
-      value.type === 'conversation' && value.conversation.id === space)
-    const updatedChild = events.find((value) =>
-      value.type === 'conversation' && value.conversation.id === child)
-    expect(root).toMatchObject({ conversation: { metadata: { hasSubchannels: false } } })
-    expect(updatedChild).toMatchObject({ conversation: { kind: 'group', parentId: undefined } })
+    expect(events).toEqual([])
+    // Removing a Space relationship updates only folder membership.
+    expect((platform as any).conversations.get(child)).toMatchObject({
+      id: child, kind: 'group', parentId: undefined,
+    })
   })
   it('shows Matrix invites in the request inbox, paginates them, and accepts or rejects rooms', async () => {
     const actions: Array<{ path: string, method: string }> = []

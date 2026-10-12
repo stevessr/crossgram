@@ -205,7 +205,7 @@ describe('Matrix platform HTTP e2e', () => {
       .toEqual([{}, {}])
   })
 
-  it('exposes nested joined Matrix Spaces through the real authenticated HTTP transport', async () => {
+  it('maps nested joined Matrix Spaces to folders over authenticated HTTP', async () => {
     spaceFixture = true
     const platform = activePlatform = new MatrixPlatform({
       homeserver, accessToken: 'space-e2e-token', userId: '@bot:test', requestTimeoutMs: 2_000,
@@ -216,16 +216,17 @@ describe('Matrix platform HTTP e2e', () => {
     }
 
     const roots = await platform.getDialogs(session)
-    const spaces = await platform.getSubdialogs(session, { id: '!space:test' }, { limit: 1 })
-    const nested = await platform.getSubdialogs(session, { id: '!nested:test' })
-    expect(roots.dialogs.map((item) => item.conversation.id)).toEqual(['!space:test'])
-    expect(spaces.dialogs[0]?.conversation).toMatchObject({
-      id: '!nested:test', kind: 'channel', parentId: '!space:test',
-      metadata: { matrixSpace: true, hasSubchannels: true },
+    const folders = await platform.getChatFolders(session)
+    expect(roots.dialogs.map((item) => item.conversation.id)).toEqual(['!room:test'])
+    expect(roots.dialogs[0]?.conversation).toMatchObject({
+      id: '!room:test', kind: 'group', title: 'Child Room',
     })
-    expect(nested.dialogs[0]?.conversation).toMatchObject({
-      id: '!room:test', kind: 'channel', parentId: '!nested:test', spaceId: '!space:test',
-    })
+    expect(roots.dialogs[0]?.conversation.parentId).toBeUndefined()
+    expect(folders).toEqual([
+      { id: '!nested:test', title: 'Nested Space', conversationIds: ['!room:test'] },
+      { id: '!space:test', title: 'Root Space', conversationIds: ['!room:test'] },
+    ])
+    await expect(platform.getConversation(session, '!space:test')).resolves.toBeNull()
     const calls = requests.filter((item) => item.path.startsWith('/_matrix/client/v3/sync')
       && item.authorization === 'Bearer space-e2e-token')
     // One /sync snapshot feeds both the root and nested pagination calls.

@@ -81,3 +81,52 @@ function wouldCreateCycle(childId: string, parentId: string, parents: ReadonlyMa
   }
   return false
 }
+
+
+/**
+ * Unlike forum parents, Telegram chat folders may overlap. Walk the complete
+ * Matrix Space graph rather than the single-parent fallback above.
+ * Nested Spaces are flattened to independently addressable chat folders.
+ */
+export function buildSpaceFolders(
+  states: ReadonlyMap<string, ReadonlyMap<string, MatrixEvent>>,
+  joinedRoomIds: ReadonlySet<string>,
+): Array<{ id: string, title: string, conversationIds: string[] }> {
+  const spaces = new Map<string, { title: string, children: string[] }>()
+  for (const [id, state] of states) {
+    if (!joinedRoomIds.has(id)) continue
+    const create = state.get('m.room.create\0')?.content as { type?: string } | undefined
+    if (create?.type !== 'm.space') continue
+    const name = state.get('m.room.name\0')?.content as { name?: string } | undefined
+    const alias = state.get('m.room.canonical_alias\0')?.content as { alias?: string } | undefined
+    const edges: Array<{ id: string, order?: string }> = []
+    for (const event of state.values()) {
+      if (event.type !== 'm.space.child' || !event.state_key
+        || event.state_key === id || !joinedRoomIds.has(event.state_key)) continue
+      const content = event.content as { via?: unknown, order?: unknown }
+      if (!Array.isArray(content?.via) || !content.via.length
+        || !content.via.every((via) => typeof via === 'string' && via.length > 0)) continue
+      const order = typeof content.order === 'string' && content.order.length <= 50
+        && /^[\x20-\x7e]*$/.test(content.order) ? content.order : undefined
+      edges.push({ id: event.state_key, order })
+    }
+    edges.sort((a, b) => (a.order === undefined ? 1 : 0) - (b.order === undefined ? 1 : 0)
+      || (a.order ?? '').localeCompare(b.order ?? '') || a.id.localeCompare(b.id))
+    spaces.set(id, { title: name?.name || alias?.alias || id, children: edges.map((edge) => edge.id) })
+  }
+
+  return [...spaces].sort(([a], [b]) => a.localeCompare(b)).map(([id, space]) => {
+    const visited = new Set([id])
+    const rooms = new Set<string>()
+    const pending = [...space.children].reverse()
+    while (pending.length) {
+      const child = pending.pop()!
+      if (visited.has(child)) continue
+      visited.add(child)
+      const nested = spaces.get(child)
+      if (nested) pending.push(...nested.children.toReversed())
+      else rooms.add(child)
+    }
+    return { id, title: space.title, conversationIds: [...rooms].sort((a, b) => a.localeCompare(b)) }
+  })
+}

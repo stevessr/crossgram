@@ -119,6 +119,15 @@ export interface IMUser<TMediaLocator = unknown> {
   metadata?: JsonObject
 }
 
+/** A native platform container projected as a Telegram chat-list filter (folder). */
+export interface IMChatFolder {
+  /** Opaque, stable identifier scoped to one platform session. */
+  id: string
+  title: string
+  /** Joined, independently addressable conversations; a chat may occur in multiple folders. */
+  conversationIds: string[]
+}
+
 export interface IMConversationRef {
   id: string
 }
@@ -901,6 +910,8 @@ export interface IMPlatform<TMediaLocator = unknown> {
   ): Promise<IMMediaUploadPreparation | undefined>
 
   getDialogs?(session: PlatformSession, query?: IMPageQuery): Promise<IMDialogPage<TMediaLocator>>
+  /** Optional platform-managed Telegram folders (e.g. Matrix Spaces), not forum parent chats. */
+  getChatFolders?(session: PlatformSession): Promise<IMChatFolder[]>
   /** Resolve one opaque platform conversation, used for targeted metadata backfill. */
   getConversation?(
     session: PlatformSession,

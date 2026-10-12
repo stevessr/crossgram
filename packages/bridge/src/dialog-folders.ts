@@ -1,9 +1,10 @@
 import type { Database } from '@cordisjs/plugin-database'
 import type { tl } from '@mtcute/core'
 import Long from 'long'
-import type { JsonObject, JsonValue } from './platform.js'
+import type { IMChatFolder, JsonObject, JsonValue } from './platform.js'
 
 export interface StoredDialogFilter {
+  sourceId?: string
   kind: 'dialogFilter' | 'dialogFilterChatlist'
   contacts?: boolean
   nonContacts?: boolean
@@ -41,6 +42,43 @@ export class DialogFolderStore {
       }))
     if (!ordered.some((entry) => entry.filterId === 0)) ordered.unshift({ filterId: 0 })
     return ordered
+  }
+
+
+  /** Reconcile native platform folders without claiming user-authored filter IDs. */
+  async syncPlatformFolders(platformSessionId: string, folders: readonly IMChatFolder[]): Promise<void> {
+    await this._database.withTransaction(async (database) => {
+      const existing = await database.get('mtproto_dialog_filter', { platformSessionId })
+      const bySource = new Map(existing.filter((row) => typeof (row.payload as unknown as StoredDialogFilter | null)?.sourceId === 'string')
+        .map((row) => [(row.payload as unknown as StoredDialogFilter).sourceId!, row]))
+      const ids = new Set(existing.map((row) => row.filterId))
+      const desired = new Set<string>()
+      let order = Math.max(0, ...existing.map((row) => row.sortOrder)) + 1
+      for (const folder of [...new Map(folders.map((entry) => [entry.id, entry])).values()].sort((a, b) => a.id.localeCompare(b.id))) {
+        if (!folder.id) continue
+        desired.add(folder.id)
+        const previous = bySource.get(folder.id)
+        let filterId = previous?.filterId
+        if (filterId === undefined) {
+          for (let id = 2; id <= 255; id++) if (!ids.has(id)) { filterId = id; break }
+        }
+        if (filterId === undefined) continue
+        ids.add(filterId)
+        const payload: StoredDialogFilter = {
+          kind: 'dialogFilter', sourceId: folder.id,
+          title: encodeDialogFilterTitle({ _: 'textWithEntities', text: folder.title, entities: [] }),
+          pinnedPeerIds: [], includePeerIds: [...new Set(folder.conversationIds)], excludePeerIds: [],
+        }
+        if (previous && JSON.stringify(previous.payload) === JSON.stringify(payload)) continue
+        await database.upsert('mtproto_dialog_filter', [{
+          id: filterKey(platformSessionId, filterId), platformSessionId, filterId,
+          sortOrder: previous?.sortOrder ?? order++, payload: payload as unknown as JsonObject, updatedAt: new Date(),
+        }])
+      }
+      for (const [sourceId, row] of bySource) if (!desired.has(sourceId)) {
+        await database.remove('mtproto_dialog_filter', { platformSessionId, filterId: row.filterId })
+      }
+    })
   }
 
   async putFilter(
