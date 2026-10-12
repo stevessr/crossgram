@@ -146,6 +146,24 @@ describe('account-sharded SQLite delivery store', () => {
     expect((await updates.getPending('alpha')).map((row) => row.eventKey)).toEqual(['alpha:1'])
   })
 
+  it('refuses to use the Cordis main database as an account shard', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'crossgram-shards-no-main-'))
+    cleanups.push(() => rm(dir, { recursive: true, force: true }))
+    const mainPath = join(dir, 'main.db')
+    const { ctx, updates } = await start(mainPath, {
+      enabled: true, directory: join(dir, 'accounts'),
+      accounts: { alpha: { path: mainPath } },
+    })
+    await ctx.database.prepared()
+    await expect(updates.create(record('alpha:1', 'alpha', 1)))
+      .rejects.toThrow(/non-shard database/)
+    const check = new DatabaseSync(mainPath)
+    expect(check.prepare(
+      "SELECT name FROM sqlite_master WHERE name='shard_metadata'",
+    ).get()).toBeUndefined()
+    check.close()
+  })
+
   it('retains count caps, channel aggregation and expiry separately for each account', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'crossgram-shards-retention-'))
     cleanups.push(() => rm(dir, { recursive: true, force: true }))
