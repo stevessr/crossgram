@@ -20,7 +20,7 @@ import { Config as memoryUpdateStoreConfig } from '../../update-store-memory/src
 
 const cases = [
   ['bridge', bridgeConfig, [
-    'dcId', 'serverHost', 'serverPort', 'altEndpoints', 'apiPrefix', 'groupFilesMiniApp', 'uploadPath', 'autoMuteGroupChats',
+    'dcId', 'serverHost', 'serverPort', 'altEndpoints', 'apiPrefix', 'onDemandLoginCodes', 'groupFilesMiniApp', 'uploadPath', 'autoMuteGroupChats',
     'blockedContentMode', 'recalledMessageMode', 'voiceWorkerSocketPath', 'voiceWorkerTimeoutMs', 'voiceDirectIce',
     'voiceTurnHost', 'voiceTurnPort', 'voiceTurnSharedSecret', 'voiceTurnTtlSeconds',
   ]],
@@ -85,6 +85,7 @@ describe('plugin config schemas', () => {
       serverPort: 4430,
       altEndpoints: [],
       apiPrefix: '/api',
+      onDemandLoginCodes: true,
       groupFilesMiniApp: {
         enabled: true,
         path: '/group-files',
