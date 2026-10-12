@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createWorker } from './index.js'
 
 const env = { CROSSGRAM_TELEGRAM_ORIGIN: 'https://telegram.example.com' }
-const request = (path, init) => new Request(`https://cdn.example.net${path}`, init)
+const request = (path, init = undefined) => new Request(`https://cdn.example.net${path}`, init)
 
 describe('crossgram-telegram CDN front Worker', () => {
   it('proxies path, query, method, body and ordinary headers to the fixed upstream', async () => {
