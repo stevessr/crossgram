@@ -74,6 +74,21 @@ describe('ComWeChatPlatform account and directory operations', () => {
     })
   })
 
+  it('only retains projected contacts from the current page', async () => {
+    const platform = platformWithResponses({ '15': { data: [
+      { nickname: 'missing-id' },
+      ...Array.from({ length: 200 }, (_, index) => ({ wxid: `contact-${index}` })),
+    ] } })
+    const first = await platform.getDialogs({} as never, { limit: 2 })
+    expect(first).toMatchObject({ total: 200, nextCursor: '2' })
+    expect(first.dialogs.map((row) => row.conversation.id)).toEqual(['contact-0', 'contact-1'])
+    expect((platform as any).conversations.size).toBe(2)
+    expect((platform as any).users.size).toBe(2)
+    const second = await platform.getDialogs({} as never, { cursor: first.nextCursor, limit: 2 })
+    expect(second.dialogs.map((row) => row.conversation.id)).toEqual(['contact-2', 'contact-3'])
+    expect((platform as any).users.size).toBe(4)
+  })
+
   it('returns no members for a direct conversation without calling group members', async () => {
     const fetch = vi.fn(async () => response({ data: [] }))
     const platform = new ComWeChatPlatform({ endpoint: 'http://127.0.0.1:18888/api/', fetch })

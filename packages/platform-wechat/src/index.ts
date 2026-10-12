@@ -213,17 +213,22 @@ export class ComWeChatPlatform implements IMPlatform {
 
   async getDialogs(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage> {
     const contacts = await this.client.getContacts()
-    const dialogs = contacts.flatMap((contact) => {
+    // Keep directory pagination cheap: projecting every contact also retained
+    // every user/conversation in the adapter maps, even for a one-item page.
+    const visible = contacts.filter((contact) => Boolean(contactId(contact)))
+    const start = query.afterId
+      ? Math.max(0, visible.findIndex((contact) => contactId(contact) === query.afterId) + 1)
+      : pageStart([], query)
+    const limit = clampLimit(query.limit)
+    const selected = visible.slice(start, start + limit)
+    const dialogs = selected.flatMap((contact) => {
       const conversation = this.mapConversation(contact)
       return conversation ? [{ conversation, unreadCount: 0 }] : []
     })
-    const start = pageStart(dialogs, query)
-    const limit = clampLimit(query.limit)
-    const page = dialogs.slice(start, start + limit)
     return {
-      dialogs: page,
-      total: dialogs.length,
-      nextCursor: start + page.length < dialogs.length ? String(start + page.length) : undefined,
+      dialogs,
+      total: visible.length,
+      nextCursor: start + selected.length < visible.length ? String(start + selected.length) : undefined,
     }
   }
 
