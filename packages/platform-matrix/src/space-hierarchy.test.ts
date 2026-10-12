@@ -76,7 +76,7 @@ describe('Matrix Space folder projection', () => {
       ['!room:test', state(room())],
     ])
     expect(buildSpaceFolders(states, new Set(states.keys()))[0]!.conversationIds).toEqual(['!room:test'])
-    states.get('!space:test')!.set('m.space.child\\0!room:test', child('!room:test', []))
+    states.get('!space:test')!.set('m.space.child\0!room:test', child('!room:test', []))
     expect(buildSpaceFolders(states, new Set(states.keys()))[0]!.conversationIds).toEqual([])
   })
 })
