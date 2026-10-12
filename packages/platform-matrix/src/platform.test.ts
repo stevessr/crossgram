@@ -564,10 +564,12 @@ describe('MatrixPlatform', () => {
     releaseStale!(json(stale))
     const result = await pending
     await unsubscribe()
-    expect(result.dialogs.map((dialog) => dialog.conversation.id)).toEqual(['!space:example.org'])
-    expect((await platform.getSubdialogs(session, { id: '!space:example.org' }))
-      .dialogs.map((dialog) => dialog.conversation.id)).toEqual(['!child:example.org'])
-    // A subsequent subdialog read may require a fresh snapshot after an
+    expect(result.dialogs.map((dialog) => dialog.conversation.id)).toEqual(['!child:example.org'])
+    expect(await platform.getChatFolders(session)).toEqual([{
+      id: '!space:example.org', title: '!space:example.org',
+      conversationIds: ['!child:example.org'],
+    }])
+    // A subsequent folder read may require a fresh snapshot after an
     // incremental invalidation; only correctness, not an exact count, matters.
     expect(fullReads).toBeGreaterThanOrEqual(3)
   })
