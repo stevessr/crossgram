@@ -123,7 +123,7 @@ describe('DiscordPlatform userbot', () => {
       Buffer.from([tag * 8 + 2, bytes.length]), bytes,
     ])
     const folder = field(1, Buffer.concat([
-      field(1, fixed), field(2, field(1, Buffer.from([42]))),
+      field(1, fixed), field(2, Buffer.from([8, 42])),
       field(3, field(1, Buffer.from('Guild folder'))),
     ]))
     const proto = field(14, folder).toString('base64')
