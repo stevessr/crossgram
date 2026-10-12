@@ -33,3 +33,32 @@ For recurring failures, inspect the browser Network > WS tab for the close code
 and handshake status, and compare server-side WebSocket close events with proxy
 logs. An absent 101 Switching Protocols response is a proxy or routing problem,
 not a reconnect-timer problem.
+
+
+## Optional Protocol Buffers transport
+
+The browser and server begin in JSON mode for compatibility. New servers
+advertise `transport: "protobuf-gzip-v1"` in the initial `entry:init` body.
+A capable browser responds with `transport:upgrade` (JSON), then waits for
+`transport:ready` (JSON) before sending binary messages. Legacy peers that do
+not negotiate continue using JSON unchanged. Neither side requires a hard
+reload during mixed-version rollout.
+
+Binary frames follow [webui.proto](../../packages/cordis-webui-solidjs/src/webui.proto):
+a small protobuf enum message kind, a JSON-encoded Muon/RPC body in `bytes`,
+and an optional gzip flag. This is *protobuf framing with gzip*, not a
+complete schema conversion of every extension-specific data object. Such
+objects remain JSON to retain plugin compatibility.
+
+Large payloads (at least 2 KiB) are gzip-compressed at level 1 only when
+compressed size is below 87.5% of raw payload size. A broadcast is encoded
+only once for all upgraded clients, and old-format JSON envelopes are not
+generated when all subscribers use protobuf. The browser limits expanded
+payloads to 32 MiB; server request frames retain the stricter 1 MiB bound.
+Compressed client frames are accepted but the browser currently sends raw
+protobuf for small interactive requests to keep latency predictable.
+
+If the compressed transport fails to negotiate, inspect WS frames and verify
+that the reverse proxy preserves both text and binary WebSocket frames. A
+proxy must never rewrite the WebSocket frame payload, and TLS/CDN termination
+must allow WebSocket upgrades.
