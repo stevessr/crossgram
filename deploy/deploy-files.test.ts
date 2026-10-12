@@ -158,11 +158,9 @@ describe('Crossgram Linux deployment', () => {
     expect(migrated).toContain("- id: qq-flash-transfer-bot\n  name: '@mtproto-relay/qq-flash-transfer-bot'")
     expect(migrated).toContain("- id: debug-scripts\n  name: '@mtproto-relay/debug-scripts'")
     expect(migrated).toContain('root: /var/lib/crossgram/debug-scripts')
-    expect(migrated).toContain("    - id: database-postgres\n      name: '@cordisjs/plugin-database-postgres'")
-    expect(migrated).toContain(
-      '        password:\n          __jsExpr: process.env.CROSSGRAM_POSTGRES_PASSWORD',
-    )
-    expect(migrated).not.toContain("name: '@cordisjs/plugin-database-sqlite'")
+    expect(migrated).toContain("    - id: database-sqlite\n      name: '@cordisjs/plugin-database-sqlite'")
+    expect(migrated).toContain('        path: /var/lib/crossgram/data/cordis.db')
+    expect(migrated).not.toContain("name: '@cordisjs/plugin-database-postgres'")
     // migrateRuntimeConfig also appends the required bot plugins, covered above.
 
     const temp = mkdtempSync(join(tmpdir(), 'crossgram-config-migration-'))
@@ -181,7 +179,7 @@ describe('Crossgram Linux deployment', () => {
     }
   })
 
-  it('replaces disabled PostgreSQL placeholders and active SQLite with one configured driver', () => {
+  it('preserves the selected SQLite driver and disabled database placeholders', () => {
     const source = `- id: database
   name: '@cordisjs/plugin-group'
   config:
@@ -197,11 +195,42 @@ describe('Crossgram Linux deployment', () => {
       disabled: true
 `
     const migrated = migrateDatabaseDriver(source)
-    expect(migrated.match(/name: '@cordisjs\/plugin-database-postgres'/g)).toHaveLength(1)
-    expect(migrated).not.toContain("name: '@cordisjs/plugin-database-sqlite'")
-    expect(migrated).toContain("    - id: database-postgres")
+    expect(migrated).toBe(source)
+    expect(migrated).toContain("name: '@cordisjs/plugin-database-sqlite'")
+    expect(migrated).toContain("name: '@cordisjs/plugin-database-postgres'\n      disabled: true")
     expect(migrated).toContain("    - id: mongo")
     expect(migrateDatabaseDriver(migrated)).toBe(migrated)
+  })
+
+  it('keeps an existing SQLite runtime on SQLite when the migration CLI runs', () => {
+    const temp = mkdtempSync(join(tmpdir(), 'crossgram-sqlite-runtime-e2e-'))
+    const config = join(temp, 'app.yml')
+    const source = `- id: database
+  name: '@cordisjs/plugin-group'
+  config:
+    - id: database-core
+      name: '@cordisjs/plugin-database'
+    - id: database-sqlite
+      name: '@cordisjs/plugin-database-sqlite'
+      config:
+        path: /var/lib/crossgram/db/crossgram.sqlite
+        journalMode: wal
+        busyTimeout: 5000
+`
+    try {
+      writeFileSync(config, source, { mode: 0o600 })
+      const cli = join(root, 'deploy', 'migrate-runtime-config.mjs')
+      execFileSync(process.execPath, [cli, config])
+      const migrated = readFileSync(config, 'utf8')
+      expect(migrated).toContain("name: '@cordisjs/plugin-database-sqlite'")
+      expect(migrated).toContain('path: /var/lib/crossgram/db/crossgram.sqlite')
+      expect(migrated).not.toContain("name: '@cordisjs/plugin-database-postgres'")
+
+      execFileSync(process.execPath, [cli, config])
+      expect(readFileSync(config, 'utf8')).toBe(migrated)
+    } finally {
+      rmSync(temp, { recursive: true, force: true })
+    }
   })
 
   it('generates the shared Android and Desktop import JSON from the persisted RSA key', () => {
