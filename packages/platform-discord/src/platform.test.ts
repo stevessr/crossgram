@@ -311,6 +311,31 @@ describe('DiscordPlatform userbot', () => {
     await unsubscribe()
   })
 
+  it('computes each cached guild member permission set once when listing members', async () => {
+    const channel = {
+      id: '800000000000000001', type: 'GUILD_TEXT', name: 'general', viewable: true,
+      messages: { cache: new Collection(), fetch: vi.fn(), delete: vi.fn() },
+      permissionsFor: vi.fn(() => ({ has: (permission: string) => permission !== 'NO_ACCESS' })),
+      isThread: () => false,
+    }
+    const guild: any = {
+      id: '700000000000000001', name: 'Guild', ownerId: '101', systemChannelId: channel.id,
+      memberCount: 2, channels: { cache: new Collection([[channel.id, channel]]) },
+      members: { cache: new Collection(), fetch: vi.fn(async () => undefined) },
+    }
+    ;(channel as any).guild = guild
+    const first = { id: '101', user: user('101', 'First'), guild, joinedTimestamp: null, nickname: null }
+    const second = { id: '102', user: user('102', 'Second'), guild, joinedTimestamp: null, nickname: null }
+    guild.members.cache = new Collection([[first.id, first], [second.id, second]])
+    const platform = new DiscordPlatform({ token: 'token' }, { client: fakeClient([channel]) })
+
+    const result = await platform.getConversationMembers(session, { id: channel.id })
+
+    expect(guild.members.fetch).toHaveBeenCalledWith({ limit: 1_000 })
+    expect(channel.permissionsFor).toHaveBeenCalledTimes(2)
+    expect(result).toMatchObject({ total: 2, members: [{ user: { id: '101' } }, { user: { id: '102' } }] })
+  })
+
   it('maps user mentions, channel links, custom emoji, attachments, replies, and sender aliases', async () => {
     const channel = dmChannel()
     const mentioned = user('300', 'Mentioned')

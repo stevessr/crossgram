@@ -910,8 +910,10 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     }
     await channel.guild.members.fetch({ limit: 1_000 }).catch(() => undefined)
     return [...channel.guild.members.cache.values()]
-      .filter((member) => Boolean(channel.permissionsFor(member)?.has('VIEW_CHANNEL')))
-      .map((member) => mapGuildMember(channel, member))
+      .flatMap((member) => {
+        const permissions = channel.permissionsFor(member)
+        return permissions?.has('VIEW_CHANNEL') ? [mapGuildMember(channel, member, permissions)] : []
+      })
       .sort((a, b) => compareSnowflakes(a.user.id, b.user.id))
   }
 
@@ -1332,8 +1334,11 @@ function mentionedUserIds(content: IMMessageInput): string[] {
     : []))]
 }
 
-function mapGuildMember(channel: GuildBasedChannel | ThreadChannel, member: GuildMember): IMConversationMember<DiscordMediaLocator> {
-  const permissions = channel.permissionsFor(member)
+function mapGuildMember(
+  channel: GuildBasedChannel | ThreadChannel,
+  member: GuildMember,
+  permissions = channel.permissionsFor(member),
+): IMConversationMember<DiscordMediaLocator> {
   const role = member.guild.ownerId === member.id ? 'owner'
     : permissions?.has('ADMINISTRATOR') || permissions?.has('MANAGE_GUILD') || permissions?.has('MANAGE_CHANNELS')
       ? 'administrator' : 'member'

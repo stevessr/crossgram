@@ -92,7 +92,7 @@ describe('Discord stall regression E2E', () => {
       fetch: vi.fn(async () => channel),
     }
     client.users = { fetch: vi.fn(async (id: string) => id === self.id ? self : alice) }
-    client.relationships = { fetch: vi.fn(), friendCache: new Collection() }
+    client.relationships = { fetch: vi.fn(async () => undefined), friendCache: new Collection() }
     client.guilds = { cache: new Collection() }
     client.isReady = vi.fn(() => true)
     client.login = vi.fn()
@@ -155,7 +155,7 @@ describe('Discord stall regression E2E', () => {
     client.user = self
     client.channels = { cache: guild.channels.cache, fetch: vi.fn() }
     client.users = { fetch: vi.fn(async () => self) }
-    client.relationships = { fetch: vi.fn(), friendCache: new Collection() }
+    client.relationships = { fetch: vi.fn(async () => undefined), friendCache: new Collection() }
     client.guilds = { cache: new Collection([[guild.id, guild]]) }
     client.isReady = vi.fn(() => true)
     client.login = vi.fn()
