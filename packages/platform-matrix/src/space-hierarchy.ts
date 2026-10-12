@@ -107,7 +107,7 @@ export function buildSpaceFolders(
       if (!Array.isArray(content?.via) || !content.via.length
         || !content.via.every((via) => typeof via === 'string' && via.length > 0)) continue
       const order = typeof content.order === 'string' && content.order.length <= 50
-        && /^[\\x20-\\x7e]*$/.test(content.order) ? content.order : undefined
+        && /^[\x20-\x7e]*$/.test(content.order) ? content.order : undefined
       edges.push({ id: event.state_key, order })
     }
     edges.sort((a, b) => (a.order === undefined ? 1 : 0) - (b.order === undefined ? 1 : 0)
