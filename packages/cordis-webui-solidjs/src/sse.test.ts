@@ -37,6 +37,23 @@ describe('bounded SSE replay', () => {
       hub.dispose()
     }
   })
+  it('invalidates older replay cursors after an oversized event', async () => {
+    const hub = new SseHub({
+      alpha: { snapshot: () => ({ id: 'alpha', data: { recovered: true } }) },
+    }, () => ({}))
+    hub.publish('entry:delta', { id: 'alpha', value: 1 })
+    hub.publish('entry:delta', { id: 'alpha', tooLarge: 'x'.repeat(4 * 1024 * 1024) })
+    expect(hub.bufferedReplayBytes).toBe(0)
+    hub.publish('entry:delta', { id: 'alpha', value: 3 })
+    const reader = subscribe(hub, 1)
+    try {
+      expect(await text(reader)).toContain('entry:init')
+      expect(await text(reader)).toContain('event: entry:snapshot')
+    } finally {
+      await reader.cancel()
+      hub.dispose()
+    }
+  })
   it('retains ordered event IDs and encodes one broadcast for multiple readers', async () => {
     const hub = new SseHub({ alpha: { snapshot: () => ({ id: 'alpha', data: {} }) } }, () => ({}))
     const a = subscribe(hub)
