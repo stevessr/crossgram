@@ -146,6 +146,24 @@ describe('account-sharded SQLite delivery store', () => {
     expect((await updates.getPending('alpha')).map((row) => row.eventKey)).toEqual(['alpha:1'])
   })
 
+  it('bounds huge incoming bursts to the configured maximum transaction size', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'crossgram-shards-burst-'))
+    cleanups.push(() => rm(dir, { recursive: true, force: true }))
+    const { updates, source } = await start(join(dir, 'main.db'), {
+      enabled: true, directory: join(dir, 'accounts'),
+      batchWindowMs: 500, maxBatchSize: 4,
+    })
+    await Promise.all(Array.from({ length: 13 }, (_, i) =>
+      updates.create(record('burst:' + i, 'burst', i + 1)),
+    ))
+    const backend = (source as unknown as { _backend: ShardedSQLiteUpdateStoreBackend })._backend
+    expect(backend.statistics().burst).toEqual({
+      committedBatches: 4, committedOperations: 13,
+    })
+    expect((await updates.getAfter('burst', 'account', 0, 20)).map((row) => row.pts))
+      .toEqual(Array.from({ length: 13 }, (_, i) => i + 1))
+  })
+
   it('avoids allocating database files and caches for read-only or offline accounts', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'crossgram-shards-idle-'))
     cleanups.push(() => rm(dir, { recursive: true, force: true }))
