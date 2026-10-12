@@ -22,8 +22,8 @@ export function PageHeader(props: {
           </Show>
           {t(props.title)}
         </h1>
-        <Show when={t(props.description)}>
-          <p class="muted">{t(props.description)}</p>
+        <Show when={t(props.description ?? '')}>
+          <p class="muted">{t(props.description ?? '')}</p>
         </Show>
       </div>
       <Show when={props.actions}>
@@ -44,8 +44,8 @@ export function EmptyState(props: {
     <section class="panel empty-state">
       <Icon name={props.icon ?? 'sparkle'} size={22} />
       <h2>{t(props.title)}</h2>
-      <Show when={t(props.description)}>
-        <p>{t(props.description)}</p>
+      <Show when={t(props.description ?? '')}>
+        <p>{t(props.description ?? '')}</p>
       </Show>
       {props.action}
     </section>
@@ -171,7 +171,7 @@ export function ConfirmAction(props: {
             if (!action.busy()) setOpen(false)
           }}
         >
-          <p>{t(props.description)}</p>
+          <p>{t(props.description ?? '')}</p>
           <ActionError error={action.error()} />
           <div class="toolbar">
             <button
