@@ -62,6 +62,7 @@ describe('on-demand platform login codes', () => {
     const issued = store.issue('account', 1_000)
     const renewed = store.issue('account', 2_000, true)
     expect(renewed.validUntil).toBe(2_000 + ON_DEMAND_LOGIN_CODE_TTL_MS)
+    expect(renewed.code).not.toBe(issued.code)
     expect(store.get('account', 2_001)?.code).toBe(renewed.code)
     expect(store.get('account', 2_001)?.remainingSeconds).toBe(300)
     // A rare random collision of six digits is possible; still only one
