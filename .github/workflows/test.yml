@@ -62,6 +62,10 @@ jobs:
       - name: Check TypeScript types
         run: yarn typecheck
 
+      - name: Account-sharded SQLite migration and batch E2E (POSIX)
+        if: matrix.os != 'windows-latest'
+        run: yarn vitest run --config vitest.mtproto-e2e.config.mts packages/update-store-database/src/sharded-sqlite.e2e.test.ts --maxWorkers=1
+
   webui:
     name: WebUI browser e2e
     runs-on: ubuntu-latest
