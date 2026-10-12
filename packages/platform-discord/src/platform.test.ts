@@ -87,6 +87,69 @@ function guildChannels(childCount: number) {
 }
 
 describe('DiscordPlatform userbot', () => {
+  it('projects Discord server folders to Telegram folder filters, not nested topics', async () => {
+    const { guild, channels } = guildChannels(2)
+    const client = fakeClient(channels)
+    const platform = new DiscordPlatform({ token: 'token' }, { client })
+    ;(client as any).emit('raw', { t: 'READY', d: { user_settings: {
+      guild_folders: [
+        { id: null, guild_ids: ['999'] },
+        { id: '10001', name: 'Work', guild_ids: ['999', guild.id, guild.id] },
+        { id: '10002', name: 'Games', guild_ids: [guild.id] },
+      ],
+    } } })
+    expect(await platform.getChatFolders(session)).toEqual([
+      { id: 'discord:guild-folder:10001', title: 'Work', conversationIds: ['discord:guild:' + guild.id] },
+      { id: 'discord:guild-folder:10002', title: 'Games', conversationIds: ['discord:guild:' + guild.id] },
+    ])
+    expect(await platform.getConversation(session, 'discord:guild:' + guild.id)).toMatchObject({
+      id: 'discord:guild:' + guild.id, metadata: { discordGuildRoot: true },
+    })
+    // Renames, moves, deletion and empty folders must reflect user-settings updates.
+    ;(client as any).emit('raw', { t: 'USER_SETTINGS_UPDATE', d: { guild_folders: [
+      { id: '10002', name: 'Renamed', guild_ids: [] },
+    ] } })
+    expect(await platform.getChatFolders(session)).toEqual([
+      { id: 'discord:guild-folder:10002', title: 'Renamed', conversationIds: [] },
+    ])
+  })
+
+  it('fetches preloaded Discord folder settings only once when READY omits them', async () => {
+    const { guild, channels } = guildChannels(1)
+    const client = fakeClient(channels) as any
+    const fixed = Buffer.alloc(8)
+    fixed.writeBigUInt64LE(BigInt(guild.id))
+    const field = (tag: number, bytes: Buffer) => Buffer.concat([
+      Buffer.from([tag * 8 + 2, bytes.length]), bytes,
+    ])
+    const folder = field(1, Buffer.concat([
+      field(1, fixed), field(2, field(1, Buffer.from([42]))),
+      field(3, field(1, Buffer.from('Guild folder'))),
+    ]))
+    const proto = field(14, folder).toString('base64')
+    const get = vi.fn(async () => ({ settings: proto }))
+    client.api = { users: () => ({ 'settings-proto': () => ({ get }) }) }
+    const platform = new DiscordPlatform({ token: 'token' }, { client })
+    expect(await Promise.all([
+      platform.getChatFolders(session),
+      platform.getChatFolders(session),
+    ])).toEqual([
+      [{ id: 'discord:guild-folder:42', title: 'Guild folder', conversationIds: ['discord:guild:' + guild.id] }],
+      [{ id: 'discord:guild-folder:42', title: 'Guild folder', conversationIds: ['discord:guild:' + guild.id] }],
+    ])
+    expect(get).toHaveBeenCalledTimes(1)
+    // Unrelated partial updates do not drop known guild folder membership.
+    client.emit('raw', { t: 'USER_SETTINGS_PROTO_UPDATE', d: {
+      settings: { type: 1, proto: field(2, Buffer.from([0])).toString('base64') }, partial: true,
+    } })
+    expect((await platform.getChatFolders(session))[0]?.conversationIds).toEqual(['discord:guild:' + guild.id])
+    client.emit('raw', { t: 'USER_SETTINGS_PROTO_UPDATE', d: {
+      settings: { type: 1, proto: field(14, Buffer.alloc(0)).toString('base64') }, partial: true,
+    } })
+    expect(await platform.getChatFolders(session)).toEqual([])
+    expect(get).toHaveBeenCalledTimes(1)
+  })
+
   it('maps the normal user account without attempting a bot login', async () => {
     const client = fakeClient()
     const platform = new DiscordPlatform({ token: 'user-token' }, { client })
