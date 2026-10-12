@@ -1,4 +1,5 @@
 /** @jsxImportSource solid-js */
+import { t } from '../i18n.js'
 import { createMemo, createResource, createSignal, For, Show } from 'solid-js'
 import type { Data } from '@cordisjs/plugin-logger-webui'
 import type { Message } from 'cordis'
@@ -47,8 +48,8 @@ export default function LogsPage(props: PageProps) {
   return (
     <>
       <PageHeader
-        title="Logs"
-        description="A clear view of what happened, without a noisy terminal."
+        title={t("Logs")}
+        description={t("A clear view of what happened, without a noisy terminal.")}
         actions={
           <>
             <button
@@ -62,11 +63,9 @@ export default function LogsPage(props: PageProps) {
                 )
               }
             >
-              {paused() ? 'Resume live' : 'Pause live'}
+              {paused() ? t("Resume live") : t("Pause live")}
             </button>
-            <button class="button tonal" onClick={reset}>
-              Latest logs
-            </button>
+            <button class="button tonal" onClick={reset}>{t("Latest logs")}</button>
           </>
         }
       />
@@ -74,35 +73,35 @@ export default function LogsPage(props: PageProps) {
         <div class="panel stack">
           <div class="toolbar">
             <label class="field grow">
-              <span>Search loaded logs</span>
+              <span>{t("Search loaded logs")}</span>
               <input
                 type="search"
                 value={search()}
-                placeholder="Message or namespace…"
+                placeholder={t("Message or namespace…")}
                 onInput={(event) => setSearch(event.currentTarget.value)}
               />
             </label>
             <label class="field">
-              <span>Level</span>
+              <span>{t("Level")}</span>
               <select
-                aria-label="Level"
+                aria-label={t("Level")}
                 value={level()}
                 onChange={(event) => setLevel(event.currentTarget.value)}
               >
-                <option value="">All levels</option>
+                <option value="">{t("All levels")}</option>
                 <For each={['error', 'warn', 'info', 'debug']}>
                   {(name) => <option value={name}>{name}</option>}
                 </For>
               </select>
             </label>
             <label class="field">
-              <span>Plugin</span>
+              <span>{t("Plugin")}</span>
               <select
-                aria-label="Plugin"
+                aria-label={t("Plugin")}
                 value={source()}
                 onChange={(event) => setSource(event.currentTarget.value)}
               >
-                <option value="">All plugins</option>
+                <option value="">{t("All plugins")}</option>
                 <For each={rpc.data.entryIds}>
                   {(id) => <option value={id}>{id}</option>}
                 </For>
@@ -122,12 +121,10 @@ export default function LogsPage(props: PageProps) {
           <Show
             when={!older.loading}
             fallback={
-              <div class="loading" role="status">
-                Loading older logs…
-              </div>
+              <div class="loading" role="status">{t("Loading older logs…")}</div>
             }
           >
-            <div class="log-list" role="list" aria-label="Log records">
+            <div class="log-list" role="list" aria-label={t("Log records")}>
               <For each={filtered()}>
                 {(message) => (
                   <article
@@ -158,9 +155,7 @@ export default function LogsPage(props: PageProps) {
               </For>
               <Show when={!filtered().length}>
                 <p class="empty-note">
-                  <Icon name="search" size={16} />
-                  No matching logs in this window.
-                </p>
+                  <Icon name="search" size={16} />{t("No matching logs in this window.")}</p>
               </Show>
             </div>
           </Show>
@@ -169,9 +164,7 @@ export default function LogsPage(props: PageProps) {
               class="button outlined"
               disabled={!cursors().length || older.loading}
               onClick={() => setCursors((value) => value.slice(0, -1))}
-            >
-              Newer logs
-            </button>
+            >{t("Newer logs")}</button>
             <span>{filtered().length} records</span>
             <button
               class="button outlined"
@@ -179,9 +172,7 @@ export default function LogsPage(props: PageProps) {
                 older.loading || !Number.isFinite(oldest()) || !rpc.ready
               }
               onClick={() => setCursors((value) => [...value, oldest()])}
-            >
-              Older logs
-            </button>
+            >{t("Older logs")}</button>
           </div>
         </div>
       </LiveContent>

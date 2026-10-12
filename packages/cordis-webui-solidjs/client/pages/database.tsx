@@ -1,4 +1,5 @@
 /** @jsxImportSource solid-js */
+import { t } from '../i18n.js'
 import {
   createEffect,
   createMemo,
@@ -62,25 +63,23 @@ export default function DatabasePage(props: PageProps) {
   return (
     <>
       <PageHeader
-        title="Database"
-        description="Browse your data. Make precise, deliberate changes."
+        title={t("Database")}
+        description={t("Browse your data. Make precise, deliberate changes.")}
         actions={
           <button
             class="button outlined"
             disabled={!rpc.ready || result.loading}
             onClick={() => void refetch()}
-          >
-            Refresh
-          </button>
+          >{t("Refresh")}</button>
         }
       />
       <LiveContent ready={rpc.ready}>
         <div class="panel stack">
           <div class="toolbar">
             <label class="field">
-              <span>Table</span>
+              <span>{t("Table")}</span>
               <select
-                aria-label="Table"
+                aria-label={t("Table")}
                 value={table()}
                 onChange={(event) => chooseTable(event.currentTarget.value)}
               >
@@ -90,9 +89,9 @@ export default function DatabasePage(props: PageProps) {
               </select>
             </label>
             <label class="field">
-              <span>Rows per page</span>
+              <span>{t("Rows per page")}</span>
               <select
-                aria-label="Rows per page"
+                aria-label={t("Rows per page")}
                 value={String(size())}
                 onChange={(event) => {
                   setSize(+event.currentTarget.value)
@@ -110,9 +109,7 @@ export default function DatabasePage(props: PageProps) {
           <Show
             when={!result.loading}
             fallback={
-              <div class="loading" role="status">
-                Reading this page…
-              </div>
+              <div class="loading" role="status">{t("Reading this page…")}</div>
             }
           >
             <Show when={current()} keyed>
@@ -120,7 +117,7 @@ export default function DatabasePage(props: PageProps) {
                 <div
                   class="table-scroll"
                   tabindex="0"
-                  aria-label="Database rows"
+                  aria-label={t("Database rows")}
                 >
                   <table>
                     <thead>
@@ -219,9 +216,7 @@ export default function DatabasePage(props: PageProps) {
             </Show>
             <Show when={!snapshot()?.rows.length}>
               <p class="empty-note">
-                <Icon name="database" size={16} />
-                No rows in this table.
-              </p>
+                <Icon name="database" size={16} />{t("No rows in this table.")}</p>
             </Show>
           </Show>
           <div class="pagination">
@@ -229,9 +224,7 @@ export default function DatabasePage(props: PageProps) {
               class="button outlined"
               disabled={offset() === 0 || result.loading}
               onClick={() => setOffset(Math.max(0, offset() - size()))}
-            >
-              Previous page
-            </button>
+            >{t("Previous page")}</button>
             <span>Page {Math.floor(offset() / size()) + 1}</span>
             <button
               class="button outlined"
@@ -239,13 +232,11 @@ export default function DatabasePage(props: PageProps) {
                 result.loading || offset() + size() >= (snapshot()?.total ?? 0)
               }
               onClick={() => setOffset(offset() + size())}
-            >
-              Next page
-            </button>
+            >{t("Next page")}</button>
           </div>
           <Show when={current()}>
             <details>
-              <summary>Table schema and primary keys</summary>
+              <summary>{t("Table schema and primary keys")}</summary>
               <p class="muted">
                 Primary key:{' '}
                 {current()!.primary.join(', ') || 'none; table is read-only'}
@@ -254,9 +245,9 @@ export default function DatabasePage(props: PageProps) {
                 <table>
                   <thead>
                     <tr>
-                      <th>Field</th>
-                      <th>Type</th>
-                      <th>Constraints</th>
+                      <th>{t("Field")}</th>
+                      <th>{t("Type")}</th>
+                      <th>{t("Constraints")}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -360,13 +351,11 @@ function EditCell(props: {
               type="checkbox"
               checked={isNull()}
               onChange={(event) => setNull(event.currentTarget.checked)}
-            />
-            Set to null
-          </label>
+            />{t("Set to null")}</label>
         </Show>
         <ActionError error={action.error()} />
         <button class="button filled" disabled={action.busy()}>
-          {action.busy() ? 'Saving…' : 'Save cell'}
+          {action.busy() ? t("Saving…") : t("Save cell")}
         </button>
       </form>
     </Modal>

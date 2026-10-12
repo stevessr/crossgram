@@ -1,4 +1,5 @@
 /** @jsxImportSource solid-js */
+import { t } from '../i18n.js'
 import { createMemo, For, Show } from 'solid-js'
 import { Dynamic } from 'solid-js/web'
 import { useConnection, useRpc, type PageProps } from '../sdk.js'
@@ -127,8 +128,8 @@ export default function NotificationsPage(props: PageProps) {
   return (
     <>
       <PageHeader
-        title="Notifications"
-        description="What needs your attention, all in one place."
+        title={t("Notifications")}
+        description={t("What needs your attention, all in one place.")}
       />
       <ActionError error={action.error()} />
       <LiveContent ready={rpc.ready}>
@@ -147,8 +148,8 @@ export default function NotificationsPage(props: PageProps) {
           <Show when={!rpc.data.notifiers?.length}>
             <EmptyState
               icon="notifications"
-              title="All caught up"
-              description="Your plugins have no active notifications."
+              title={t("All caught up")}
+              description={t("Your plugins have no active notifications.")}
             />
           </Show>
         </div>
@@ -166,7 +167,7 @@ function NotificationCard(props: {
     <article class="panel notification-card" data-type={props.notice.type}>
       <header class="toolbar">
         <span class="chip">{props.notice.type}</span>
-        <span class="muted">{props.notice.entryId ?? 'Workspace'}</span>
+        <span class="muted">{props.notice.entryId ?? t("Workspace")}</span>
       </header>
       <div class="rich-content">
         <RichContent

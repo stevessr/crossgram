@@ -1,4 +1,5 @@
 /** @jsxImportSource solid-js */
+import { t } from '../i18n.js'
 import { createMemo, createResource, createSignal, For, Show } from 'solid-js'
 import type { Data, DescribeResult } from '@cordisjs/plugin-market'
 import { navigate, useConnection, useRpc, type PageProps } from '../sdk.js'
@@ -49,7 +50,7 @@ export default function MarketPage(props: PageProps) {
   return (
     <>
       <PageHeader
-        title={dependencies() ? 'Dependencies' : 'Plugin library'}
+        title={dependencies() ? t("Dependencies") : t("Plugin library")}
         description={
           dependencies()
             ? 'Keep installed packages deliberate and up to date.'
@@ -61,9 +62,7 @@ export default function MarketPage(props: PageProps) {
               class="button outlined"
               disabled={action.busy() || !rpc.ready}
               onClick={() => void action.run(() => rpc.data.refresh())}
-            >
-              Refresh catalog
-            </button>
+            >{t("Refresh catalog")}</button>
             <button
               class="button tonal"
               onClick={() => {
@@ -74,7 +73,7 @@ export default function MarketPage(props: PageProps) {
                 )
               }}
             >
-              {dependencies() ? 'Browse library' : 'Installed packages'}
+              {dependencies() ? t("Browse library") : t("Installed packages")}
             </button>
           </>
         }
@@ -102,9 +101,7 @@ export default function MarketPage(props: PageProps) {
               class="button outlined"
               disabled={!search().trim()}
               onClick={() => setSelected(search().trim())}
-            >
-              Look up package
-            </button>
+            >{t("Look up package")}</button>
           </div>
           <Show
             when={!dependencies()}
@@ -113,11 +110,11 @@ export default function MarketPage(props: PageProps) {
                 <table>
                   <thead>
                     <tr>
-                      <th>Package</th>
-                      <th>Requested</th>
-                      <th>Installed</th>
-                      <th>Available</th>
-                      <th>Manage</th>
+                      <th>{t("Package")}</th>
+                      <th>{t("Requested")}</th>
+                      <th>{t("Installed")}</th>
+                      <th>{t("Available")}</th>
+                      <th>{t("Manage")}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -127,10 +124,10 @@ export default function MarketPage(props: PageProps) {
                           <td>
                             {name}
                             <Show when={dep.workspace}>
-                              <span class="chip">Workspace</span>
+                              <span class="chip">{t("Workspace")}</span>
                             </Show>
                             <Show when={dep.invalid}>
-                              <span class="chip error">Invalid</span>
+                              <span class="chip error">{t("Invalid")}</span>
                             </Show>
                           </td>
                           <td>{dep.request}</td>
@@ -141,9 +138,7 @@ export default function MarketPage(props: PageProps) {
                               class="button outlined"
                               disabled={dep.workspace}
                               onClick={() => setSelected(name)}
-                            >
-                              Manage package
-                            </button>
+                            >{t("Manage package")}</button>
                           </td>
                         </tr>
                       )}
@@ -154,7 +149,7 @@ export default function MarketPage(props: PageProps) {
             }
           >
             <Show when={rpc.data.market?.loading}>
-              <p role="status">Refreshing the registry…</p>
+              <p role="status">{t("Refreshing the registry…")}</p>
             </Show>
             <div class="market-grid">
               <For each={pageSlice(rows(), page(), 24)}>
@@ -168,10 +163,10 @@ export default function MarketPage(props: PageProps) {
                     <p>{row.package.description}</p>
                     <div class="toolbar">
                       <Show when={row.verified}>
-                        <span class="chip">Verified</span>
+                        <span class="chip">{t("Verified")}</span>
                       </Show>
                       <Show when={row.insecure}>
-                        <span class="chip error">Security warning</span>
+                        <span class="chip error">{t("Security warning")}</span>
                       </Show>
                       <span class="chip">
                         {row.license || 'Unspecified license'}
@@ -195,9 +190,7 @@ export default function MarketPage(props: PageProps) {
               class="button outlined"
               disabled={page() === 0}
               onClick={() => setPage(page() - 1)}
-            >
-              Previous page
-            </button>
+            >{t("Previous page")}</button>
             <span>
               {dependencies() ? deps().length : rows().length} packages
             </span>
@@ -208,9 +201,7 @@ export default function MarketPage(props: PageProps) {
                 (dependencies() ? deps().length : rows().length)
               }
               onClick={() => setPage(page() + 1)}
-            >
-              Next page
-            </button>
+            >{t("Next page")}</button>
           </div>
         </div>
         <Show when={selected()} keyed>
@@ -261,24 +252,22 @@ function PackageDialog(props: {
       />
       <Show
         when={!description.loading}
-        fallback={<p class="loading">Reading package information…</p>}
+        fallback={<p class="loading">{t("Reading package information…")}</p>}
       >
         <Show
           when={packageInfo()}
           keyed
           fallback={
-            <p class="notice error">
-              This package could not be found in the configured registry.
-            </p>
+            <p class="notice error">{t("This package could not be found in the configured registry.")}</p>
           }
         >
           {(info) => (
             <div class="stack">
               <p>{info.description}</p>
               <label class="field">
-                <span>Version</span>
+                <span>{t("Version")}</span>
                 <select
-                  aria-label="Version"
+                  aria-label={t("Version")}
                   value={chosen()}
                   onChange={(event) => setVersion(event.currentTarget.value)}
                 >
@@ -292,7 +281,7 @@ function PackageDialog(props: {
               </Show>
               <Show when={Object.keys(meta()?.peerDependencies ?? {}).length}>
                 <details open>
-                  <summary>Peer requirements</summary>
+                  <summary>{t("Peer requirements")}</summary>
                   <ul>
                     <For each={Object.entries(meta()?.peerDependencies ?? {})}>
                       {([name, range]) => (
@@ -322,7 +311,7 @@ function PackageDialog(props: {
                   label={
                     installed() ? 'Install selected version' : 'Install package'
                   }
-                  title="Install this package version?"
+                  title={t("Install this package version?")}
                   description={
                     props.name +
                     '@' +
@@ -339,9 +328,9 @@ function PackageDialog(props: {
                 />
                 <Show when={installed() && !installed()!.workspace}>
                   <ConfirmAction
-                    label="Remove dependency"
-                    title="Remove this dependency?"
-                    description="Configured plugins depending on this package may stop working."
+                    label={t("Remove dependency")}
+                    title={t("Remove this dependency?")}
+                    description={t("Configured plugins depending on this package may stop working.")}
                     danger
                     action={async () => {
                       await props.install(props.name, null)

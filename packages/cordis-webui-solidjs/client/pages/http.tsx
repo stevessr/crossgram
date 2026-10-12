@@ -1,4 +1,5 @@
 /** @jsxImportSource solid-js */
+import { t } from '../i18n.js'
 import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 import type { Data, HistoryEntry } from '@cordisjs/plugin-http-webui'
 import { navigate, useConnection, useRpc, type PageProps } from '../sdk.js'
@@ -26,7 +27,7 @@ export default function HttpPage(props: PageProps) {
   return (
     <>
       <PageHeader
-        title={compose() ? 'Request studio' : 'Outbound traffic'}
+        title={compose() ? t("Request studio") : t("Outbound traffic")}
         description={
           compose()
             ? 'Compose, send, and inspect requests through your server.'
@@ -42,7 +43,7 @@ export default function HttpPage(props: PageProps) {
               )
             }
           >
-            {compose() ? 'View history' : 'Compose request'}
+            {compose() ? t("View history") : t("Compose request")}
           </button>
         }
       />
@@ -71,7 +72,7 @@ function HttpHistory(props: { data: Data }) {
     <div class="panel stack">
       <div class="toolbar">
         <label class="field grow">
-          <span>Search requests</span>
+          <span>{t("Search requests")}</span>
           <input
             type="search"
             value={search()}
@@ -82,9 +83,9 @@ function HttpHistory(props: { data: Data }) {
           />
         </label>
         <ConfirmAction
-          label="Clear history"
-          title="Clear outbound history?"
-          description="Current monitoring records will be removed. Future requests will still be recorded."
+          label={t("Clear history")}
+          title={t("Clear outbound history?")}
+          description={t("Current monitoring records will be removed. Future requests will still be recorded.")}
           action={() => props.data.clear()}
         />
       </div>
@@ -92,11 +93,11 @@ function HttpHistory(props: { data: Data }) {
         <table>
           <thead>
             <tr>
-              <th>Method</th>
-              <th>Destination</th>
-              <th>Status</th>
-              <th>Duration</th>
-              <th>Received</th>
+              <th>{t("Method")}</th>
+              <th>{t("Destination")}</th>
+              <th>{t("Status")}</th>
+              <th>{t("Duration")}</th>
+              <th>{t("Received")}</th>
             </tr>
           </thead>
           <tbody>
@@ -130,26 +131,20 @@ function HttpHistory(props: { data: Data }) {
       </div>
       <Show when={!rows().length}>
         <p class="empty-note">
-          <Icon name="traffic" size={16} />
-          No outbound requests recorded yet.
-        </p>
+          <Icon name="traffic" size={16} />{t("No outbound requests recorded yet.")}</p>
       </Show>
       <div class="pagination">
         <button
           class="button outlined"
           disabled={page() === 0}
           onClick={() => setPage(page() - 1)}
-        >
-          Previous page
-        </button>
+        >{t("Previous page")}</button>
         <span>{rows().length} requests</span>
         <button
           class="button outlined"
           disabled={(page() + 1) * 50 >= rows().length}
           onClick={() => setPage(page() + 1)}
-        >
-          Next page
-        </button>
+        >{t("Next page")}</button>
       </div>
       <Show when={selected()} keyed>
         {(row) => (
@@ -307,9 +302,9 @@ export function HttpComposer(props: { proxy: string; ready: boolean }) {
       >
         <div class="toolbar">
           <label class="field">
-            <span>Method</span>
+            <span>{t("Method")}</span>
             <select
-              aria-label="Method"
+              aria-label={t("Method")}
               value={method()}
               disabled={
                 action.busy() ||
@@ -335,7 +330,7 @@ export function HttpComposer(props: { proxy: string; ready: boolean }) {
             </select>
           </label>
           <label class="field grow">
-            <span>Request URL</span>
+            <span>{t("Request URL")}</span>
             <input
               required
               value={url()}
@@ -364,14 +359,12 @@ export function HttpComposer(props: { proxy: string; ready: boolean }) {
               type="button"
               class="button outlined"
               onClick={() => abort?.abort()}
-            >
-              Cancel request
-            </button>
+            >{t("Cancel request")}</button>
           </Show>
         </div>
         <Show when={method() !== 'WS'}>
           <label class="field">
-            <span>Request headers</span>
+            <span>{t("Request headers")}</span>
             <textarea
               rows={3}
               placeholder="Accept: application/json"
@@ -381,20 +374,20 @@ export function HttpComposer(props: { proxy: string; ready: boolean }) {
           </label>
           <Show when={!['GET', 'HEAD'].includes(method())}>
             <label class="field">
-              <span>Body format</span>
+              <span>{t("Body format")}</span>
               <select
-                aria-label="Body format"
+                aria-label={t("Body format")}
                 value={bodyType()}
                 onChange={(event) => setBodyType(event.currentTarget.value)}
               >
-                <option value="text">Raw text</option>
+                <option value="text">{t("Raw text")}</option>
                 <option value="json">JSON</option>
-                <option value="urlencoded">Form URL-encoded</option>
-                <option value="multipart">Multipart text fields</option>
+                <option value="urlencoded">{t("Form URL-encoded")}</option>
+                <option value="multipart">{t("Multipart text fields")}</option>
               </select>
             </label>
             <label class="field">
-              <span>Request body</span>
+              <span>{t("Request body")}</span>
               <textarea
                 rows={6}
                 spellcheck={false}
@@ -430,15 +423,13 @@ export function HttpComposer(props: { proxy: string; ready: boolean }) {
           }}
         >
           <label class="field grow">
-            <span>WebSocket message</span>
+            <span>{t("WebSocket message")}</span>
             <textarea
               value={message()}
               onInput={(event) => setMessage(event.currentTarget.value)}
             />
           </label>
-          <button class="button filled" disabled={wsState() !== 'open'}>
-            Send message
-          </button>
+          <button class="button filled" disabled={wsState() !== 'open'}>{t("Send message")}</button>
         </form>
         <For each={messages()}>
           {(row) => (
@@ -468,10 +459,10 @@ export function HttpComposer(props: { proxy: string; ready: boolean }) {
               </p>
             </Show>
             <details>
-              <summary>Response headers</summary>
+              <summary>{t("Response headers")}</summary>
               <JsonView value={response.headers} />
             </details>
-            <pre class="response-body" aria-label="Response body">
+            <pre class="response-body" aria-label={t("Response body")}>
               {response.text}
             </pre>
           </section>
