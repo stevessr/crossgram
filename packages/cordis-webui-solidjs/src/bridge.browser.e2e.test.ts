@@ -246,6 +246,51 @@ describe('Crossgram accounts, stickers and bots in the Solid shell', () => {
       const dialog = page.getByRole('dialog', {
         name: 'Approve Telegram QR login',
       })
+      // Browser camera smoke test: a local canvas stream simulates a webcam,
+      // proving frames are decoded in the browser and never auto-approved.
+      const cameraCode = await QRCode.toDataURL(tokenUrl, { width: 320, margin: 2 })
+      await page.evaluate(async (url) => {
+        const image = new Image()
+        image.src = url
+        await image.decode()
+        const canvas = document.createElement('canvas')
+        canvas.width = 640
+        canvas.height = 480
+        const context = canvas.getContext('2d')!
+        const render = () => {
+          context.fillStyle = '#fff'
+          context.fillRect(0, 0, 640, 480)
+          context.drawImage(image, 160, 80, 320, 320)
+        }
+        render()
+        const stream = canvas.captureStream(10)
+        const interval = window.setInterval(render, 100)
+        ;(window as Window & {
+          __cameraFixture?: { stream: MediaStream; interval: number }
+        }).__cameraFixture = { stream, interval }
+        Object.defineProperty(navigator.mediaDevices, 'getUserMedia', {
+          configurable: true,
+          value: async () => stream,
+        })
+      }, cameraCode)
+      await dialog.getByRole('button', { name: '使用摄像头扫码' }).click()
+      await expect.poll(
+        () => dialog.getByLabel('Telegram login link').inputValue(),
+        { timeout: 15_000 },
+      ).toBe(tokenUrl)
+      await expect.poll(() => page.evaluate(() =>
+        (window as Window & {
+          __cameraFixture?: { stream: MediaStream }
+        }).__cameraFixture?.stream.getTracks().every((track) => track.readyState === 'ended'),
+      )).toBe(true)
+      expect(approvals).toEqual([])
+      await page.evaluate(() => {
+        const fixture = (window as Window & {
+          __cameraFixture?: { interval: number }
+        }).__cameraFixture
+        if (fixture) window.clearInterval(fixture.interval)
+      })
+      await dialog.getByLabel('Telegram login link').fill('')
       await dialog.getByLabel('QR image').setInputFiles({
         name: 'telegram-login.png',
         mimeType: 'image/png',
