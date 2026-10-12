@@ -10,7 +10,8 @@ export interface SseEntry {
 interface EventRecord {
   id: number
   type: string
-  body: unknown
+  entryId?: string
+  frame: Uint8Array
 }
 interface Subscriber {
   controller: ReadableStreamDefaultController<Uint8Array>
@@ -22,6 +23,7 @@ interface Subscriber {
 const encoder = new TextEncoder()
 const MAX_SUBSCRIPTIONS = 32
 const MAX_REPLAY_EVENTS = 512
+const MAX_REPLAY_BYTES = 4 * 1024 * 1024
 const MAX_PENDING_EVENTS = 16
 
 export function sseFrame(type: string, body: unknown, id?: number): Uint8Array {
@@ -33,6 +35,8 @@ export function sseFrame(type: string, body: unknown, id?: number): Uint8Array {
 export class SseHub {
   private sequence = 0
   private history: EventRecord[] = []
+  private replayBytes = 0
+  private replayFloor = 0
   private clients = new Set<Subscriber>()
   private closed = false
 
@@ -45,20 +49,43 @@ export class SseHub {
     return this.clients.size
   }
 
+  get bufferedReplayBytes(): number {
+    return this.replayBytes
+  }
+
   publish(type: string, body: unknown) {
     if (this.closed) return
-    const record: EventRecord = { id: ++this.sequence, type, body }
-    this.history.push(record)
-    if (this.history.length > MAX_REPLAY_EVENTS) this.history.shift()
+    const id = ++this.sequence
+    // Serialize once per broadcast and do not retain the original object:
+    // snapshots/deltas may reference arbitrarily large mutable state trees.
+    const frame = sseFrame(type, body, id)
+    const entryId = (body as { id?: unknown } | null)?.id
+    const record: EventRecord = {
+      id, type, frame,
+      entryId: typeof entryId === 'string' ? entryId : undefined,
+    }
+    if (frame.byteLength > MAX_REPLAY_BYTES) {
+      // A non-replayable event invalidates every older cursor.
+      this.history = []
+      this.replayBytes = 0
+      this.replayFloor = id
+    } else {
+      while (this.history.length >= MAX_REPLAY_EVENTS ||
+          this.replayBytes + frame.byteLength > MAX_REPLAY_BYTES) {
+        const removed = this.history.shift()!
+        this.replayBytes -= removed.frame.byteLength
+      }
+      this.history.push(record)
+      this.replayBytes += frame.byteLength
+    }
     for (const client of this.clients) {
-      if (this.visibleTo(client, record)) this.send(client, sseFrame(type, body, record.id))
+      if (this.visibleTo(client, record)) this.send(client, frame)
     }
   }
 
   private visibleTo(client: Subscriber, event: EventRecord): boolean {
     if (event.type === 'entry:delta' || event.type === 'entry:snapshot' || event.type === 'entry:missing') {
-      const id = (event.body as { id?: unknown } | null)?.id
-      return typeof id === 'string' && client.subscriptions.has(id)
+      return typeof event.entryId === 'string' && client.subscriptions.has(event.entryId)
     }
     return true
   }
@@ -74,7 +101,8 @@ export class SseHub {
     const cursor = req.headers.get('last-event-id') ?? req.query.get('lastEventId')
     const lastId = cursor && /^(0|[1-9]\d{0,15})$/.test(cursor) ? Number(cursor) : NaN
     const oldest = this.history[0]?.id ?? this.sequence + 1
-    const resumable = Number.isSafeInteger(lastId) && lastId <= this.sequence && lastId >= oldest - 1
+    const resumable = Number.isSafeInteger(lastId) && lastId <= this.sequence &&
+      lastId >= Math.max(this.replayFloor, oldest - 1)
 
     res.status = 200
     res.headers.set('content-type', 'text/event-stream; charset=utf-8')
@@ -107,7 +135,7 @@ export class SseHub {
         if (resumable) {
           for (const event of this.history) {
             if (event.id > lastId && this.visibleTo(subscriber, event))
-              this.send(subscriber, sseFrame(event.type, event.body, event.id))
+              this.send(subscriber, event.frame)
           }
         } else {
           for (const id of subscriptions) {
@@ -142,5 +170,6 @@ export class SseHub {
     this.closed = true
     for (const client of [...this.clients]) client.dispose()
     this.history = []
+    this.replayBytes = 0
   }
 }
