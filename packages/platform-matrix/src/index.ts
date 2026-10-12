@@ -1278,11 +1278,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     const create = state?.get('m.room.create\0')?.content as { type?: string } | undefined
     const encrypted = Boolean(state?.get('m.room.encryption\0'))
     const direct = this.directRoomIds.has(roomId)
-    const parentId = this.spaceParents.get(roomId)
     const isSpace = create?.type === 'm.space'
-    let spaceId = parentId
-    while (spaceId && this.spaceParents.has(spaceId)) spaceId = this.spaceParents.get(spaceId)
-    if (!spaceId && isSpace) spaceId = roomId
     let heroId = room?.summary?.['m.heroes']?.find((id) => id !== this.accountUserId)
     // Only direct rooms require a fallback member name. Regular groups never
     // need to scan thousands of state entries just to map a message.
@@ -1305,10 +1301,8 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       : undefined
     const conversation: IMConversation<MatrixMediaLocator> = {
       id: roomId,
-      kind: isSpace || parentId ? 'channel' : direct ? 'direct' : 'group',
+      kind: direct ? 'direct' : 'group',
       title,
-      parentId,
-      spaceId,
       selfRole: selfMember?.role,
       selfPermissions: selfMember?.permissions,
       avatar: avatar?.url ? avatarMedia(roomId, avatar.url) : direct && hero?.avatar_url
@@ -1317,7 +1311,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       metadata: {
         matrixRoomId: roomId,
         matrixSpace: isSpace,
-        hasSubchannels: isSpace && (this.spaceChildren.get(roomId)?.length ?? 0) > 0,
+        hasSubchannels: false,
         encrypted,
         participantsCount: room?.summary?.['m.joined_member_count'] ?? this.joinedMemberCounts.get(roomId) ?? 0,
       },
