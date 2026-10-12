@@ -1,5 +1,8 @@
 import { randomUUID } from 'node:crypto'
 import type WebUI from './index.js'
+
+const SERVER_PING_INTERVAL = 25_000
+const SERVER_PONG_TIMEOUT = 90_000
 import {
   MAX_PENDING_RPC,
   MAX_REQUEST_BYTES,
@@ -12,6 +15,10 @@ export interface Socket {
   send(data: string): void
   close(code?: number, reason?: string): void
   terminate?(): void
+  /** Native ws control frames keep reverse proxies alive even for suspended tabs. */
+  ping?(): void
+  on?(event: string, listener: () => void): void
+  off?(event: string, listener: () => void): void
   addEventListener(type: string, listener: (event: any) => void): void
   removeEventListener(type: string, listener: (event: any) => void): void
 }
@@ -20,6 +27,9 @@ export class Client {
   readonly subscriptions = new Set<string>()
   private active = true
   private inFlight = new Set<number>()
+  private pingTimer?: ReturnType<typeof setInterval>
+  private awaitingPongSince = 0
+  private receivedPong = () => { this.awaitingPongSince = 0 }
   constructor(
     readonly webui: WebUI,
     readonly socket: Socket,
@@ -40,6 +50,37 @@ export class Client {
         ),
       },
     })
+    this.startKeepAlive()
+  }
+  private startKeepAlive() {
+    const socket = this.socket
+    // Cordis uses the Node 'ws' transport. Native ping/pong frames are handled
+    // by browsers without depending on setInterval in a background tab.
+    if (!socket.ping || !socket.on || !socket.off) return
+    socket.on('pong', this.receivedPong)
+    this.pingTimer = setInterval(() => {
+      if (!this.active) return
+      if (socket.readyState !== 1) {
+        this.dispose()
+        return
+      }
+      if (this.awaitingPongSince) {
+        if (Date.now() - this.awaitingPongSince < SERVER_PONG_TIMEOUT) return
+        this.dispose()
+        if (socket.terminate) socket.terminate()
+        else socket.close(1013, 'WebUI keepalive timeout')
+        return
+      }
+      try {
+        this.awaitingPongSince = Date.now()
+        socket.ping!()
+      } catch {
+        this.dispose()
+        if (socket.terminate) socket.terminate()
+        else socket.close()
+      }
+    }, SERVER_PING_INTERVAL)
+    this.pingTimer.unref?.()
   }
   get ctx() {
     return this.webui.ctx
@@ -72,6 +113,8 @@ export class Client {
   dispose = () => {
     if (!this.active) return
     this.active = false
+    clearInterval(this.pingTimer)
+    this.socket.off?.('pong', this.receivedPong)
     this.subscriptions.clear()
     this.inFlight.clear()
     this.socket.removeEventListener('message', this.receive)

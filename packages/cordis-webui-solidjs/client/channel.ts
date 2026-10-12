@@ -79,6 +79,7 @@ export class Connection {
   private reconnectTimer?: ReturnType<typeof setTimeout>
   private pingTimer?: ReturnType<typeof setInterval>
   private pongTimer?: ReturnType<typeof setTimeout>
+  private handshakeTimer?: ReturnType<typeof setTimeout>
   constructor(
     readonly config: ClientConfig,
     private makeSocket = (url: string) => new WebSocket(url),
@@ -98,6 +99,8 @@ export class Connection {
   }
   private connect() {
     if (this.stopped) return
+    clearTimeout(this.reconnectTimer)
+    this.reconnectTimer = undefined
     this.setState('status', this.retry ? 'reconnecting' : 'connecting')
     const url = new URL(this.config.endpoint, this.baseURL)
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
@@ -109,20 +112,37 @@ export class Connection {
       return
     }
     this.socket = socket
+    // A TCP/WS upgrade can remain pending indefinitely after a proxy or network failure.
+    // Require the server's initial snapshot metadata, not merely a successful upgrade.
+    this.handshakeTimer = setTimeout(
+      () => this.dropSocket(socket, 'WebUI handshake timed out'),
+      20_000,
+    )
     socket.onmessage = (event) => {
       if (socket !== this.socket) return
       try {
         this.receive(JSON.parse(String(event.data)))
       } catch (error) {
         this.setState('error', 'State synchronization failed. Reconnecting…')
-        socket.close(1002, 'Resynchronize')
+        this.dropSocket(socket, 'State synchronization failed')
       }
     }
     socket.onclose = () => {
       if (socket === this.socket) this.disconnected('Connection lost')
     }
     socket.onerror = () => {
-      if (socket === this.socket) socket.close()
+      if (socket === this.socket)
+        this.dropSocket(socket, 'WebSocket connection failed')
+    }
+  }
+  private dropSocket(socket: WebSocket, reason: string) {
+    if (socket !== this.socket) return
+    // Do not depend on a close event: a stuck upgrade may never deliver one.
+    this.disconnected(reason)
+    try {
+      socket.close()
+    } catch {
+      /* The browser may already have disposed the socket. */
     }
   }
   private receive({ type, body }: { type: string; body: any }) {
@@ -132,6 +152,8 @@ export class Connection {
       return
     }
     if (type === 'entry:init') {
+      clearTimeout(this.handshakeTimer)
+      this.handshakeTimer = undefined
       if (body.version !== 'solid-1') {
         this.setState(
           'error',
@@ -269,17 +291,52 @@ export class Connection {
   }
   private startHeartbeat() {
     clearInterval(this.pingTimer)
-    this.pingTimer = setInterval(() => {
-      if (this.pongTimer || this.socket?.readyState !== 1) return
+    this.pingTimer = setInterval(
+      () => this.probeHeartbeat(),
+      this.config.heartbeatInterval ?? 30_000,
+    )
+  }
+  private probeHeartbeat() {
+    const socket = this.socket
+    if (
+      this.pongTimer ||
+      this.state.status !== 'connected' ||
+      socket?.readyState !== 1 ||
+      (typeof document !== 'undefined' && document.visibilityState === 'hidden')
+    ) return
+    try {
       this.send('ping')
-      this.pongTimer = setTimeout(
-        () => this.socket?.close(4000, 'Heartbeat timeout'),
-        this.config.heartbeatTimeout ?? 15_000,
-      )
-    }, this.config.heartbeatInterval ?? 30_000)
+    } catch {
+      this.dropSocket(socket, 'Heartbeat send failed')
+      return
+    }
+    this.pongTimer = setTimeout(() => {
+      this.pongTimer = undefined
+      if (socket !== this.socket) return
+      // Background tabs have heavily throttled JavaScript timers. The server
+      // independently keeps the transport alive with native WS control pings.
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden')
+        return
+      this.dropSocket(socket, 'Heartbeat timed out')
+    }, this.config.heartbeatTimeout ?? 15_000)
+  }
+  /** Recheck an idle tab immediately after it regains visibility or network. */
+  wake() {
+    if (this.stopped) return
+    if (this.state.status === 'connected') {
+      this.probeHeartbeat()
+    } else if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer)
+      this.reconnectTimer = undefined
+      this.connect()
+    }
   }
   private disconnected(reason: string) {
     this.socket = undefined
+    clearTimeout(this.handshakeTimer)
+    this.handshakeTimer = undefined
+    clearTimeout(this.reconnectTimer)
+    this.reconnectTimer = undefined
     clearInterval(this.pingTimer)
     clearTimeout(this.pongTimer)
     this.pongTimer = undefined

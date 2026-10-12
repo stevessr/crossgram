@@ -227,6 +227,43 @@ describe('Connection lifecycle', () => {
     await vi.advanceTimersByTimeAsync(60_000)
     expect(sockets).toHaveLength(2)
   })
+  it('retries a socket that never delivers entry:init and ignores its late messages', async () => {
+    vi.useFakeTimers()
+    const sockets: Socket[] = []
+    const connection = new Connection(
+      { endpoint: '/api', uiPath: '', title: 'Test' },
+      () => {
+        const socket = new Socket()
+        sockets.push(socket)
+        return socket as unknown as WebSocket
+      },
+    )
+    connection.start()
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(sockets[0].readyState).toBe(3)
+    expect(connection.state.status).toBe('reconnecting')
+    await vi.advanceTimersByTimeAsync(700)
+    expect(sockets).toHaveLength(2)
+    sockets[0].receive('entry:init', { version: 'solid-1', reset: true, entries: {} })
+    expect(connection.state.status).toBe('reconnecting')
+    sockets[1].receive('entry:init', { version: 'solid-1', reset: true, entries: { test: meta } })
+    expect(connection.state.status).toBe('connected')
+    connection.stop()
+  })
+  it('reconnects immediately when network returns without duplicating sockets', async () => {
+    vi.useFakeTimers()
+    const { connection, socket, sockets } = setup()
+    socket.close()
+    expect(sockets).toHaveLength(1)
+    connection.wake()
+    connection.wake()
+    expect(sockets).toHaveLength(2)
+    sockets[1].receive('entry:init', { version: 'solid-1', reset: true, entries: { test: meta } })
+    expect(connection.state.status).toBe('connected')
+    connection.stop()
+    await vi.advanceTimersByTimeAsync(40_000)
+    expect(sockets).toHaveLength(2)
+  })
   it('times out requests with an honest uncertain-outcome error and recovers missed heartbeat', async () => {
     vi.useFakeTimers()
     const { connection, socket } = setup()
