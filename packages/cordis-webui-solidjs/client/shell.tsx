@@ -147,7 +147,7 @@ export function App(props: { initialNotice?: string } = {}) {
           <button
             class="nav-item"
             classList={{ selected: isSelected('/') }}
-            aria-current={isSelected('/') ? t("page") : undefined}
+            aria-current={isSelected('/') ? 'page' : undefined}
             onClick={() => go('/')}
           >
             <Icon name="overview" size={18} />{t("Overview")}</button>
@@ -160,7 +160,7 @@ export function App(props: { initialNotice?: string } = {}) {
                     <button
                       class="nav-item"
                       classList={{ selected: isSelected(page.path) }}
-                      aria-current={isSelected(page.path) ? t("page") : undefined}
+                      aria-current={isSelected(page.path) ? 'page' : undefined}
                       onClick={() => go(page.path)}
                     >
                       <Icon name={page.icon} size={18} />

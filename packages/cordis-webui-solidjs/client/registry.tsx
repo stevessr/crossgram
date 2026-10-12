@@ -27,10 +27,10 @@ export interface RegisteredPage extends PageMeta {
 }
 const known: Record<string, PageMeta[]> = {
   loader: [
-    { path: '/plugins', title: t("Plugins"), icon: 'plugins', group: t("Manage") },
+    { path: '/plugins', title: 'Plugins', icon: 'plugins', group: 'Manage' },
   ],
   database: [
-    { path: '/database', title: t("Database"), icon: 'database', group: t("Manage") },
+    { path: '/database', title: 'Database', icon: 'database', group: 'Manage' },
   ],
   market: [
     {
@@ -46,7 +46,7 @@ const known: Record<string, PageMeta[]> = {
       group: 'Manage',
     },
   ],
-  logs: [{ path: '/logs', title: t("Logs"), icon: 'logs', group: t("Observe") }],
+  logs: [{ path: '/logs', title: 'Logs', icon: 'logs', group: 'Observe' }],
   notifications: [
     {
       path: '/notifications',
@@ -84,10 +84,10 @@ const known: Record<string, PageMeta[]> = {
     },
   ],
   insight: [
-    { path: '/graph', title: t("Service map"), icon: 'network', group: t("Observe") },
+    { path: '/graph', title: 'Service map', icon: 'network', group: 'Observe' },
   ],
   sso: [
-    { path: '/sso', title: t("Your account"), icon: 'account', group: t("Accounts") },
+    { path: '/sso', title: 'Your account', icon: 'account', group: 'Accounts' },
   ],
 }
 const builtins: Record<string, Component<PageProps>> = {
