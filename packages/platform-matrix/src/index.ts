@@ -4,7 +4,7 @@ import enUS from './locales/en-US.yml'
 import zhCN from './locales/zh-CN.yml'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialog,
-  IMDialogPage, IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia,
+  IMDialogPage, IMChatFolder, IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia,
   IMInlineKeyboardButton, IMMessage, IMMessageInput, IMMessagePinMutation, IMMessageSearchPage, IMMessageSearchQuery, IMMessageTarget, IMPageQuery, IMPlatform, IMReadTarget,
   IMRequest, IMRequestAction, IMRequestPage, IMRequestQuery,
   IMReactionActorPage, IMReactionActorPageRequest, IMReactionContext, IMReactionDefinition, IMReactionTarget,
@@ -13,7 +13,7 @@ import type {
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { MatrixClient, MatrixHttpError, type MatrixClientOptions } from './client.js'
 import { matrixMentionUserIds, matrixTextEntities, textContent } from './formatting.js'
-import { buildSpaceHierarchy } from './space-hierarchy.js'
+import { buildSpaceFolders } from './space-hierarchy.js'
 import { countClosedMatrixPoll, type MatrixPollTally } from './poll-results.js'
 import type {
   MatrixDirectAccountData, MatrixEvent, MatrixInvitedRoom, MatrixJoinedRoom, MatrixMediaLocator, MatrixRoomMemberContent,
@@ -72,7 +72,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       maxTextLength: 60_000,
       maxMedia: 10,
     },
-    conversations: { groups: true, channels: true, subchannels: true },
+    conversations: { groups: true, channels: false, subchannels: false },
     members: { list: true, administrators: true, permissions: true },
     avatars: { users: true, conversations: true },
     messageActions: {
@@ -98,8 +98,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   private readonly conversations = new Map<string, IMConversation<MatrixMediaLocator>>()
   private readonly directRoomIds = new Set<string>()
   private readonly joinedRoomIds = new Set<string>()
-  private spaceParents = new Map<string, string>()
-  private spaceChildren = new Map<string, string[]>()
+  private spaceFolders: IMChatFolder[] = []
   private dialogsSnapshot?: { loadedAt: number, dialogs: IMDialog<MatrixMediaLocator>[] }
   private dialogsLoad?: Promise<IMDialog<MatrixMediaLocator>[]>
   private dialogsRevision = 0
@@ -193,7 +192,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
 
   async getDialogs(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<MatrixMediaLocator>> {
     const dialogs = (await this.loadJoinedDialogs())
-      .filter((dialog) => !dialog.conversation.parentId)
+      .filter((dialog) => !this.isSpaceRoom(dialog.conversation.id))
       .sort((left, right) => (right.lastMessage?.timestamp ?? 0) - (left.lastMessage?.timestamp ?? 0))
     const start = pageStart(dialogs, query)
     const limit = clampLimit(query.limit)
