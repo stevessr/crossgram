@@ -85,6 +85,7 @@ const INSERT = 'INSERT OR IGNORE INTO delivery (' + COLUMNS + ') VALUES (?, ?, ?
  * first use. A failed migration does not start the sharded backend.
  */
 export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
+  readonly concurrentPerEventWrites = true
   private readonly _directory: string
   private readonly _shards = new Map<string, Shard>()
   private readonly _knownPaths = new Map<string, string>()
