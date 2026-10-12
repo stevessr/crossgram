@@ -13,6 +13,8 @@ import { Entry, safeAsset } from './entry.js'
 import { PROTOCOL_VERSION, type EntryFiles } from './protocol.js'
 import { encodeFrame, supportsProtoType } from './wire.js'
 import { fastGzip } from './client.js'
+import { httpEncodingMiddleware } from './http-encoding.js'
+import { SseHub } from './sse.js'
 
 declare module 'cordis' {
   interface Context {
@@ -44,6 +46,8 @@ export interface Config {
   title?: string
   heartbeatInterval?: number
   heartbeatTimeout?: number
+  enableSse?: boolean
+  enableHttpEncoding?: boolean
 }
 export default class SolidWebUI extends Service {
   static inject = ['server']
@@ -53,11 +57,19 @@ export default class SolidWebUI extends Service {
     title: z.string().default('Crossgram'),
     heartbeatInterval: z.natural().min(1000).default(30_000),
     heartbeatTimeout: z.natural().min(1000).default(15_000),
+    enableSse: z.boolean().default(true),
+    enableHttpEncoding: z.boolean().default(true),
   })
   readonly version = PROTOCOL_VERSION
   buildId = ''
   readonly entries: Record<string, Entry> = Object.create(null)
   readonly clients: Record<string, Client> = Object.create(null)
+  readonly sse = new SseHub(this.entries, () => ({
+    version: this.version,
+    buildId: this.buildId,
+    reset: true,
+    entries: Object.fromEntries(Object.values(this.entries).map(entry => [entry.id, entry.toJSON()])),
+  }))
   readonly config: Required<Config>
   readonly root = fileURLToPath(new URL('../dist/', import.meta.url))
   private assets = new Map<string, Buffer>()
@@ -73,10 +85,13 @@ export default class SolidWebUI extends Service {
       title: 'Crossgram',
       heartbeatInterval: 30_000,
       heartbeatTimeout: 15_000,
+      enableSse: true,
+      enableHttpEncoding: true,
       ...config,
     }
     this.config.uiPath = normalizePath(this.config.uiPath, true)
     this.config.apiPath = normalizePath(this.config.apiPath)
+    if (this.config.enableHttpEncoding) ctx.server.use(httpEncodingMiddleware())
     ctx.effect(
       () => () => {
         for (const client of Object.values(this.clients)) {
@@ -84,6 +99,7 @@ export default class SolidWebUI extends Service {
           client.socket.close(1001, 'Server stopping')
         }
         this.assets.clear()
+        this.sse.dispose()
       },
       'webui-solidjs.connections',
     )
@@ -177,6 +193,20 @@ export default class SolidWebUI extends Service {
   }
 
   private serveRoutes() {
+    if (this.config.enableSse) this.ctx.server.get(this.config.apiPath + '/events', async (req, res) => {
+      // Same-origin read-only SSE fallback. Login/ACL middleware still applies.
+      const origin = req.headers.get('origin')
+      try {
+        if (origin && new URL(origin).host !== req.headers.get('host')) {
+          res.status = 403
+          return
+        }
+      } catch {
+        res.status = 403
+        return
+      }
+      this.sse.accept(req, res)
+    })
     this.ctx.server.ws(this.config.apiPath, async (req, accept) => {
       // Browser WebSockets carry cookies, so reject cross-origin handshakes by default.
       // Authentication/ACL remains in the existing Cordis server route middleware.
@@ -288,6 +318,7 @@ export default class SolidWebUI extends Service {
     )
   }
   broadcast(type: string, body: any) {
+    this.sse.publish(type, body)
     const clients = Object.values(this.clients).filter(
       (client) => type !== 'entry:delta' || client.subscriptions.has(body.id),
     )
