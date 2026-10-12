@@ -10,10 +10,13 @@ function mock(payload: string, accept = 'gzip') {
     headers: new Headers({ 'content-type': 'application/json' }),
     _bodyInit: payload as unknown,
   }
-  const res = Object.assign(state, {
+  const res = {
+    get status() { return state.status },
+    headers: state.headers,
     get body() { return state._bodyInit },
     set body(value: unknown) { state._bodyInit = value },
-  }) as unknown as Response
+    get _bodyInit() { return state._bodyInit },
+  } as unknown as Response
   return { req, res, state }
 }
 
