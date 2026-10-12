@@ -291,7 +291,7 @@ describe('DiscordPlatform userbot', () => {
     let checks = 0
     for (const entry of channels) {
       const original = entry.permissionsFor
-      entry.permissionsFor = (user: any) => { checks++; return original(user) }
+      entry.permissionsFor = () => { checks++; return original() }
     }
     const client = fakeClient(channels)
     const platform = new DiscordPlatform({ token: 'token' }, { client })
