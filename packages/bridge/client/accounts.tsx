@@ -23,6 +23,7 @@ import {
 } from 'cordis-webui-solidjs/components'
 import { sessionToken } from 'cordis-webui-solidjs/session'
 import AddAccount from './add-account.js'
+import { cameraErrorMessage, startQrCamera } from './qr-camera.js'
 import {
   copyText,
   formatPhone,
@@ -447,10 +448,57 @@ function QrLogin(props: {
 }) {
   const [input, setInput] = createSignal(''),
     [account, setAccount] = createSignal(''),
-    [approved, setApproved] = createSignal(false)
+    [approved, setApproved] = createSignal(false),
+    [cameraState, setCameraState] = createSignal<'idle' | 'starting' | 'scanning'>('idle'),
+    [cameraMessage, setCameraMessage] = createSignal('')
   const scan = useAction(),
     approve = useAction(),
     controller = new AbortController()
+  let videoElement: HTMLVideoElement | undefined
+  let cameraController: AbortController | undefined
+  let cameraStop: (() => void) | undefined
+  const stopCamera = () => {
+    cameraController?.abort()
+    cameraStop?.()
+    cameraController = undefined
+    cameraStop = undefined
+    setCameraState('idle')
+  }
+  const startCamera = () => {
+    if (cameraState() !== 'idle' || !videoElement) return
+    const current = new AbortController()
+    cameraController = current
+    setCameraMessage('')
+    setCameraState('starting')
+    void startQrCamera(videoElement, current.signal, (value) => {
+      const parsed = parseTelegramLoginUrl(value)
+      if (!parsed) {
+        setCameraMessage('识别到二维码，但不是有效的 Telegram 登录码。')
+        return false
+      }
+      stopCamera()
+      setInput(parsed)
+      setApproved(false)
+      setCameraMessage('二维码已识别。请选择目标账号，再手动批准登录。')
+      return true
+    }, (error) => {
+      if (cameraController !== current) return
+      stopCamera()
+      setCameraMessage(cameraErrorMessage(error))
+    }).then((stop) => {
+      if (cameraController !== current) {
+        stop()
+        return
+      }
+      cameraStop = stop
+      setCameraState('scanning')
+    }).catch((error) => {
+      if (cameraController !== current) return
+      stopCamera()
+      if ((error as Error)?.name !== 'AbortError')
+        setCameraMessage(cameraErrorMessage(error))
+    })
+  }
   const token = createMemo(() => parseTelegramLoginUrl(input().trim()))
   const readyAccounts = () =>
     (props.data.accounts ?? []).filter((account) => account.status === 'ready')
@@ -460,6 +508,8 @@ function QrLogin(props: {
   })
   const decode = (file?: File) => {
     if (!file) return
+    stopCamera()
+    setCameraMessage('')
     void scan.run(async () => {
       setApproved(false)
       const { decodeQrImage } = await import('./qr.js')
@@ -478,17 +528,54 @@ function QrLogin(props: {
       decode(file)
     }
   }
+  const onVisibilityChange = () => {
+    if (document.hidden && cameraState() !== 'idle') {
+      stopCamera()
+      setCameraMessage('页面切换到后台，已自动关闭摄像头。')
+    }
+  }
   window.addEventListener('paste', paste)
+  document.addEventListener('visibilitychange', onVisibilityChange)
   onCleanup(() => {
     controller.abort()
+    stopCamera()
     window.removeEventListener('paste', paste)
+    document.removeEventListener('visibilitychange', onVisibilityChange)
   })
   return (
-    <Modal title="Approve Telegram QR login" onClose={props.onClose}>
+    <Modal title="Approve Telegram QR login" onClose={() => { stopCamera(); props.onClose() }}>
       <p>
-        Upload or paste a QR image from your Telegram login screen, or paste its
-        login link. Nothing is approved until you confirm below.
+        使用摄像头扫描、上传或粘贴 Telegram 登录二维码，也可以直接粘贴登录链接。
+        扫描只在浏览器本地进行，必须再次确认才会批准登录。
       </p>
+      <div class="qr-camera-controls">
+        <button
+          class="button outlined"
+          type="button"
+          disabled={scan.busy() || approve.busy() || !props.connected || !readyAccounts().length}
+          onClick={() => cameraState() === 'idle' ? startCamera() : stopCamera()}
+        >
+          {cameraState() === 'idle' ? '使用摄像头扫码' : '停止摄像头'}
+        </button>
+        <small class="muted">摄像头需要 HTTPS 或 localhost；手机优先使用后置摄像头。</small>
+      </div>
+      <video
+        ref={(element) => { videoElement = element }}
+        class="qr-camera-video"
+        aria-label="摄像头预览"
+        muted
+        playsinline
+        style={{ display: cameraState() === 'idle' ? 'none' : 'block' }}
+      />
+      <Show when={cameraState() === 'starting'}>
+        <p role="status">正在开启摄像头并等待画面…</p>
+      </Show>
+      <Show when={cameraState() === 'scanning'}>
+        <p role="status">将 Telegram 登录二维码放入摄像头画面中。</p>
+      </Show>
+      <Show when={cameraMessage()}>
+        <p class="notice" role="status">{cameraMessage()}</p>
+      </Show>
       <label class="field">
         <span>QR image</span>
         <input
@@ -508,6 +595,8 @@ function QrLogin(props: {
           placeholder="tg://login?token=…"
           disabled={approve.busy()}
           onInput={(event) => {
+            stopCamera()
+            setCameraMessage('')
             setInput(event.currentTarget.value)
             setApproved(false)
           }}
