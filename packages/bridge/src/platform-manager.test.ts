@@ -638,6 +638,55 @@ describe('PlatformSubscriptionManager', () => {
     })
     await manager.stop()
   })
+
+  it('yields between bounded pages while reconciling a large persisted session', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    platform.capabilities.history = true
+    const dialogs = Array.from({ length: 201 }, (_, index) => ({
+      conversation: { id: `channel-${String(index).padStart(3, '0')}`, kind: 'group' as const, title: `Channel ${index}` },
+      unreadCount: 0,
+    }))
+    let timerFired = false
+    let timerFiredBeforeSecondPage = false
+    const getDialogs = vi.fn(async (_session: PlatformSession, query: { limit?: number, afterId?: string } = {}) => {
+      if (getDialogs.mock.calls.length === 2) {
+        timerFiredBeforeSecondPage = timerFired
+      }
+      const start = query.afterId
+        ? dialogs.findIndex((dialog) => dialog.conversation.id === query.afterId) + 1
+        : 0
+      return {
+        dialogs: dialogs.slice(start, start + (query.limit ?? 100)),
+        total: dialogs.length,
+      }
+    })
+    platform.getDialogs = getDialogs
+    await database.create('mtproto_platform_session', {
+      id: session.platformSessionId, platformId: session.platformId, userId: 'self', credentials: {}, metadata: {},
+      active: true, createdAt: new Date(),
+    })
+    const store = new MessageStore(database)
+    const listDialogs = vi.spyOn(store, 'listDialogs')
+    const manager = new PlatformSubscriptionManager(
+      database, new PlatformRegistry([['push', platform]]), store,
+    )
+    setTimeout(() => { timerFired = true }, 0)
+
+    await manager.startActiveSessions()
+    await vi.waitFor(() => expect(getDialogs).toHaveBeenCalledTimes(3))
+
+    expect(getDialogs.mock.calls.map(([, query]) => query.limit)).toEqual([100, 100, 100])
+    expect(getDialogs.mock.calls.map(([, query]) => query.afterId)).toEqual([
+      undefined, dialogs[99]!.conversation.id, dialogs[199]!.conversation.id,
+    ])
+    expect(timerFiredBeforeSecondPage).toBe(true)
+    // Startup reconciliation only needs adapter-owned dialogs; rescanning and
+    // hydrating every cached local dialog on each page is an O(N^2) hot path.
+    expect(listDialogs).toHaveBeenCalledTimes(3)
+    await manager.stop()
+  })
+
   it('recovers messages missed before subscription startup through the committed update pipeline', async () => {
     const database = await createDatabase()
     const platform = new PushPlatform()

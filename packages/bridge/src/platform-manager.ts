@@ -46,6 +46,8 @@ export class PlatformRegistry {
 
 export type PlatformRegistryEvent = 'register' | 'unregister'
 export type RecalledMessageMode = 'hide' | 'show'
+const STARTUP_DIALOG_RECONCILIATION_PAGE_SIZE = 100
+const STARTUP_DIALOG_RECONCILIATION_YIELD_MS = 10
 export type PlatformRegistryListener = (
   event: PlatformRegistryEvent,
   registrationId: string,
@@ -308,12 +310,16 @@ export class PlatformSubscriptionManager {
       const data = new PlatformDataService(
         platform, session, this._store, this._onTrace, undefined,
         (event) => this._enqueue(session, event),
+        false,
       )
       let afterId: string | undefined
       const visited = new Set<string | undefined>()
       while (!visited.has(afterId)) {
         visited.add(afterId)
-        const page = await data.getDialogsPage({ limit: 500, afterId })
+        const page = await data.getDialogsPage({
+          limit: STARTUP_DIALOG_RECONCILIATION_PAGE_SIZE,
+          afterId,
+        })
         if (platform.platformKind === 'matrix') {
           for (const dialog of page.dialogs) {
             if (dialog.conversation.metadata?.matrixRoomId === dialog.conversation.id) {
@@ -324,10 +330,16 @@ export class PlatformSubscriptionManager {
         if (!page.dialogs.length) break
         const lastId = page.dialogs.at(-1)!.conversation.id
         const hasMore = Boolean(page.nextCursor)
-          || (page.total !== undefined && visited.size * 500 < page.total)
-          || page.dialogs.length >= 500
+          || (page.total !== undefined
+            && visited.size * STARTUP_DIALOG_RECONCILIATION_PAGE_SIZE < page.total)
+          || page.dialogs.length >= STARTUP_DIALOG_RECONCILIATION_PAGE_SIZE
         if (!hasMore || lastId === afterId) break
         afterId = lastId
+        // Reconciliation can span thousands of cached rooms (e.g. a Discord
+        // account with several thousand channels). Yield between bounded
+        // pages so synchronous SQLite hydration does not starve MTProto and
+        // WebUI requests while the startup scan is running.
+        await new Promise((resolve) => setTimeout(resolve, STARTUP_DIALOG_RECONCILIATION_YIELD_MS))
       }
     }
     if (!platform.getRequests) return
@@ -671,6 +683,7 @@ export class PlatformDataService {
       event: Extract<IMEvent, { type: 'message' }>,
       options?: PlatformEventDeliveryOptions,
     ) => Promise<unknown>,
+    private readonly _includeBridgeOwnedDialogs = true,
   ) {
     void now
   }
@@ -715,7 +728,9 @@ export class PlatformDataService {
     }
     // Bridge-owned peers are a fully local prefix. Enumerate it in batches so
     // the cursor remains independent from adapters and is never capped at 500.
-    const allBridgeOwned = await this._bridgeOwnedDialogs()
+    const allBridgeOwned = this._includeBridgeOwnedDialogs
+      ? await this._bridgeOwnedDialogs()
+      : []
     const ownedAnchor = query.afterId === undefined
       ? -1
       : allBridgeOwned.findIndex((dialog) => dialog.conversation.id === query.afterId)
