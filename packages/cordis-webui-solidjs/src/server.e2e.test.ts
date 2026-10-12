@@ -214,7 +214,7 @@ describe('Solid WebUI production service', () => {
   it('negotiates HTTP compression and safely decodes compressed JSON uploads', async () => {
     const app = await start()
     try {
-      app.ctx.server.get('/__compression_probe', (_req, res) => {
+      app.ctx.server.get('/__compression_probe', async (_req, res) => {
         res.json({ text: 'compressible-payload'.repeat(2000) })
       })
       app.ctx.server.post('/__compression_echo', async (req, res) => {
