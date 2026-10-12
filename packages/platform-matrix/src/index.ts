@@ -210,31 +210,19 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   ): Promise<IMConversation<MatrixMediaLocator> | null> {
     // Targeted Telegram peer recovery must also resolve non-root child rooms.
     const known = this.conversations.get(conversationId)
-    if (known && this.joinedRoomIds.has(conversationId)) return known
+    if (known && this.joinedRoomIds.has(conversationId) && !this.isSpaceRoom(conversationId)) return known
     await this.loadJoinedDialogs()
-    return this.conversations.get(conversationId) ?? null
+    return this.isSpaceRoom(conversationId) ? null : this.conversations.get(conversationId) ?? null
   }
 
-  async getSubdialogs(
-    _session: PlatformSession,
-    parent: IMConversationRef,
-    query: IMPageQuery = {},
-  ): Promise<IMDialogPage<MatrixMediaLocator>> {
-    const dialogs = await this.loadJoinedDialogs()
-    const byId = new Map(dialogs.map((dialog) => [dialog.conversation.id, dialog]))
-    const children = (this.spaceChildren.get(parent.id) ?? [])
-      .flatMap((id) => {
-        const dialog = byId.get(id)
-        return dialog ? [dialog] : []
-      })
-    const start = pageStart(children, query)
-    const limit = clampLimit(query.limit)
-    const page = children.slice(start, start + limit)
-    return {
-      dialogs: page,
-      total: children.length,
-      nextCursor: start + page.length < children.length ? String(start + page.length) : undefined,
-    }
+  async getChatFolders(_session: PlatformSession): Promise<IMChatFolder[]> {
+    await this.loadJoinedDialogs()
+    return this.spaceFolders.map((folder) => ({ ...folder, conversationIds: [...folder.conversationIds] }))
+  }
+
+  private isSpaceRoom(roomId: string): boolean {
+    const create = this.roomState.get(roomId)?.get('m.room.create\\0')?.content as { type?: string } | undefined
+    return create?.type === 'm.space'
   }
 
   /**
