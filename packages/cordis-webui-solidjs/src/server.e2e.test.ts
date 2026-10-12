@@ -9,6 +9,7 @@ import {
 } from './browser-test-utils.js'
 import { resolve } from 'node:path'
 import { safeAsset } from './entry.js'
+import { decodeFrame, encodeFrame, unpackFrame } from './wire.js'
 
 async function start(uiPath = '') {
   const ctx = new Context()
@@ -178,6 +179,34 @@ describe('Solid WebUI production service', () => {
       a?.socket.close()
       b?.socket.close()
       await plugin.dispose()
+      await app.stop()
+    }
+  })
+  it('upgrades real WebSocket frames to protobuf and processes binary ping/pong', async () => {
+    const app = await start()
+    const socket = new WebSocket(app.url.replace('http:', 'ws:') + '/api')
+    socket.binaryType = 'arraybuffer'
+    const frames: any[] = []
+    socket.addEventListener('message', (event) => {
+      if (typeof event.data === 'string') frames.push(JSON.parse(event.data))
+      else frames.push(unpackFrame(decodeFrame(event.data as ArrayBuffer)))
+    })
+    try {
+      await vi.waitFor(() =>
+        expect(frames[0]?.body?.transport).toBe('protobuf-gzip-v1'),
+      )
+      socket.send(JSON.stringify({
+        type: 'transport:upgrade', body: { version: 1 },
+      }))
+      await vi.waitFor(() =>
+        expect(frames.some(frame => frame.type === 'transport:ready')).toBe(true),
+      )
+      socket.send(encodeFrame('ping'))
+      await vi.waitFor(() =>
+        expect(frames.some(frame => frame.type === 'pong')).toBe(true),
+      )
+    } finally {
+      socket.close()
       await app.stop()
     }
   })
