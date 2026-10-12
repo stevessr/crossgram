@@ -111,6 +111,56 @@ describe('SatoriPlatform', () => {
     expect(bot.getChannelList).toHaveBeenCalledTimes(2)
   })
 
+  it('retains only the most recent conversation metadata without losing hot entries', () => {
+    const platform = new SatoriPlatform(context(makeBot()), 'mock:self')
+    const internal = platform as any
+    for (let i = 0; i < 4_096; i++) {
+      internal.remember({ id: `channel-${i}`, kind: 'channel', title: `Channel ${i}` })
+    }
+    internal.remember({ id: 'channel-0', kind: 'channel', title: 'Recently active' })
+    internal.remember({ id: 'new-channel', kind: 'group', title: 'Newest' })
+    expect(internal.conversations.size).toBe(4_096)
+    expect(internal.conversations.has('channel-0')).toBe(true)
+    expect(internal.conversations.get('channel-0').title).toBe('Recently active')
+    expect(internal.conversations.has('channel-1')).toBe(false)
+    expect(internal.conversations.has('new-channel')).toBe(true)
+  })
+
+  it('serializes a burst with one drain and finishes accepted events before unsubscribe', async () => {
+    const bot = makeBot()
+    const listeners = new Map<string, (event: unknown) => void>()
+    const ctx = context(bot) as any
+    ctx.on = vi.fn((type: string, listener: (event: unknown) => void) => {
+      listeners.set(type, listener)
+      return () => listeners.delete(type)
+    })
+    const platform = new SatoriPlatform(ctx, 'mock:self')
+    const delivered: string[] = []
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const unsubscribe = await platform.subscribe(session, async (event) => {
+      if (!delivered.length) await gate
+      if (event.type === 'message') delivered.push(event.message.id)
+    })
+    const listener = listeners.get('message-created')!
+    for (let index = 0; index < 750; index++) {
+      listener({
+        bot, selfId: 'self', sn: index + 1, timestamp: 1_800_000_000_000,
+        event: {
+          channel: { id: 'general', type: 0, name: 'General' },
+          message: { id: `m-${index}`, content: 'hello', user: { id: 'alice' } },
+        },
+      })
+    }
+    const closing = unsubscribe()
+    release()
+    await closing
+    expect(delivered).toHaveLength(750)
+    expect(delivered[0]).toBe('m-0')
+    expect(delivered.at(-1)).toBe('m-749')
+    expect(listeners.size).toBe(0)
+  })
+
   it('requires an explicit SID when more than one imported bot exists', () => {
     const first = makeBot()
     const second = { ...makeBot(), sid: 'mock:second' } as Bot

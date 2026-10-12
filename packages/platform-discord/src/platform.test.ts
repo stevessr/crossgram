@@ -282,6 +282,35 @@ describe('DiscordPlatform userbot', () => {
     expect(subdialogs.dialogs.every((item) => item.conversation.id !== channels[4]!.id)).toBe(true)
   })
 
+  it('caches guild root projections during a burst and invalidates on channel changes', async () => {
+    const { guild, channels } = guildChannels(120)
+    guild.systemChannelId = 'missing-system-channel'
+    const channel = channels[0]!
+    const input = message(channel, { id: '900000000000001234' })
+    channel.messages.fetch.mockResolvedValue(input)
+    let checks = 0
+    for (const entry of channels) {
+      const original = entry.permissionsFor
+      entry.permissionsFor = (user: any) => { checks++; return original(user) }
+    }
+    const client = fakeClient(channels)
+    const platform = new DiscordPlatform({ token: 'token' }, { client })
+    const unsubscribe = await platform.subscribe(session, vi.fn())
+    for (let index = 0; index < 25; index++) {
+      const mapped = await platform.getMessage(session, { id: channel.id }, input.id)
+      expect(mapped?.conversationId).toBe(`discord:guild:${guild.id}`)
+    }
+    // Previously every mapped message rechecked all 121 guild channels.
+    expect(checks).toBeLessThan(400)
+    channel.name = 'lobby'
+    channels[1]!.name = 'general'
+    ;(client as any).emit('channelUpdate', channels[1], channels[1])
+    const revised = await platform.getMessage(session, { id: channel.id }, input.id)
+    expect(revised?.conversationId).toBe(channel.id)
+    expect((platform as any).mapConversation(channels[1]).id).toBe(`discord:guild:${guild.id}`)
+    await unsubscribe()
+  })
+
   it('maps user mentions, channel links, custom emoji, attachments, replies, and sender aliases', async () => {
     const channel = dmChannel()
     const mentioned = user('300', 'Mentioned')

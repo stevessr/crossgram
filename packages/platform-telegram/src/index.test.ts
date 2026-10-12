@@ -83,6 +83,62 @@ describe('Telegram text adapter', () => {
       expect(client.destroy).toHaveBeenCalledOnce()
     } finally { vi.useRealTimers() }
   })
+  it('uses a single FIFO drain for a large live update burst without reordering or losing edits', async () => {
+    const { client, adapterClient } = backend()
+    const platform = new TelegramPlatform(adapterClient)
+    const delivered: string[] = []
+    let releaseFirst!: () => void
+    const firstGate = new Promise<void>((resolve) => { releaseFirst = resolve })
+    let entered!: () => void
+    const enteredGate = new Promise<void>((resolve) => { entered = resolve })
+    const unsubscribe = await platform.subscribe(session, async (event) => {
+      if (delivered.length === 0) {
+        entered()
+        await firstGate
+      }
+      if (event.type === 'message' || event.type === 'message-edit') {
+        delivered.push(`${event.type}:${event.message.id}`)
+      }
+    })
+    client.onNewMessage.emit(message(1))
+    await enteredGate
+    for (let i = 2; i <= 1_026; i++) {
+      if (i % 4 === 0) client.onEditMessage.emit(message(i))
+      else client.onNewMessage.emit(message(i))
+    }
+    expect(delivered).toEqual([])
+    releaseFirst()
+    await vi.waitFor(() => expect(delivered).toHaveLength(1_026))
+    expect(delivered[0]).toBe('message:1')
+    expect(delivered[1025]).toBe('message:1026')
+    expect(delivered[3]).toBe('message-edit:4')
+    expect(new Set(delivered).size).toBe(1_026)
+    await unsubscribe()
+  })
+
+  it('releases the queued burst on unsubscribe without waiting for retriable undelivered events', async () => {
+    const { client, adapterClient } = backend()
+    const platform = new TelegramPlatform(adapterClient)
+    const delivered: string[] = []
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let entered!: () => void
+    const enteredGate = new Promise<void>((resolve) => { entered = resolve })
+    const unsubscribe = await platform.subscribe(session, async (event) => {
+      entered()
+      await gate
+      if (event.type === 'message') delivered.push(event.message.id)
+    })
+    client.onNewMessage.emit(message(1))
+    await enteredGate
+    for (let i = 2; i < 1_000; i++) client.onNewMessage.emit(message(i))
+    const closing = unsubscribe()
+    release()
+    await closing
+    expect(delivered).toEqual(['1'])
+    expect(client.onNewMessage.length).toBe(0)
+  })
+
   it('retains media-only messages as explicit unsupported placeholders', () => {
     const msg = message()
     Object.defineProperties(msg, { text: { value: '' }, media: { value: { type: 'photo' } } })
