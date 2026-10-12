@@ -1724,6 +1724,32 @@ describe('QQNTPlatform mapping', () => {
     })
   })
 
+  it('bounds both reconstructible face metadata caches and keeps recently used keys', async () => {
+    const platform = new QQNTPlatform()
+    const internal = platform as any
+    platform.client.getReactionAssetMeta = vi.fn(async () => ({
+      size: 1024, version: 1, source: 'bundle' as const,
+    }))
+    platform.client.resolveStickerAssetMeta = vi.fn(async () => ({
+      size: 2048, version: 1, source: 'bundle' as const,
+    }))
+    for (let index = 0; index < 1_024; index++) {
+      await internal.resolveReactionResourceMeta(session, `reaction-${index}`, {})
+      await internal.resolveStickerAssetMeta(`sticker-${index}`, {})
+    }
+    // A cache hit moves the entry to the newest end rather than evicting it.
+    await internal.resolveReactionResourceMeta(session, 'reaction-0', {})
+    await internal.resolveStickerAssetMeta('sticker-0', {})
+    await internal.resolveReactionResourceMeta(session, 'reaction-new', {})
+    await internal.resolveStickerAssetMeta('sticker-new', {})
+    expect(internal.reactionResourceMeta.size).toBe(1_024)
+    expect(internal.stickerAssetMeta.size).toBe(1_024)
+    expect(internal.reactionResourceMeta.has('reaction-0')).toBe(true)
+    expect(internal.stickerAssetMeta.has('sticker-0')).toBe(true)
+    expect(internal.reactionResourceMeta.has('reaction-1')).toBe(false)
+    expect(internal.stickerAssetMeta.has('sticker-1')).toBe(false)
+  })
+
   it('publishes the exact size and version of a relayed QQ face sticker', async () => {
     const platform = new QQNTPlatform()
     platform.client.getReactionCatalog = vi.fn(async () => ({ available: [], reactions: [], maxSelected: 20 }))

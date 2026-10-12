@@ -92,6 +92,9 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   private readonly logger?: MatrixLogger
   private accountUserId?: string
   private readonly roomState = new Map<string, Map<string, MatrixEvent>>()
+  // Incremental joined-member totals avoid materializing/scanning the entire
+  // room state for every message-only sync and conversation projection.
+  private readonly joinedMemberCounts = new Map<string, number>()
   private readonly conversations = new Map<string, IMConversation<MatrixMediaLocator>>()
   private readonly directRoomIds = new Set<string>()
   private readonly joinedRoomIds = new Set<string>()
@@ -927,8 +930,15 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     conversation: IMConversationRef,
     userId: string,
   ): Promise<IMConversationMember<MatrixMediaLocator> | null> {
-    const page = await this.getConversationMembers(session, conversation, { limit: 1_000 })
-    return page.members.find((member) => member.user.id === userId) ?? null
+    // Do not fetch/map/sort an entire directory, or stop looking after 1,000
+    // members. The state cache can satisfy most lookups in O(1).
+    const member = this.roomState.get(conversation.id)?.get(`m.room.member\0${userId}`)
+    const cached = member?.content as MatrixRoomMemberContent | undefined
+    if (cached?.membership === 'join') return this.mapMember(userId, cached, conversation.id)
+    const response = await this.client.getMembers(conversation.id)
+    const remote = response.chunk.find((event) =>
+      event.type === 'm.room.member' && event.state_key === userId && event.content.membership === 'join')
+    return remote ? this.mapMember(userId, remote.content, conversation.id) : null
   }
 
   async *downloadMedia(
@@ -978,8 +988,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     handler: (event: IMEvent<MatrixMediaLocator>) => void | Promise<void>,
   ): Promise<void> {
     if (Object.keys(response.rooms?.join ?? {}).length || Object.keys(response.rooms?.leave ?? {}).length || (response.account_data?.events?.length ?? 0) > 0) this.invalidateDialogsSnapshot()
-    this.ingestAccountData(response)
-    const previous = new Map(this.conversations)
+    const directChanged = this.ingestAccountData(response)
     for (const [roomId, room] of Object.entries(response.rooms?.invite ?? {})) {
       const request = this.mapRoomInvite(roomId, room, userId)
       if (!request) continue
@@ -1002,9 +1011,13 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     for (const roomId of Object.keys(response.rooms?.leave ?? {})) {
       if (this.joinedRoomIds.delete(roomId)) joinedMembershipChanged = true
       this.roomState.delete(roomId)
+      this.joinedMemberCounts.delete(roomId)
       this.conversations.delete(roomId)
+      this.pinSnapshots.delete(roomId)
     }
-    this.refreshJoinedRoomState(response.rooms?.join ?? {}, false, joinedMembershipChanged)
+    const hierarchyChanged = this.refreshJoinedRoomState(
+      response.rooms?.join ?? {}, false, joinedMembershipChanged,
+    )
     for (const [roomId, room] of Object.entries(response.rooms?.join ?? {})) {
       const invite = this.pendingInvites.get(roomId)
       const settled = this.locallyResolvedInvites.get(roomId)
@@ -1022,8 +1035,8 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         event.type === 'm.room.pinned_events' && event.state_key === '').at(-1)
       const previousPins = this.pinSnapshots.get(roomId)
       this.ingestState(roomId, stateEvents)
+      const prior = this.conversations.get(roomId)
       const conversation = this.updateConversation(roomId, room)
-      const prior = previous.get(roomId)
       const hierarchyChanged = prior && (prior.parentId !== conversation.parentId || prior.spaceId !== conversation.spaceId
         || prior.kind !== conversation.kind || prior.metadata?.hasSubchannels !== conversation.metadata?.hasSubchannels)
       if (stateChanged || hierarchyChanged) await handler({ type: 'conversation', conversation })
@@ -1098,9 +1111,11 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       const receiptEventId = receipt && latestReadReceipt(receipt.content, userId)
       if (receiptEventId) await handler({ type: 'read', conversationId: roomId, upToMessageId: receiptEventId })
     }
-    for (const roomId of this.joinedRoomIds) {
+    // Message-only syncs cannot alter other rooms' hierarchy or direct state.
+    // Previously this rebuilt every room conversation on every /sync batch.
+    if (hierarchyChanged || directChanged) for (const roomId of this.joinedRoomIds) {
       if (response.rooms?.join?.[roomId]) continue
-      const old = previous.get(roomId)
+      const old = this.conversations.get(roomId)
       if (!old) continue
       const now = this.updateConversation(roomId)
       if (old.parentId !== now.parentId || old.spaceId !== now.spaceId
@@ -1165,17 +1180,22 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     }
   }
 
-  private ingestAccountData(response: MatrixSyncResponse): void {
+  private ingestAccountData(response: MatrixSyncResponse): boolean {
     const events = [
       ...(response.account_data?.events ?? []),
       ...Object.values(response.rooms?.join ?? {}).flatMap((room) => room.account_data?.events ?? []),
     ]
     const direct = events.find((event) => event.type === 'm.direct')?.content as MatrixDirectAccountData | undefined
-    if (!direct) return
-    this.directRoomIds.clear()
+    if (!direct) return false
+    const next = new Set<string>()
     for (const roomIds of Object.values(direct)) {
-      for (const roomId of roomIds) this.directRoomIds.add(roomId)
+      for (const roomId of roomIds) next.add(roomId)
     }
+    if (next.size === this.directRoomIds.size
+      && [...next].every((roomId) => this.directRoomIds.has(roomId))) return false
+    this.directRoomIds.clear()
+    for (const roomId of next) this.directRoomIds.add(roomId)
+    return true
   }
 
   private ingestPollClosures(roomId: string, events: readonly MatrixEvent[]): void {
@@ -1211,10 +1231,11 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     rooms: Record<string, MatrixJoinedRoom>,
     fullSnapshot: boolean,
     membershipChanged = false,
-  ): void {
+  ): boolean {
     if (fullSnapshot) {
       this.joinedRoomIds.clear()
       this.roomState.clear()
+      this.joinedMemberCounts.clear()
       this.conversations.clear()
     }
     let hierarchyDirty = fullSnapshot || membershipChanged
@@ -1238,15 +1259,25 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       this.spaceParents = hierarchy.parents
       this.spaceChildren = hierarchy.children
     }
+    return hierarchyDirty
   }
 
   private ingestState(roomId: string, events: MatrixEvent[]): void {
     const state = this.roomState.get(roomId) ?? new Map<string, MatrixEvent>()
+    let joined = this.joinedMemberCounts.get(roomId) ?? 0
     for (const event of events) {
       if (event.state_key === undefined) continue
-      state.set(`${event.type}\0${event.state_key}`, event)
+      const key = `${event.type}\0${event.state_key}`
+      if (event.type === 'm.room.member') {
+        const before = (state.get(key)?.content as MatrixRoomMemberContent | undefined)?.membership === 'join'
+        const after = (event.content as MatrixRoomMemberContent).membership === 'join'
+        if (before !== after) joined += after ? 1 : -1
+      }
+      state.set(key, event)
     }
     this.roomState.set(roomId, state)
+    if (joined) this.joinedMemberCounts.set(roomId, joined)
+    else this.joinedMemberCounts.delete(roomId)
   }
 
   private cachedPinnedIds(roomId: string): string[] {
@@ -1260,16 +1291,24 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     const avatar = state?.get('m.room.avatar\0')?.content as { url?: string } | undefined
     const create = state?.get('m.room.create\0')?.content as { type?: string } | undefined
     const encrypted = Boolean(state?.get('m.room.encryption\0'))
-    const members = [...(state?.values() ?? [])].filter((event) =>
-      event.type === 'm.room.member' && (event.content as MatrixRoomMemberContent).membership === 'join')
     const direct = this.directRoomIds.has(roomId)
     const parentId = this.spaceParents.get(roomId)
     const isSpace = create?.type === 'm.space'
     let spaceId = parentId
     while (spaceId && this.spaceParents.has(spaceId)) spaceId = this.spaceParents.get(spaceId)
     if (!spaceId && isSpace) spaceId = roomId
-    const heroId = room?.summary?.['m.heroes']?.find((id) => id !== this.accountUserId)
-      ?? members.find((event) => event.state_key !== this.accountUserId)?.state_key
+    let heroId = room?.summary?.['m.heroes']?.find((id) => id !== this.accountUserId)
+    // Only direct rooms require a fallback member name. Regular groups never
+    // need to scan thousands of state entries just to map a message.
+    if (!heroId && direct && state) {
+      for (const event of state.values()) {
+        if (event.type === 'm.room.member' && event.state_key !== this.accountUserId
+          && (event.content as MatrixRoomMemberContent).membership === 'join') {
+          heroId = event.state_key
+          break
+        }
+      }
+    }
     const hero = heroId ? state?.get(`m.room.member\0${heroId}`)?.content as MatrixRoomMemberContent | undefined : undefined
     const title = name?.name || alias?.alias || (direct ? hero?.displayname || heroId : undefined) || roomId
     const selfState = this.accountUserId
@@ -1294,7 +1333,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         matrixSpace: isSpace,
         hasSubchannels: isSpace && (this.spaceChildren.get(roomId)?.length ?? 0) > 0,
         encrypted,
-        participantsCount: room?.summary?.['m.joined_member_count'] ?? members.length,
+        participantsCount: room?.summary?.['m.joined_member_count'] ?? this.joinedMemberCounts.get(roomId) ?? 0,
       },
     }
     this.conversations.set(roomId, conversation)
