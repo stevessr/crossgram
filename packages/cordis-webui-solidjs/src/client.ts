@@ -35,6 +35,10 @@ export class Client {
   protobuf = false
   private active = true
   private inFlight = new Set<number>()
+  private readonly streams = new Map<number, {
+    cancelled: boolean
+    iterator?: AsyncIterator<unknown>
+  }>()
   private pingTimer?: ReturnType<typeof setInterval>
   private awaitingPongSince = 0
   private receivedPong = () => { this.awaitingPongSince = 0 }
@@ -50,6 +54,7 @@ export class Client {
         version: webui.version,
         buildId: webui.buildId,
         transport: PROTO_TRANSPORT,
+        features: { rpcStream: true },
         reset: true,
         entries: Object.fromEntries(
           Object.values(webui.entries).map((entry) => [
@@ -151,6 +156,11 @@ export class Client {
     this.socket.off?.('pong', this.receivedPong)
     this.subscriptions.clear()
     this.inFlight.clear()
+    for (const state of this.streams.values()) {
+      state.cancelled = true
+      if (state.iterator?.return) void Promise.resolve(state.iterator.return()).catch(() => {})
+    }
+    this.streams.clear()
     this.socket.removeEventListener('message', this.receive)
     this.socket.removeEventListener('close', this.dispose)
     delete this.webui.clients[this.id]
@@ -209,6 +219,16 @@ export class Client {
         this.subscriptions.delete(body?.id)
         return
       }
+      if (type === 'rpc:cancel') {
+        if (!Number.isSafeInteger(body?.sn) || body.sn < 0)
+          throw new Error('Invalid RPC cancel request')
+        const state = this.streams.get(body.sn)
+        if (state) {
+          state.cancelled = true
+          if (state.iterator?.return) void Promise.resolve(state.iterator.return()).catch(() => {})
+        }
+        return
+      }
       if (type !== 'rpc:request') return
       if (
         !Number.isSafeInteger(body?.sn) ||
@@ -239,20 +259,48 @@ export class Client {
         return
       }
       this.inFlight.add(sn)
+      const streaming = body.stream === true
+      const state = { cancelled: false, iterator: undefined as AsyncIterator<unknown> | undefined }
+      if (streaming) {
+        this.streams.set(sn, state)
+        this.send({ type: 'rpc:start', body: { sn } })
+      }
       try {
         const value = await Reflect.apply(fn, entry, args)
-        this.send({ type: 'rpc:response', body: { sn, ok: true, value } })
+        if (!streaming) {
+          this.send({ type: 'rpc:response', body: { sn, ok: true, value } })
+        } else if (!state.cancelled) {
+          if (value && typeof value[Symbol.asyncIterator] === 'function') {
+            state.iterator = value[Symbol.asyncIterator]()
+            while (!state.cancelled) {
+              const next = await state.iterator.next()
+              if (next.done) break
+              if (!this.send({ type: 'rpc:delta', body: { sn, value: next.value } })) break
+            }
+          } else {
+            this.send({ type: 'rpc:delta', body: { sn, value } })
+          }
+          if (!state.cancelled) this.send({ type: 'rpc:complete', body: { sn } })
+        }
       } catch (error) {
-        this.send({
-          type: 'rpc:response',
-          body: {
-            sn,
-            ok: false,
-            message: error instanceof Error ? error.message : String(error),
-          },
-        })
+        if (streaming) {
+          if (!state.cancelled) this.send({
+            type: 'rpc:error',
+            body: { sn, message: error instanceof Error ? error.message : String(error) },
+          })
+        } else {
+          this.send({
+            type: 'rpc:response',
+            body: {
+              sn,
+              ok: false,
+              message: error instanceof Error ? error.message : String(error),
+            },
+          })
+        }
       } finally {
         this.inFlight.delete(sn)
+        if (streaming) this.streams.delete(sn)
       }
     } catch {
       this.socket.close(1007, 'Invalid WebUI message')

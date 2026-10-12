@@ -112,3 +112,31 @@ middleware remains in force.
 SSE intentionally cannot mutate state or invoke RPC; those capabilities
 remain on the authenticated WebSocket control plane. Disable this transport
 with `enableSse: false` if the endpoint is not needed.
+
+
+## Incremental WebSocket RPC
+
+New WebUI servers advertise `features.rpcStream = true` in the initial
+`entry:init` handshake. Existing `rpc:request` / `rpc:response` Promise
+calls remain unchanged. Opt-in requests supply `stream: true`, causing
+`rpc:start`, repeated `rpc:delta`, then `rpc:complete` (or `rpc:error`).
+These message kinds also have protobuf enum values 11–15 and are supported in
+JSON mode before an upgrade.
+
+Browser callers can consume an exposed async-generator method with:
+
+```ts
+for await (const chunk of connection.rpcStream('entry-id', 'method', [arg])) {
+  // Each chunk is an individual server-generated value.
+}
+```
+
+Breaking out of the iteration sends `rpc:cancel`; the server invokes
+`AsyncIterator.return()` if provided. Stream cancellation is cooperative,
+not transactional: a mutation may already have completed. The browser also
+limits unread chunks to 16, enforces a per-chunk idle timeout, and fails active
+streams on WS disconnect rather than replaying side effects.
+
+A method that returns a non-iterable value with `stream: true` yields one
+`rpc:delta` and then completes. Streaming is **opt-in**, preserving compatibility
+with all existing WebUI plugins and non-streaming clients.

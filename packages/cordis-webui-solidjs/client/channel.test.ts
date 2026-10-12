@@ -163,6 +163,61 @@ describe('Connection lifecycle', () => {
     release()
     connection.stop()
   })
+  it('iterates streamed RPC values and stops after completion', async () => {
+    const { connection, socket } = setup()
+    socket.receive('entry:init', {
+      version: 'solid-1', reset: true,
+      features: { rpcStream: true },
+      entries: { test: meta },
+    })
+    const iterator = connection.rpcStream<number>('test', 'save', [1])
+    const first = iterator.next()
+    const request = socket.frames.at(-1)
+    expect(request.type).toBe('rpc:request')
+    expect(request.body.stream).toBe(true)
+    const sn = request.body.sn
+    socket.receive('rpc:start', { sn })
+    socket.receive('rpc:delta', { sn, value: 10 })
+    await expect(first).resolves.toEqual({ value: 10, done: false })
+    const second = iterator.next()
+    socket.receive('rpc:delta', { sn, value: 20 })
+    await expect(second).resolves.toEqual({ value: 20, done: false })
+    const done = iterator.next()
+    socket.receive('rpc:complete', { sn })
+    await expect(done).resolves.toEqual({ value: undefined, done: true })
+    connection.stop()
+  })
+  it('sends rpc:cancel when a streaming consumer breaks iteration', async () => {
+    const { connection, socket } = setup()
+    socket.receive('entry:init', {
+      version: 'solid-1', reset: true, features: { rpcStream: true },
+      entries: { test: meta },
+    })
+    const iterator = connection.rpcStream<number>('test', 'save')
+    const first = iterator.next()
+    const sn = socket.frames.at(-1).body.sn
+    socket.receive('rpc:delta', { sn, value: 1 })
+    await first
+    await iterator.return(undefined)
+    expect(socket.frames.at(-1)).toEqual({ type: 'rpc:cancel', body: { sn } })
+    connection.stop()
+  })
+  it('rejects streamed RPC failures without disrupting normal promises', async () => {
+    const { connection, socket } = setup()
+    socket.receive('entry:init', {
+      version: 'solid-1', reset: true, features: { rpcStream: true },
+      entries: { test: meta },
+    })
+    const iterator = connection.rpcStream('test', 'save')
+    const first = iterator.next()
+    const sn = socket.frames.at(-1).body.sn
+    socket.receive('rpc:error', { sn, message: 'failure' })
+    await expect(first).rejects.toThrow('failure')
+    const normal = connection.rpc('test', 'save')
+    socket.receive('rpc:response', { sn: socket.frames.at(-1).body.sn, ok: true, value: 42 })
+    await expect(normal).resolves.toBe(42)
+    connection.stop()
+  })
   it('detects a changed server build without clearing metadata or replaying RPCs', () => {
     const { connection, socket } = setup()
     connection.config.buildId = 'old-build'

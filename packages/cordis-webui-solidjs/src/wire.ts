@@ -23,6 +23,11 @@ const names = [
   'entry:unsubscribe',
   'ping',
   'pong',
+  'rpc:start',
+  'rpc:delta',
+  'rpc:complete',
+  'rpc:error',
+  'rpc:cancel',
 ] as const
 const kinds: Record<string, number> = Object.fromEntries(
   names.map((name, i) => [name, i]).slice(1),

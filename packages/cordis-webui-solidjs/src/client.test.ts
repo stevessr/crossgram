@@ -208,6 +208,57 @@ describe('bounded subscription/RPC transport', () => {
     expect(socket.frames.at(-1).body.message).toBe('Too many pending requests')
     client.dispose()
   })
+  it('streams an async iterable with start/delta/complete and keeps legacy RPC intact', async () => {
+    const { socket, request } = setup({
+      async *events() {
+        yield { index: 1 }
+        yield { index: 2 }
+      },
+    })
+    await request('rpc:request', {
+      sn: 7, entryId: 'entry', method: 'events', args: [], stream: true,
+    })
+    expect(socket.frames.filter(frame => frame.body?.sn === 7).map(frame => frame.type))
+      .toEqual(['rpc:start', 'rpc:delta', 'rpc:delta', 'rpc:complete'])
+    expect(socket.frames.filter(frame => frame.type === 'rpc:delta').map(frame => frame.body.value.index))
+      .toEqual([1, 2])
+    expect(socket.frames.some(frame => frame.type === 'rpc:response' && frame.body?.sn === 7)).toBe(false)
+  })
+  it('cancels an in-flight stream and never sends a late completion', async () => {
+    let resume!: () => void
+    const block = new Promise<void>(resolve => { resume = resolve })
+    const { socket, request, client } = setup({
+      async *events() {
+        yield 'first'
+        await block
+        yield 'second'
+      },
+    })
+    const pending = request('rpc:request', {
+      sn: 8, entryId: 'entry', method: 'events', args: [], stream: true,
+    })
+    await vi.waitFor(() => expect(socket.frames.some(frame => frame.type === 'rpc:delta' && frame.body.sn === 8)).toBe(true))
+    await request('rpc:cancel', { sn: 8 })
+    resume()
+    await pending
+    expect(socket.frames.filter(frame => frame.body?.sn === 8).map(frame => frame.type))
+      .toEqual(['rpc:start', 'rpc:delta'])
+    client.dispose()
+  })
+  it('emits a terminal rpc:error rather than closing WS on stream failure', async () => {
+    const { request, socket } = setup({
+      async *events() {
+        yield 'before-error'
+        throw new Error('stream broke')
+      },
+    })
+    await request('rpc:request', {
+      sn: 9, entryId: 'entry', method: 'events', args: [], stream: true,
+    })
+    expect(socket.frames.at(-1)).toEqual({
+      type: 'rpc:error', body: { sn: 9, message: 'stream broke' },
+    })
+  })
   it('uses native WS control pings and releases the timer/listener on timeout', async () => {
     vi.useFakeTimers()
     try {
