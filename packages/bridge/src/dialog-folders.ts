@@ -48,8 +48,8 @@ export class DialogFolderStore {
   /** Reconcile native platform folders without claiming user-authored filter IDs. */
   async syncPlatformFolders(platformSessionId: string, folders: readonly IMChatFolder[]): Promise<void> {
     const existing = await this._database.get('mtproto_dialog_filter', { platformSessionId })
-    const bySource = new Map(existing.filter((row) => typeof (row.payload as StoredDialogFilter | null)?.sourceId === 'string')
-      .map((row) => [(row.payload as StoredDialogFilter).sourceId!, row]))
+    const bySource = new Map(existing.filter((row) => typeof (row.payload as unknown as StoredDialogFilter | null)?.sourceId === 'string')
+      .map((row) => [(row.payload as unknown as StoredDialogFilter).sourceId!, row]))
     const ids = new Set(existing.map((row) => row.filterId))
     const desired = new Set<string>()
     let order = Math.max(0, ...existing.map((row) => row.sortOrder)) + 1
