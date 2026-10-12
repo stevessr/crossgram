@@ -21,12 +21,16 @@ update-store-database 插件现在支持可选的 MTProto 更新投递日志分�
       batchWindowMs: 8
       maxBatchSize: 64
       busyTimeoutMs: 5000
+      cacheSizeKiB: 1024  # 每个账号最多约 1 MiB SQLite page cache
+      mmapSizeMiB: 0    # 默认关闭映射；活跃账号可单独开启
       accounts:
         # 账号实例 ID 可以查询主库 mtproto_platform_session 表
         '<discord-account-session-id>':
           path: ./data/update-shards/discord-main.db
           batchWindowMs: 5
           maxBatchSize: 128
+          cacheSizeKiB: 4096
+          mmapSizeMiB: 16
         '<qq-account-session-id>':
           path: ./data/update-shards/qq-main.db
           batchWindowMs: 20
@@ -41,6 +45,7 @@ update-store-database 插件现在支持可选的 MTProto 更新投递日志分�
 - 所有写入 API 返回的 Promise 都在对应账号的 SQLite COMMIT 成功后才完成，不提前确认尚在内存队列中的事件。批次内任一操作失败会回滚整个批次。
 - 读取前强制排空相关账号的未提交队列，确保 read-your-writes。进程退出时关闭连接前也会提交队列。
 - 每个文件单独使用 WAL、busy_timeout 与 synchronous=FULL，优先保证提交后掉电持久性；数据库文件可分别使用操作系统文件页缓存，且不会竞争同一 SQLite 写锁。
+- cacheSizeKiB 控制 SQLite 私有页缓存预算（默认每账号 1024 KiB、最低 256 KiB、最高 64 MiB），它与操作系统的文件页缓存不同；mmapSizeMiB 控制可选的 SQLite 只读内存映射窗口（默认 0、最高 1024 MiB）。对冷门账号使用较低缓存预算，给活跃账号更高额度通常比一律扩大缓存更节省总内存。
 - 该实现仍使用 node:sqlite 的同步 DatabaseSync：账号之间消除了同文件写锁竞争，但还没有把 SQLite 操作派给 worker_threads，因此不要将其理解为 Node 主线程内的真正多核 SQL 并行。
 
 ## 升级与恢复
