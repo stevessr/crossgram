@@ -1,4 +1,5 @@
 /** @jsxImportSource solid-js */
+import { t } from 'cordis-webui-solidjs/i18n'
 import {
   createEffect,
   createMemo,
@@ -33,7 +34,7 @@ import {
 } from './statistics-model.js'
 type Tab = 'overview' | 'rpc' | 'network' | 'files' | 'runtime'
 const tabs: { id: Tab; label: string }[] = [
-  { id: 'overview', label: 'Overview' },
+  { id: 'overview', label: t("Overview") },
   { id: 'rpc', label: 'RPC' },
   { id: 'network', label: 'Network & IPs' },
   { id: 'files', label: 'File routes' },
@@ -44,13 +45,13 @@ export default function StatisticsPage(props: PageProps) {
   return (
     <>
       <PageHeader
-        title="MTProto statistics"
-        description="A quieter view of traffic, latency, and the health of your relay."
+        title={t("MTProto statistics")}
+        description={t("A quieter view of traffic, latency, and the health of your relay.")}
         actions={
           <ConfirmAction
-            label="Reset statistics"
-            title="Reset these statistics?"
-            description="Counters and historical samples will be cleared. Active connections stay open."
+            label={t("Reset statistics")}
+            title={t("Reset these statistics?")}
+            description={t("Counters and historical samples will be cleared. Active connections stay open.")}
             action={() => rpc.data.reset()}
           />
         }
@@ -80,7 +81,7 @@ export function StatisticsDashboard(props: {
     points().map((point) => point[key])
   const runtime = () => snapshot().runtime
   const methodColumns: Column<any>[] = [
-    { label: 'Method', key: 'method' },
+    { label: t("Method"), key: 'method' },
     { label: 'Calls', key: 'count', format: formatNumber },
     { label: 'Average', key: 'averageMs', format: formatMs },
     { label: 'P90', key: 'p90Ms', format: formatMs },
@@ -90,16 +91,16 @@ export function StatisticsDashboard(props: {
   ]
   const slowColumns: Column<any>[] = [
     { label: 'When', key: 'at', format: formatTimestamp },
-    { label: 'Method', key: 'method' },
-    { label: 'Duration', key: 'durationMs', format: formatMs },
-    { label: 'Connection', key: 'connectionId' },
+    { label: t("Method"), key: 'method' },
+    { label: t("Duration"), key: 'durationMs', format: formatMs },
+    { label: t("Connection"), key: 'connectionId' },
     { label: 'IP', key: 'remoteAddress' },
-    { label: 'Error', key: 'error' },
+    { label: t("Error"), key: 'error' },
   ]
   return (
     <div class="stack statistics-dashboard">
       <div class="stats-toolbar">
-        <div class="segmented" role="tablist" aria-label="Statistics sections">
+        <div class="segmented" role="tablist" aria-label={t("Statistics sections")}>
           <For each={tabs}>
             {(item) => (
               <button
@@ -114,17 +115,17 @@ export function StatisticsDashboard(props: {
           </For>
         </div>
         <label class="field">
-          <span class="sr-only">Chart interval</span>
+          <span class="sr-only">{t("Chart interval")}</span>
           <select
-            aria-label="Chart interval"
+            aria-label={t("Chart interval")}
             value={range()}
             onChange={(event) =>
               setRange(event.currentTarget.value as keyof StatisticsSeries)
             }
           >
-            <option value="seconds">Recent samples</option>
-            <option value="minutes">Minute aggregates</option>
-            <option value="hours">Hour aggregates</option>
+            <option value="seconds">{t("Recent samples")}</option>
+            <option value="minutes">{t("Minute aggregates")}</option>
+            <option value="hours">{t("Hour aggregates")}</option>
           </select>
         </label>
       </div>
@@ -155,7 +156,7 @@ export function StatisticsDashboard(props: {
             tone="tertiary"
           />
           <Metric
-            label="Network throughput"
+            label={t("Network throughput")}
             value={
               formatBytes(
                 snapshot().traffic.receivedBytesPerSecond +
@@ -174,7 +175,7 @@ export function StatisticsDashboard(props: {
             )}
           />
           <Metric
-            label="Active connections"
+            label={t("Active connections")}
             value={formatNumber(snapshot().activeConnections)}
             detail={
               formatNumber(snapshot().totalConnections) +
@@ -194,7 +195,7 @@ export function StatisticsDashboard(props: {
             tone="tertiary"
           />
           <Metric
-            label="Resident memory"
+            label={t("Resident memory")}
             value={formatBytes(runtime().rssBytes)}
             detail={
               'Heap ' +
@@ -206,12 +207,12 @@ export function StatisticsDashboard(props: {
           />
         </div>
         <StatsTable
-          title="Slowest RPC methods"
+          title={t("Slowest RPC methods")}
           rows={snapshot().methods.slice(0, 10)}
           columns={methodColumns}
         />
         <StatsTable
-          title="Recent slow requests"
+          title={t("Recent slow requests")}
           rows={snapshot().slowest.slice(0, 10)}
           columns={slowColumns}
         />
@@ -219,7 +220,7 @@ export function StatisticsDashboard(props: {
       <Show when={tab() === 'rpc'}>
         <div class="stats-metrics">
           <Metric
-            label="Average RPC latency"
+            label={t("Average RPC latency")}
             value={formatMs(snapshot().rpc.averageMs)}
             detail={formatNumber(snapshot().rpc.count) + ' calls'}
             values={values('rpcP90Ms')}
@@ -246,7 +247,7 @@ export function StatisticsDashboard(props: {
             tone="tertiary"
           />
           <Metric
-            label="RPC error rate"
+            label={t("RPC error rate")}
             value={formatPercent(snapshot().rpc.errorRate)}
             detail={formatNumber(snapshot().rpc.errors) + ' errors'}
             values={values('rpcErrors')}
@@ -255,14 +256,14 @@ export function StatisticsDashboard(props: {
         </div>
         <div class="stats-two-columns">
           <Distribution
-            title="RPC method distribution"
+            title={t("RPC method distribution")}
             slices={distributionSlices(
               snapshot().methodDistribution,
               snapshot().rpc.count,
             )}
           />
           <Distribution
-            title="Successful and failed calls"
+            title={t("Successful and failed calls")}
             slices={[
               {
                 label: 'Success',
@@ -276,15 +277,15 @@ export function StatisticsDashboard(props: {
           />
         </div>
         <StatsTable
-          title="RPC methods"
+          title={t("RPC methods")}
           rows={snapshot().methods}
           columns={methodColumns}
         />
         <StatsTable
-          title="RPC failure reasons"
+          title={t("RPC failure reasons")}
           rows={snapshot().failureReasons}
           columns={[
-            { label: 'Method', key: 'method' },
+            { label: t("Method"), key: 'method' },
             { label: 'Category', key: 'category' },
             { label: 'Code', key: 'errorCode' },
             { label: 'Reason', key: 'errorMessage' },
@@ -300,7 +301,7 @@ export function StatisticsDashboard(props: {
         />
         <div class="stats-two-columns">
           <StatsTable
-            title="Failure categories"
+            title={t("Failure categories")}
             rows={snapshot().failures}
             columns={[
               { label: 'Category', key: 'category' },
@@ -315,7 +316,7 @@ export function StatisticsDashboard(props: {
             }
             rows={snapshot().missingRpcs.methods}
             columns={[
-              { label: 'Method', key: 'method' },
+              { label: t("Method"), key: 'method' },
               { label: 'Count', key: 'count' },
               {
                 label: 'Last seen',
@@ -326,20 +327,20 @@ export function StatisticsDashboard(props: {
           />
         </div>
         <StatsTable
-          title="Recent RPC errors"
+          title={t("Recent RPC errors")}
           rows={snapshot().recentFailures}
           columns={[
             { label: 'When', key: 'at', format: formatTimestamp },
-            { label: 'Method', key: 'method' },
+            { label: t("Method"), key: 'method' },
             { label: 'Request', key: 'requestSummary' },
             { label: 'Code', key: 'errorCode' },
             { label: 'Reason', key: 'errorMessage' },
-            { label: 'Connection', key: 'connectionId' },
+            { label: t("Connection"), key: 'connectionId' },
             { label: 'IP', key: 'remoteAddress' },
           ]}
         />
         <StatsTable
-          title="Slow requests"
+          title={t("Slow requests")}
           rows={snapshot().slowest}
           columns={slowColumns}
         />
@@ -347,7 +348,7 @@ export function StatisticsDashboard(props: {
       <Show when={tab() === 'network'}>
         <div class="stats-metrics">
           <Metric
-            label="Receive rate"
+            label={t("Receive rate")}
             value={
               formatBytes(snapshot().traffic.receivedBytesPerSecond) + '/s'
             }
@@ -355,7 +356,7 @@ export function StatisticsDashboard(props: {
             values={values('receivedBytes')}
           />
           <Metric
-            label="Send rate"
+            label={t("Send rate")}
             value={formatBytes(snapshot().traffic.sentBytesPerSecond) + '/s'}
             detail={formatBytes(snapshot().traffic.sentBytes) + ' sent'}
             values={values('sentBytes')}
@@ -372,27 +373,27 @@ export function StatisticsDashboard(props: {
             tone="tertiary"
           />
           <Metric
-            label="Connections"
+            label={t("Connections")}
             value={String(snapshot().activeConnections)}
             detail={snapshot().totalConnections + ' total'}
             values={values('activeConnections')}
           />
         </div>
         <StatsTable
-          title="Traffic by source IP"
+          title={t("Traffic by source IP")}
           rows={snapshot().ips}
           columns={[
             { label: 'IP', key: 'address' },
             { label: 'Active', key: 'activeConnections' },
             { label: 'Total', key: 'totalConnections' },
             { label: 'RPCs', key: 'rpcCount' },
-            { label: 'Received', key: 'receivedBytes', format: formatBytes },
+            { label: t("Received"), key: 'receivedBytes', format: formatBytes },
             {
               label: 'Receive rate',
               key: 'receivedBytesPerSecond',
               format: (value) => formatBytes(value) + '/s',
             },
-            { label: 'Sent', key: 'sentBytes', format: formatBytes },
+            { label: t("Sent"), key: 'sentBytes', format: formatBytes },
             {
               label: 'Send rate',
               key: 'sentBytesPerSecond',
@@ -405,24 +406,24 @@ export function StatisticsDashboard(props: {
       <Show when={tab() === 'files'}>
         <div class="stats-metrics">
           <Metric
-            label="File route observations"
+            label={t("File route observations")}
             value={formatNumber(snapshot().fileRoutes.totalFiles)}
             detail="Deduplicated file routes"
           />
           <Metric
-            label="Direct-download rate"
+            label={t("Direct-download rate")}
             value={formatPercent(snapshot().fileRoutes.directRate)}
             detail={
               formatNumber(snapshot().fileRoutes.directFiles) + ' direct files'
             }
           />
           <Metric
-            label="Direct files"
+            label={t("Direct files")}
             value={formatNumber(snapshot().fileRoutes.directFiles)}
             detail="A direct URL was returned"
           />
           <Metric
-            label="Relayed files"
+            label={t("Relayed files")}
             value={formatNumber(snapshot().fileRoutes.relayFiles)}
             detail="Content was sent through upload.getFile"
             tone="tertiary"
@@ -430,14 +431,14 @@ export function StatisticsDashboard(props: {
         </div>
         <div class="stats-two-columns">
           <Distribution
-            title="Direct and relayed files"
+            title={t("Direct and relayed files")}
             slices={[
               { label: 'Direct', value: snapshot().fileRoutes.directFiles },
               { label: 'Relayed', value: snapshot().fileRoutes.relayFiles },
             ]}
           />
           <section class="panel stack">
-            <h2>How to read these numbers</h2>
+            <h2>{t("How to read these numbers")}</h2>
             <p>
               Successful direct URL responses and relayed file content are
               counted separately. Consecutive chunks for the same device, file,
@@ -451,7 +452,7 @@ export function StatisticsDashboard(props: {
           </section>
         </div>
         <StatsTable
-          title="File routes by device"
+          title={t("File routes by device")}
           rows={snapshot().fileRoutes.devices}
           columns={[
             { label: 'Device', key: 'deviceModel' },
@@ -485,7 +486,7 @@ export function StatisticsDashboard(props: {
             values={values('rssBytes')}
           />
           <Metric
-            label="Cgroup memory"
+            label={t("Cgroup memory")}
             value={formatBytes(runtime().cgroupMemoryCurrentBytes)}
             detail={
               'Peak ' +
@@ -498,7 +499,7 @@ export function StatisticsDashboard(props: {
             values={values('cgroupMemoryCurrentBytes')}
           />
           <Metric
-            label="Cgroup anonymous memory"
+            label={t("Cgroup anonymous memory")}
             value={formatBytes(runtime().cgroupAnonBytes)}
             detail={
               'File ' +
@@ -509,7 +510,7 @@ export function StatisticsDashboard(props: {
             values={values('cgroupAnonBytes')}
           />
           <Metric
-            label="Swap"
+            label={t("Swap")}
             value={formatBytes(runtime().cgroupSwapBytes)}
             detail={
               'Shared ' +
@@ -523,7 +524,7 @@ export function StatisticsDashboard(props: {
             tone="tertiary"
           />
           <Metric
-            label="V8 heap"
+            label={t("V8 heap")}
             value={
               formatBytes(runtime().heapUsedBytes) +
               ' / ' +
@@ -538,7 +539,7 @@ export function StatisticsDashboard(props: {
             values={values('heapUsedBytes')}
           />
           <Metric
-            label="Event-loop delay P99"
+            label={t("Event-loop delay P99")}
             value={formatMs(runtime().eventLoopDelayP99Ms)}
             detail={
               'Mean ' +
@@ -550,35 +551,35 @@ export function StatisticsDashboard(props: {
             tone="tertiary"
           />
           <Metric
-            label="Garbage collection"
+            label={t("Garbage collection")}
             value={formatMs(runtime().gcDurationMs)}
             detail={runtime().gcCount + ' collections in the current interval'}
             values={values('gcDurationMs')}
           />
           <Metric
-            label="External memory"
+            label={t("External memory")}
             value={formatBytes(runtime().externalBytes)}
             detail="Native allocations tied to JavaScript objects"
             values={values('externalBytes')}
           />
           <Metric
-            label="Array buffers"
+            label={t("Array buffers")}
             value={formatBytes(runtime().arrayBuffersBytes)}
             detail="Buffer and typed-array backing stores"
             values={values('arrayBuffersBytes')}
           />
           <Metric
-            label="V8 malloc"
+            label={t("V8 malloc")}
             value={formatBytes(runtime().mallocedBytes)}
             detail={'Peak ' + formatBytes(runtime().peakMallocedBytes)}
           />
           <Metric
-            label="V8 contexts"
+            label={t("V8 contexts")}
             value={String(runtime().nativeContexts)}
             detail={runtime().detachedContexts + ' detached'}
           />
           <Metric
-            label="Uptime"
+            label={t("Uptime")}
             value={uptime(runtime().uptimeSeconds)}
             detail={'Statistics began ' + formatTimestamp(snapshot().startedAt)}
           />
@@ -649,7 +650,7 @@ function Distribution(props: {
           )}
         </For>
         <Show when={!total()}>
-          <p class="muted">No observations yet.</p>
+          <p class="muted">{t("No observations yet.")}</p>
         </Show>
       </div>
     </section>
@@ -690,7 +691,7 @@ export function StatsTable<T extends object>(props: {
             <span class="sr-only">{'Search ' + props.title}</span>
             <input
               type="search"
-              placeholder="Filter rows…"
+              placeholder={t("Filter rows…")}
               value={query()}
               onInput={(event) => {
                 setQuery(event.currentTarget.value)
@@ -729,7 +730,7 @@ export function StatsTable<T extends object>(props: {
         </table>
       </div>
       <Show when={!rows().length}>
-        <p class="muted">No observations yet.</p>
+        <p class="muted">{t("No observations yet.")}</p>
       </Show>
       <Show when={rows().length > 25}>
         <div class="pagination">
@@ -737,17 +738,13 @@ export function StatsTable<T extends object>(props: {
             class="button outlined"
             disabled={!page()}
             onClick={() => setPage(page() - 1)}
-          >
-            Previous page
-          </button>
+          >{t("Previous page")}</button>
           <span>{rows().length} rows</span>
           <button
             class="button outlined"
             disabled={(page() + 1) * 25 >= rows().length}
             onClick={() => setPage(page() + 1)}
-          >
-            Next page
-          </button>
+          >{t("Next page")}</button>
         </div>
       </Show>
     </section>

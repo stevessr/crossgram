@@ -1,4 +1,5 @@
 /** @jsxImportSource solid-js */
+import { t } from 'cordis-webui-solidjs/i18n'
 import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
 import type { StickerPackDashboardData } from '../src/dashboard-types.js'
 import { useRpc, type PageProps } from 'cordis-webui-solidjs/client'
@@ -45,8 +46,8 @@ export default function StickersPage(props: PageProps) {
   return (
     <>
       <PageHeader
-        title="Sticker collections"
-        description="Choose the collections that make each account feel like yours."
+        title={t("Sticker collections")}
+        description={t("Choose the collections that make each account feel like yours.")}
         actions={
           <button
             class="button outlined"
@@ -54,18 +55,16 @@ export default function StickersPage(props: PageProps) {
             onClick={() =>
               void action.run(() => rpc.data.refreshStickerPacks())
             }
-          >
-            Refresh collections
-          </button>
+          >{t("Refresh collections")}</button>
         }
       />
       <ActionError error={action.error()} />
       <LiveContent ready={rpc.ready}>
         <div class="panel toolbar sticker-controls">
           <label class="field grow">
-            <span>Assign to account</span>
+            <span>{t("Assign to account")}</span>
             <select
-              aria-label="Assign to account"
+              aria-label={t("Assign to account")}
               value={selected()}
               onChange={(event) => setSelected(event.currentTarget.value)}
             >
@@ -80,7 +79,7 @@ export default function StickersPage(props: PageProps) {
             </select>
           </label>
           <label class="field grow">
-            <span>Find a collection</span>
+            <span>{t("Find a collection")}</span>
             <input
               type="search"
               value={search()}
@@ -95,10 +94,8 @@ export default function StickersPage(props: PageProps) {
           when={selected()}
           fallback={
             <section class="panel empty-state">
-              <h2>No accounts to manage yet</h2>
-              <p>
-                Connect a platform account before assigning sticker collections.
-              </p>
+              <h2>{t("No accounts to manage yet")}</h2>
+              <p>{t("Connect a platform account before assigning sticker collections.")}</p>
             </section>
           }
         >
@@ -186,8 +183,8 @@ export default function StickersPage(props: PageProps) {
           <Show when={!ids().length}>
             <EmptyState
               icon="search"
-              title="No matching collections"
-              description="Try a different search term."
+              title={t("No matching collections")}
+              description={t("Try a different search term.")}
             />
           </Show>
           <div class="pagination">
@@ -195,17 +192,13 @@ export default function StickersPage(props: PageProps) {
               class="button outlined"
               disabled={page() === 0}
               onClick={() => setPage(page() - 1)}
-            >
-              Previous page
-            </button>
+            >{t("Previous page")}</button>
             <span>{ids().length} collections</span>
             <button
               class="button outlined"
               disabled={(page() + 1) * 24 >= ids().length}
               onClick={() => setPage(page() + 1)}
-            >
-              Next page
-            </button>
+            >{t("Next page")}</button>
           </div>
         </Show>
       </LiveContent>
