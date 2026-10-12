@@ -13,7 +13,8 @@
     "./components": "./client/components.tsx",
     "./utils": "./client/utils.ts",
     "./session": "./client/session.ts",
-    "./icons": "./client/icons.tsx"
+    "./icons": "./client/icons.tsx",
+    "./i18n": "./client/i18n.ts"
   },
   "cordis": {
     "service": {

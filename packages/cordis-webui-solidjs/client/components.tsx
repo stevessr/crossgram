@@ -1,4 +1,5 @@
 /** @jsxImportSource solid-js */
+import { t } from './i18n.js'
 import { createEffect, createSignal, onCleanup, Show, type JSX } from 'solid-js'
 import { Icon, type IconName } from './icons.js'
 import { useConnection } from './sdk.js'
@@ -12,17 +13,17 @@ export function PageHeader(props: {
   return (
     <header class="page-heading">
       <div class="page-title">
-        <Show when={props.eyebrow}>
-          <span class="eyebrow">{props.eyebrow}</span>
+        <Show when={t(props.eyebrow!)}>
+          <span class="eyebrow">{t(props.eyebrow!)}</span>
         </Show>
         <h1>
           <Show when={props.icon}>
             <Icon name={props.icon!} size={22} />
           </Show>
-          {props.title}
+          {t(props.title)}
         </h1>
-        <Show when={props.description}>
-          <p class="muted">{props.description}</p>
+        <Show when={t(props.description)}>
+          <p class="muted">{t(props.description)}</p>
         </Show>
       </div>
       <Show when={props.actions}>
@@ -42,9 +43,9 @@ export function EmptyState(props: {
   return (
     <section class="panel empty-state">
       <Icon name={props.icon ?? 'sparkle'} size={22} />
-      <h2>{props.title}</h2>
-      <Show when={props.description}>
-        <p>{props.description}</p>
+      <h2>{t(props.title)}</h2>
+      <Show when={t(props.description)}>
+        <p>{t(props.description)}</p>
       </Show>
       {props.action}
     </section>
@@ -96,9 +97,7 @@ export function LiveContent(props: { ready: boolean; children: JSX.Element }) {
       when={loaded()}
       fallback={
         <div class="loading" role="status">
-          <Icon name="refresh" size={18} />
-          Loading live data…
-        </div>
+          <Icon name="refresh" size={18} />{t("Loading live data…")}</div>
       }
     >
       <div classList={{ 'data-stale': !props.ready }}>{props.children}</div>
@@ -119,7 +118,7 @@ export function Modal(props: {
     <dialog
       ref={dialog}
       class="modal"
-      aria-label={props.title}
+      aria-label={t(props.title)}
       onCancel={(event) => {
         event.preventDefault()
         props.onClose()
@@ -130,11 +129,11 @@ export function Modal(props: {
     >
       <div class="modal-content">
         <header class="toolbar">
-          <h2>{props.title}</h2>
+          <h2>{t(props.title)}</h2>
           <button
             type="button"
             class="icon-button"
-            aria-label="Close dialog"
+            aria-label={t("Close dialog")}
             onClick={props.onClose}
           >
             <Icon name="close" />
@@ -163,16 +162,16 @@ export function ConfirmAction(props: {
         disabled={props.disabled || connection.state.status !== 'connected'}
         onClick={() => setOpen(true)}
       >
-        {props.label}
+        {t(props.label)}
       </button>
       <Show when={open()}>
         <Modal
-          title={props.title}
+          title={t(props.title)}
           onClose={() => {
             if (!action.busy()) setOpen(false)
           }}
         >
-          <p>{props.description}</p>
+          <p>{t(props.description)}</p>
           <ActionError error={action.error()} />
           <div class="toolbar">
             <button
@@ -185,15 +184,13 @@ export function ConfirmAction(props: {
                 })
               }
             >
-              {action.busy() ? 'Working…' : props.label}
+              {action.busy() ? t("Working…") : props.label}
             </button>
             <button
               class="button outlined"
               disabled={action.busy()}
               onClick={() => setOpen(false)}
-            >
-              Cancel
-            </button>
+            >{t("Cancel")}</button>
           </div>
         </Modal>
       </Show>

@@ -1,4 +1,5 @@
 /** @jsxImportSource solid-js */
+import { t } from './i18n.js'
 import {
   createEffect,
   createMemo,
@@ -89,14 +90,14 @@ export function App(props: { initialNotice?: string } = {}) {
   const entries = createMemo(() => Object.entries(connection.state.entries))
   const status = () => connection.state.status
   const currentTitle = createMemo(() => {
-    if (path() === '/') return 'Overview'
-    if (path() === '/settings') return 'Appearance'
+    if (path() === '/') return t('Overview')
+    if (path() === '/settings') return t('Appearance')
     const page = pages()
       .filter(
         (page) => path() === page.path || path().startsWith(page.path + '/'),
       )
       .sort((a, b) => b.path.length - a.path.length)[0]
-    if (page) return page.title
+    if (page) return t(page.title)
     return path()
       .replace(/^\//, '')
       .split(/[/-]/)
@@ -108,13 +109,11 @@ export function App(props: { initialNotice?: string } = {}) {
     path() === target || (target !== '/' && path().startsWith(target + '/'))
   return (
     <div class="app-shell">
-      <a class="skip-link" href="#main">
-        Skip to main content
-      </a>
+      <a class="skip-link" href="#main">{t("Skip to main content")}</a>
       <Show when={menu()}>
         <button
           class="nav-scrim"
-          aria-label="Close navigation"
+          aria-label={t("Close navigation")}
           onClick={closeMenu}
         />
       </Show>
@@ -126,7 +125,7 @@ export function App(props: { initialNotice?: string } = {}) {
         aria-modal={mobile() && menu() ? true : undefined}
         class="navigation"
         classList={{ open: menu() }}
-        aria-label="Primary navigation"
+        aria-label={t("Primary navigation")}
       >
         <a
           class="brand"
@@ -141,33 +140,31 @@ export function App(props: { initialNotice?: string } = {}) {
           </span>
           <span>
             {connection.config.title}
-            <small>Relay console</small>
+            <small>{t("Relay console")}</small>
           </span>
         </a>
-        <nav aria-label="Workspace">
+        <nav aria-label={t("Workspace")}>
           <button
             class="nav-item"
             classList={{ selected: isSelected('/') }}
-            aria-current={isSelected('/') ? 'page' : undefined}
+            aria-current={isSelected('/') ? t("page") : undefined}
             onClick={() => go('/')}
           >
-            <Icon name="overview" size={18} />
-            Overview
-          </button>
+            <Icon name="overview" size={18} />{t("Overview")}</button>
           <For each={groups()}>
             {(group) => (
               <>
-                <div class="nav-label">{group}</div>
+                <div class="nav-label">{t(group)}</div>
                 <For each={pages().filter((page) => page.group === group)}>
                   {(page) => (
                     <button
                       class="nav-item"
                       classList={{ selected: isSelected(page.path) }}
-                      aria-current={isSelected(page.path) ? 'page' : undefined}
+                      aria-current={isSelected(page.path) ? t("page") : undefined}
                       onClick={() => go(page.path)}
                     >
                       <Icon name={page.icon} size={18} />
-                      {page.title}
+                      {t(page.title)}
                     </button>
                   )}
                 </For>
@@ -182,15 +179,13 @@ export function App(props: { initialNotice?: string } = {}) {
             classList={{ selected: path() === '/settings' }}
             onClick={() => go('/settings')}
           >
-            <Icon name="settings" size={18} />
-            Appearance
-          </button>
+            <Icon name="settings" size={18} />{t("Appearance")}</button>
           <div class="connection-pill" data-status={status()} role="status">
             <span
               class="status-dot"
               classList={{ online: status() === 'connected' }}
             />
-            {statusLabels[status()] ?? status()}
+            {t(statusLabels[status()] ?? status())}
           </div>
         </div>
       </aside>
@@ -199,7 +194,7 @@ export function App(props: { initialNotice?: string } = {}) {
           <button
             ref={menuButton}
             class="icon-button mobile-menu"
-            aria-label="Open navigation"
+            aria-label={t("Open navigation")}
             aria-expanded={menu()}
             onClick={() => setMenu(true)}
           >
@@ -209,7 +204,7 @@ export function App(props: { initialNotice?: string } = {}) {
             <button
               class="crumb-root"
               onClick={() => go('/')}
-              aria-label="Go to overview"
+              aria-label={t("Go to overview")}
             >
               {connection.config.title}
             </button>
@@ -220,17 +215,17 @@ export function App(props: { initialNotice?: string } = {}) {
             <span
               class="topbar-status"
               data-status={status()}
-              title="Live connection state"
+              title={t("Live connection state")}
             >
               <span
                 class="status-dot"
                 classList={{ online: status() === 'connected' }}
               />
-              {statusLabels[status()] ?? status()}
+              {t(statusLabels[status()] ?? status())}
             </span>
             <button
               class="icon-button"
-              aria-label="Appearance settings"
+              aria-label={t("Appearance settings")}
               onClick={() => go('/settings')}
             >
               <Icon name="palette" />
@@ -245,23 +240,19 @@ export function App(props: { initialNotice?: string } = {}) {
               <button
                 class="button outlined"
                 onClick={() => setInitialNotice(undefined)}
-              >
-                Dismiss
-              </button>
+              >{t("Dismiss")}</button>
             </div>
           </Show>
           <Show when={connection.state.updateAvailable}>
             <div class="notice" role="status">
               <Icon name="info" />
-              <span>A new WebUI build is ready to load.</span>
+              <span>{t("A new WebUI build is ready to load.")}</span>
               <button
                 class="button filled"
                 onClick={() => {
                   if (approveNavigation()) location.reload()
                 }}
-              >
-                Reload
-              </button>
+              >{t("Reload")}</button>
             </div>
           </Show>
           <Show when={connection.state.error}>
@@ -287,7 +278,7 @@ export function App(props: { initialNotice?: string } = {}) {
                 fallback={<PageOutlet path={path()} />}
               >
                 <Suspense
-                  fallback={<div class="loading">Opening appearance…</div>}
+                  fallback={<div class="loading">{t("Opening appearance…")}</div>}
                 >
                   <SettingsPage />
                 </Suspense>
@@ -295,25 +286,25 @@ export function App(props: { initialNotice?: string } = {}) {
             }
           >
             <PageHeader
-              title="Overview"
-              description="Everything this relay is running, and every page it exposes."
+              title={t("Overview")}
+              description={t("Everything this relay is running, and every page it exposes.")}
             />
-            <section class="stat-row" aria-label="Workspace summary">
+            <section class="stat-row" aria-label={t("Workspace summary")}>
               <article class="panel stat-tile">
                 <Icon name="plug" />
                 <div class="stat-tile-body">
-                  <span class="eyebrow">Connection</span>
-                  <strong>{statusLabels[status()] ?? status()}</strong>
-                  <span>Live Muon channel</span>
+                  <span class="eyebrow">{t("Connection")}</span>
+                  <strong>{t(statusLabels[status()] ?? status())}</strong>
+                  <span>{t("Live Muon channel")}</span>
                 </div>
               </article>
               <article class="panel stat-tile">
                 <Icon name="layers" />
                 <div class="stat-tile-body">
-                  <span class="eyebrow">Extensions</span>
+                  <span class="eyebrow">{t("Extensions")}</span>
                   <strong>{entries().length}</strong>
                   <span>
-                    {pages().length} {pages().length === 1 ? 'page' : 'pages'}{' '}
+                    {pages().length} {pages().length === 1 ? t("page") : t("pages")}{' '}
                     available
                   </span>
                 </div>
@@ -321,9 +312,9 @@ export function App(props: { initialNotice?: string } = {}) {
               <article class="panel stat-tile">
                 <Icon name="cpu" />
                 <div class="stat-tile-body">
-                  <span class="eyebrow">Build</span>
-                  <strong>{connection.config.buildId ?? 'development'}</strong>
-                  <span>Reload prompt when it changes</span>
+                  <span class="eyebrow">{t("Build")}</span>
+                  <strong>{connection.config.buildId ?? t("development")}</strong>
+                  <span>{t("Reload prompt when it changes")}</span>
                 </div>
               </article>
             </section>
@@ -332,13 +323,9 @@ export function App(props: { initialNotice?: string } = {}) {
               fallback={
                 <section class="panel empty-state">
                   <Icon name="plugins" size={22} />
-                  <h2>No pages yet</h2>
-                  <p>
-                    Enabled plugins register their pages here automatically.
-                  </p>
-                  <button class="button filled" onClick={() => go('/plugins')}>
-                    Open plugin manager
-                  </button>
+                  <h2>{t("No pages yet")}</h2>
+                  <p>{t("Enabled plugins register their pages here automatically.")}</p>
+                  <button class="button filled" onClick={() => go('/plugins')}>{t("Open plugin manager")}</button>
                 </section>
               }
             >
@@ -346,7 +333,7 @@ export function App(props: { initialNotice?: string } = {}) {
                 {(group) => (
                   <section>
                     <div class="section-heading">
-                      <h2>{group}</h2>
+                      <h2>{t(group)}</h2>
                       <span class="muted">
                         {pages().filter((page) => page.group === group).length}{' '}
                         {pages().filter((page) => page.group === group)
@@ -368,8 +355,8 @@ export function App(props: { initialNotice?: string } = {}) {
                               <Icon name={page.icon} size={18} />
                             </span>
                             <span class="page-card-body">
-                              <strong>{page.title}</strong>
-                              <small>{page.source}</small>
+                              <strong>{t(page.title)}</strong>
+                              <small>{t(page.source)}</small>
                             </span>
                             <Icon name="chevronRight" size={16} />
                           </button>
@@ -387,7 +374,7 @@ export function App(props: { initialNotice?: string } = {}) {
           <span aria-hidden="true">·</span>
           <span>
             WebUI build{' '}
-            <code>{connection.config.buildId ?? 'development'}</code>
+            <code>{connection.config.buildId ?? t("development")}</code>
           </span>
         </footer>
       </div>

@@ -1,4 +1,5 @@
 /** @jsxImportSource solid-js */
+import { t } from './i18n.js'
 import {
   createEffect,
   createMemo,
@@ -127,7 +128,7 @@ export function SchemaField(props: FieldProps) {
     const node = schema()
     if ((props.depth ?? 0) > 20)
       return (
-        <p class="muted">Nested schema: use the JSON editor for this value.</p>
+        <p class="muted">{t("Nested schema: use the JSON editor for this value.")}</p>
       )
     if (node.meta.hidden) return null
     if (node.type === 'object')
@@ -264,9 +265,7 @@ export function SchemaField(props: FieldProps) {
                     initialValue(node.inner!),
                   ])
                 }
-              >
-                Add item
-              </button>
+              >{t("Add item")}</button>
               <Show when={(value()?.length ?? 0) > limit()}>
                 <button
                   type="button"
@@ -305,7 +304,7 @@ export function SchemaField(props: FieldProps) {
           <div class="toolbar">
             <input
               aria-label={props.label + ' new key'}
-              placeholder="New key"
+              placeholder={t("New key")}
               value={key()}
               disabled={disabled()}
               onInput={(event) => setKey(event.currentTarget.value)}
@@ -321,17 +320,13 @@ export function SchemaField(props: FieldProps) {
               class="button tonal"
               disabled={disabled()}
               onClick={addKey}
-            >
-              Add entry
-            </button>
+            >{t("Add entry")}</button>
             <Show when={Object.keys(value() ?? {}).length > limit()}>
               <button
                 type="button"
                 class="button outlined"
                 onClick={() => setLimit(limit() + 20)}
-              >
-                Show more entries
-              </button>
+              >{t("Show more entries")}</button>
             </Show>
           </div>
           <Show when={keyError()}>
@@ -472,7 +467,7 @@ export function SchemaField(props: FieldProps) {
           spellcheck={false}
           onInput={(event) => setJson(event.currentTarget.value)}
         />
-        <small>JSON value. Plugin-specific validation runs on save.</small>
+        <small>{t("JSON value. Plugin-specific validation runs on save.")}</small>
         <Show when={jsonError()}>
           <small class="field-error" role="alert">
             {jsonError()}
@@ -500,7 +495,7 @@ export function SchemaField(props: FieldProps) {
           <label for={id}>
             {props.label}
             <Show when={schema().meta.required}>
-              <span class="required" aria-label="required">
+              <span class="required" aria-label={t("required")}>
                 {' '}
                 *
               </span>
@@ -546,9 +541,7 @@ export function SchemaField(props: FieldProps) {
               class="field-reset"
               aria-label={'Reset ' + props.label}
               onClick={() => props.onChange(undefined)}
-            >
-              Reset
-            </button>
+            >{t("Reset")}</button>
           </Show>
         </div>
         <Show when={hint()}>
@@ -669,9 +662,7 @@ export function SchemaForm(props: SchemaFormProps) {
         <div class="notice error" role="alert">
           Configuration changed on the server. Reload before saving to avoid
           overwriting another change.{' '}
-          <button class="button outlined" type="button" onClick={reload}>
-            Reload configuration
-          </button>
+          <button class="button outlined" type="button" onClick={reload}>{t("Reload configuration")}</button>
         </div>
       </Show>
       <div class="toolbar">
@@ -684,9 +675,9 @@ export function SchemaForm(props: SchemaFormProps) {
             setRawText(JSON.stringify(draft(), null, 2))
           }}
         >
-          {raw() ? 'Use form editor' : 'Edit JSON'}
+          {raw() ? t("Use form editor") : t("Edit JSON")}
         </button>
-        <span class="muted">{dirty() ? 'Unsaved changes' : 'Up to date'}</span>
+        <span class="muted">{dirty() ? t("Unsaved changes") : t("Up to date")}</span>
       </div>
       <Show
         when={raw()}
@@ -696,7 +687,7 @@ export function SchemaForm(props: SchemaFormProps) {
               <SchemaField
                 schema={schema}
                 value={draft()}
-                label="Configuration"
+                label={t("Configuration")}
                 path={[]}
                 issues={issues()}
                 disabled={props.disabled || saving()}
@@ -713,7 +704,7 @@ export function SchemaForm(props: SchemaFormProps) {
         }
       >
         <label class="field">
-          <span>Configuration JSON</span>
+          <span>{t("Configuration JSON")}</span>
           <textarea
             rows={18}
             spellcheck={false}
@@ -735,7 +726,7 @@ export function SchemaForm(props: SchemaFormProps) {
         <div class="notice error" role="alert">
           <Icon name="alert" />
           <div>
-            <strong>Check your configuration</strong>
+            <strong>{t("Check your configuration")}</strong>
             <ul>
               <For each={issues().slice(0, 20)}>
                 {(issue) => (
@@ -750,9 +741,7 @@ export function SchemaForm(props: SchemaFormProps) {
         </div>
       </Show>
       <Show when={Object.values(inputErrors()).some(Boolean)}>
-        <div class="notice error" role="alert">
-          Correct invalid JSON before saving.
-        </div>
+        <div class="notice error" role="alert">{t("Correct invalid JSON before saving.")}</div>
       </Show>
       <Show when={error()}>
         <div class="notice error" role="alert">
@@ -760,9 +749,7 @@ export function SchemaForm(props: SchemaFormProps) {
         </div>
       </Show>
       <Show when={saved()}>
-        <div class="notice" role="status">
-          Configuration saved
-        </div>
+        <div class="notice" role="status">{t("Configuration saved")}</div>
       </Show>
       <div class="schema-actions">
         <button
@@ -777,16 +764,14 @@ export function SchemaForm(props: SchemaFormProps) {
             conflict()
           }
         >
-          {saving() ? 'Saving…' : 'Save changes'}
+          {saving() ? t("Saving…") : t("Save changes")}
         </button>
         <button
           type="button"
           class="button outlined"
           disabled={saving() || !dirty()}
           onClick={reload}
-        >
-          Discard changes
-        </button>
+        >{t("Discard changes")}</button>
       </div>
     </form>
   )
