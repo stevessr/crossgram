@@ -1,0 +1,4 @@
+endpoint: OneBot V11 forward WebSocket endpoint (ws:// or wss://). Configure the QQ implementation to enable forward WebSocket.
+accessToken: Optional OneBot access token. The standard forward WebSocket URL query parameter is used; prefer wss:// outside localhost.
+requestTimeoutMs: Timeout for connection establishment and OneBot API actions in milliseconds.
+reconnectDelayMs: Initial exponential retry delay after WebSocket disconnection, in milliseconds.
