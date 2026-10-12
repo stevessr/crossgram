@@ -275,7 +275,7 @@ export class Client {
             state.iterator = iterator
             while (!state.cancelled) {
               const next = await iterator.next()
-              if (next.done) break
+              if (state.cancelled || next.done) break
               if (!this.send({ type: 'rpc:delta', body: { sn, value: next.value } })) break
             }
           } else {
