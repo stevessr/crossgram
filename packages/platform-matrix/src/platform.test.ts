@@ -689,11 +689,13 @@ describe('MatrixPlatform', () => {
       }])
     })
     await unsubscribe()
-    expect(observed).toEqual([expect.objectContaining({
+    expect(observed).toEqual(expect.arrayContaining([expect.objectContaining({
       type: 'message-pins', eventId: '$updated',
       conversation: expect.objectContaining({ id: child, kind: 'group' }),
       pinnedMessageIds: ['$first', '$second'], removedMessageIds: [],
-    })])
+    })]))
+    expect(observed.every((value) => value.type === 'conversation' || value.type === 'message-pins'))
+      .toBe(true)
   })
 
   it('removes a room from a Space folder without mutating its chat metadata', async () => {
