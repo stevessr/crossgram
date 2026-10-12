@@ -9,7 +9,7 @@ function subscribe(hub: SseHub, cursor?: number) {
     headers: new Headers(),
     status: 200,
     body: null as ReadableStream<Uint8Array> | null,
-    json(value: unknown) { this.body = new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode(JSON.stringify(value))); controller.close() } }) },
+    json(_value: unknown) { /* not needed by valid subscription paths */ },
   } as unknown as Response
   const req = {
     query: new URLSearchParams('entry=alpha'),
