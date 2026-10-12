@@ -17,6 +17,10 @@ function bytesField(number: number, data: Buffer): Buffer {
   return Buffer.concat([varint(BigInt(number * 8 + 2)), varint(BigInt(data.length)), data])
 }
 
+function intField(number: number, value: bigint): Buffer {
+  return Buffer.concat([varint(BigInt(number * 8)), varint(value)])
+}
+
 function fixed64(value: bigint): Buffer {
   const data = Buffer.alloc(8)
   data.writeBigUInt64LE(value)
@@ -26,7 +30,7 @@ function fixed64(value: bigint): Buffer {
 function encodeGuildFolder(id: bigint, title: string, guilds: bigint[]): Buffer {
   return bytesField(1, Buffer.concat([
     bytesField(1, Buffer.concat(guilds.map(fixed64))),
-    bytesField(2, bytesField(1, varint(id))),
+    bytesField(2, intField(1, id)),
     bytesField(3, bytesField(1, Buffer.from(title))),
   ]))
 }
