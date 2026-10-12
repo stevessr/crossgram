@@ -223,7 +223,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   }
 
   private isSpaceRoom(roomId: string): boolean {
-    const create = this.roomState.get(roomId)?.get('m.room.create\\0')?.content as { type?: string } | undefined
+    const create = this.roomState.get(roomId)?.get('m.room.create\0')?.content as { type?: string } | undefined
     return create?.type === 'm.space'
   }
 
