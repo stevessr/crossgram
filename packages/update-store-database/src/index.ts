@@ -228,6 +228,10 @@ export class DatabaseUpdateStore extends UpdateStore {
   static Config = Config
   private readonly _backend: DatabaseUpdateStoreBackend | ShardedSQLiteUpdateStoreBackend
 
+  get concurrentPerEventWrites(): boolean {
+    return this._backend instanceof ShardedSQLiteUpdateStoreBackend
+  }
+
   constructor(ctx: Context, config: Config = {}) {
     defineModel(ctx)
     super(ctx)
