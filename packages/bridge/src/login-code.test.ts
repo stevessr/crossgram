@@ -36,7 +36,7 @@ describe('on-demand platform login codes', () => {
     const store = new OnDemandLoginCodeStore()
     expect(store.get('account', 1_000)).toBeUndefined()
     const issued = store.issue('account', 1_000)
-    expect(issued.code).toMatch(/^\\d{6}$/)
+    expect(issued.code).toMatch(/^\d{6}$/)
     expect(issued.code).not.toBe('000000')
     expect(issued.validUntil).toBe(1_000 + ON_DEMAND_LOGIN_CODE_TTL_MS)
     expect(store.get('account', 100_000)?.code).toBe(issued.code)
