@@ -1,4 +1,5 @@
 /** @jsxImportSource solid-js */
+import { t } from '../i18n.js'
 import { createMemo, createSignal, For, Show } from 'solid-js'
 import type { Data } from '../../src/server-monitor.js'
 import { navigate, useConnection, useRpc, type PageProps } from '../sdk.js'
@@ -34,8 +35,8 @@ export default function ServerPage(props: PageProps) {
   return (
     <>
       <PageHeader
-        title={requests() ? 'Incoming requests' : 'Server routes'}
-        description="Understand what enters your workspace and where it goes."
+        title={requests() ? t("Incoming requests") : t("Server routes")}
+        description={t("Understand what enters your workspace and where it goes.")}
         actions={
           <button
             class="button tonal"
@@ -47,30 +48,30 @@ export default function ServerPage(props: PageProps) {
               )
             }}
           >
-            {requests() ? 'View routes' : 'View requests'}
+            {requests() ? t("View routes") : t("View requests")}
           </button>
         }
       />
       <LiveContent ready={rpc.ready}>
         <div class="metric-grid compact-metrics">
           <article class="panel metric">
-            <span class="eyebrow">SERVER</span>
+            <span class="eyebrow">{t("SERVER")}</span>
             <strong class="metric-text">
-              {rpc.data.listening ? 'Listening' : 'Not listening'}
+              {rpc.data.listening ? t("Listening") : t("Not listening")}
             </strong>
             <p>
               {rpc.data.host}:{rpc.data.port}
             </p>
           </article>
           <article class="panel metric">
-            <span class="eyebrow">ROUTES</span>
+            <span class="eyebrow">{t("ROUTES")}</span>
             <strong>{Object.keys(rpc.data.routes ?? {}).length}</strong>
-            <p>HTTP and WebSocket endpoints</p>
+            <p>{t("HTTP and WebSocket endpoints")}</p>
           </article>
           <article class="panel metric">
-            <span class="eyebrow">RECENT REQUESTS</span>
+            <span class="eyebrow">{t("RECENT REQUESTS")}</span>
             <strong>{rpc.data.requests?.length ?? 0}</strong>
-            <p>A bounded, live history</p>
+            <p>{t("A bounded, live history")}</p>
           </article>
         </div>
         <div class="panel stack">
@@ -87,9 +88,9 @@ export default function ServerPage(props: PageProps) {
               />
             </label>
             <ConfirmAction
-              label="Reset counters"
-              title="Reset server monitoring?"
-              description="Clears recent requests and per-route counters, without changing any routes."
+              label={t("Reset counters")}
+              title={t("Reset server monitoring?")}
+              description={t("Clears recent requests and per-route counters, without changing any routes.")}
               action={() => rpc.data.clear()}
             />
           </div>
@@ -97,11 +98,11 @@ export default function ServerPage(props: PageProps) {
             <table>
               <thead>
                 <tr>
-                  <th>Method</th>
-                  <th>Path</th>
-                  <th>Plugin</th>
-                  <th>{requests() ? 'Status' : 'Requests'}</th>
-                  <th>{requests() ? 'Received / sent' : 'Average latency'}</th>
+                  <th>{t("Method")}</th>
+                  <th>{t("Path")}</th>
+                  <th>{t("Plugin")}</th>
+                  <th>{requests() ? t("Status") : t("Requests")}</th>
+                  <th>{requests() ? t("Received / sent") : t("Average latency")}</th>
                 </tr>
               </thead>
               <tbody>
@@ -141,26 +142,20 @@ export default function ServerPage(props: PageProps) {
           </div>
           <Show when={!rows().length}>
             <p class="empty-note">
-              <Icon name="search" size={16} />
-              No matching records.
-            </p>
+              <Icon name="search" size={16} />{t("No matching records.")}</p>
           </Show>
           <div class="pagination">
             <button
               class="button outlined"
               disabled={page() === 0}
               onClick={() => setPage(page() - 1)}
-            >
-              Previous page
-            </button>
+            >{t("Previous page")}</button>
             <span>{rows().length} records</span>
             <button
               class="button outlined"
               disabled={(page() + 1) * 50 >= rows().length}
               onClick={() => setPage(page() + 1)}
-            >
-              Next page
-            </button>
+            >{t("Next page")}</button>
           </div>
         </div>
         <Show when={selected()} keyed>

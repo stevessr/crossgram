@@ -1,4 +1,5 @@
 /** @jsxImportSource solid-js */
+import { t } from '../i18n.js'
 import { createMemo, createSignal, For, Show } from 'solid-js'
 import { useRpc, type PageProps } from '../sdk.js'
 import { LiveContent, PageHeader } from '../components.js'
@@ -175,14 +176,14 @@ export default function InsightPage(props: PageProps) {
   return (
     <>
       <PageHeader
-        title="Service map"
-        description="See how your plugins and services fit together."
+        title={t("Service map")}
+        description={t("See how your plugins and services fit together.")}
       />
       <LiveContent ready={rpc.ready}>
         <div class="panel stack">
           <div class="toolbar">
             <label class="field grow">
-              <span>Find a plugin or service</span>
+              <span>{t("Find a plugin or service")}</span>
               <input
                 type="search"
                 value={search()}
@@ -200,7 +201,7 @@ export default function InsightPage(props: PageProps) {
           <div
             class="graph-scroll"
             tabindex="0"
-            aria-label="Service relationship diagram"
+            aria-label={t("Service relationship diagram")}
           >
             <svg
               viewBox={'0 0 ' + graph().width + ' ' + graph().height}
@@ -212,7 +213,7 @@ export default function InsightPage(props: PageProps) {
               }}
               preserveAspectRatio="xMidYMid meet"
               role="img"
-              aria-label="Selected plugin and its immediate relationships"
+              aria-label={t("Selected plugin and its immediate relationships")}
             >
               <For each={graph().edges}>
                 {(edge) => (
@@ -294,17 +295,13 @@ export default function InsightPage(props: PageProps) {
               class="button outlined"
               disabled={page() === 0}
               onClick={() => setPage(page() - 1)}
-            >
-              Previous page
-            </button>
+            >{t("Previous page")}</button>
             <span>{nodes().length} matching nodes</span>
             <button
               class="button outlined"
               disabled={(page() + 1) * 40 >= nodes().length}
               onClick={() => setPage(page() + 1)}
-            >
-              Next page
-            </button>
+            >{t("Next page")}</button>
           </div>
         </div>
       </LiveContent>

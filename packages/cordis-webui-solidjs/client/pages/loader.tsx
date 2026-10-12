@@ -1,4 +1,5 @@
 /** @jsxImportSource solid-js */
+import { t } from '../i18n.js'
 import { createMemo, createResource, createSignal, For, Show } from 'solid-js'
 import {
   approveNavigation,
@@ -106,16 +107,14 @@ export default function LoaderPage(props: PageProps) {
   return (
     <>
       <PageHeader
-        title="Plugins"
-        description="A home for every part of your workspace."
+        title={t("Plugins")}
+        description={t("A home for every part of your workspace.")}
         actions={
           <button
             class="button filled"
             disabled={connection.state.status !== 'connected'}
             onClick={() => setAdding(true)}
-          >
-            Add plugin
-          </button>
+          >{t("Add plugin")}</button>
         }
       />
       <ActionError error={action.error()} />
@@ -124,21 +123,20 @@ export default function LoaderPage(props: PageProps) {
           <aside
             class="panel plugin-list"
             classList={{ collapsed: !!selected() && !browse() }}
-            aria-label="Plugins"
+            aria-label={t("Plugins")}
           >
             <button
               class="plugin-browser-toggle"
               aria-expanded={!selected() || browse()}
               onClick={() => setBrowse(!browse())}
-            >
-              Choose a plugin <span>{rpc.data.entries?.length ?? 0}</span>
+            >{t("Choose a plugin")}<span>{rpc.data.entries?.length ?? 0}</span>
             </button>
             <div class="plugin-browser-content">
               <label class="field">
-                <span class="sr-only">Search plugins</span>
+                <span class="sr-only">{t("Search plugins")}</span>
                 <input
                   type="search"
-                  placeholder="Find a plugin…"
+                  placeholder={t("Find a plugin…")}
                   value={search()}
                   onInput={(event) => {
                     setSearch(event.currentTarget.value)
@@ -185,9 +183,7 @@ export default function LoaderPage(props: PageProps) {
                 <button
                   class="button outlined"
                   onClick={() => setLimit(limit() + 100)}
-                >
-                  Show more plugins
-                </button>
+                >{t("Show more plugins")}</button>
               </Show>
             </div>
           </aside>
@@ -197,7 +193,7 @@ export default function LoaderPage(props: PageProps) {
               keyed
               fallback={
                 <div class="empty-state">
-                  <h2>Everything in its right place</h2>
+                  <h2>{t("Everything in its right place")}</h2>
                   <p>
                     Choose a plugin to edit configuration, inspect its services,
                     or manage its lifecycle.
@@ -278,16 +274,16 @@ function PluginDetail(props: {
       </header>
       <div class="toolbar">
         <span class="chip">
-          {props.entry.disabled ? 'Disabled' : statuses[props.entry.state ?? 0]}
+          {props.entry.disabled ? t("Disabled") : statuses[props.entry.state ?? 0]}
         </span>
         <ConfirmAction
-          label={props.entry.disabled ? 'Enable plugin' : 'Disable plugin'}
+          label={props.entry.disabled ? t("Enable plugin") : t("Disable plugin")}
           title={
             props.entry.disabled
               ? 'Enable this plugin?'
               : 'Disable this plugin?'
           }
-          description="Dependent services may restart when this plugin changes."
+          description={t("Dependent services may restart when this plugin changes.")}
           action={() =>
             props.data.updateConfig({
               id: props.entry.id,
@@ -296,9 +292,9 @@ function PluginDetail(props: {
           }
         />
         <ConfirmAction
-          label="Remove plugin"
-          title="Remove this plugin?"
-          description="This removes the saved configuration. Group removal also removes its children."
+          label={t("Remove plugin")}
+          title={t("Remove this plugin?")}
+          description={t("This removes the saved configuration. Group removal also removes its children.")}
           danger
           action={async () => {
             await props.data.removeConfig({ id: props.entry.id })
@@ -306,7 +302,7 @@ function PluginDetail(props: {
           }}
         />
       </div>
-      <div class="segmented" role="tablist" aria-label="Plugin details">
+      <div class="segmented" role="tablist" aria-label={t("Plugin details")}>
         <For each={['configuration', 'organization', 'services', 'usage']}>
           {(name) => (
             <button
@@ -328,7 +324,7 @@ function PluginDetail(props: {
       <Show when={tab() === 'configuration'}>
         <Show
           when={!runtime.loading}
-          fallback={<p class="loading">Loading configuration schema…</p>}
+          fallback={<p class="loading">{t("Loading configuration schema…")}</p>}
         >
           <Show
             when={!props.entry.isGroup}
@@ -364,20 +360,20 @@ function PluginDetail(props: {
           }}
         >
           <label class="field">
-            <span>Display name</span>
+            <span>{t("Display name")}</span>
             <input
               value={label()}
               onInput={(event) => setLabel(event.currentTarget.value)}
             />
           </label>
           <label class="field">
-            <span>Parent group</span>
+            <span>{t("Parent group")}</span>
             <select
-              aria-label="Parent group"
+              aria-label={t("Parent group")}
               value={parent()}
               onChange={(event) => setParent(event.currentTarget.value)}
             >
-              <option value="">Workspace root</option>
+              <option value="">{t("Workspace root")}</option>
               <For
                 each={props.data.entries.filter(
                   (entry) =>
@@ -393,7 +389,7 @@ function PluginDetail(props: {
             </select>
           </label>
           <label class="field">
-            <span>Position in group</span>
+            <span>{t("Position in group")}</span>
             <input
               type="number"
               min="0"
@@ -407,13 +403,11 @@ function PluginDetail(props: {
           <button
             class="button filled"
             disabled={action.busy() || connection.state.status !== 'connected'}
-          >
-            Save organization
-          </button>
+          >{t("Save organization")}</button>
         </form>
       </Show>
       <Show when={tab() === 'services'}>
-        <h3>Service scopes and interception</h3>
+        <h3>{t("Service scopes and interception")}</h3>
         <SchemaForm
           schema={{
             type: 'object',
@@ -451,11 +445,11 @@ function PluginDetail(props: {
           disabled={connection.state.status !== 'connected'}
         />
         <details>
-          <summary>Runtime services</summary>
+          <summary>{t("Runtime services")}</summary>
           <JsonView value={props.data.services} />
         </details>
         <details>
-          <summary>Registered effects</summary>
+          <summary>{t("Registered effects")}</summary>
           <JsonView value={props.entry.effects} />
         </details>
       </Show>
@@ -464,7 +458,7 @@ function PluginDetail(props: {
           {runtime()?.usage ||
             'This plugin has not provided usage documentation.'}
         </p>
-        <p class="muted">Required services</p>
+        <p class="muted">{t("Required services")}</p>
         <JsonView value={runtime()?.inject ?? {}} />
       </Show>
     </div>
@@ -516,7 +510,7 @@ function AddPlugin(props: {
         }}
       >
         <label class="field">
-          <span>Installed plugin package</span>
+          <span>{t("Installed plugin package")}</span>
           <input
             required
             list="installed-plugin-packages"
@@ -537,16 +531,12 @@ function AddPlugin(props: {
             onInput={(event) => setLabel(event.currentTarget.value)}
           />
         </label>
-        <p class="muted">
-          The plugin starts disabled so you can configure it before enabling it.
-        </p>
+        <p class="muted">{t("The plugin starts disabled so you can configure it before enabling it.")}</p>
         <ActionError error={action.error()} />
         <button
           class="button filled"
           disabled={action.busy() || !name().trim()}
-        >
-          Create plugin
-        </button>
+        >{t("Create plugin")}</button>
       </form>
     </Modal>
   )
