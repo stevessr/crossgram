@@ -67,7 +67,10 @@ export class OnDemandLoginCodeStore {
     const existing = this.get(authId, now)
     if (existing && !replace) return existing
     // 000000 is reserved by the legacy SRP second-factor login path.
-    const code = String(randomInt(1, 10 ** LOGIN_CODE_DIGITS)).padStart(LOGIN_CODE_DIGITS, '0')
+    let code: string
+    do {
+      code = String(randomInt(1, 10 ** LOGIN_CODE_DIGITS)).padStart(LOGIN_CODE_DIGITS, '0')
+    } while (code === existing?.code)
     const validUntil = now + ON_DEMAND_LOGIN_CODE_TTL_MS
     this._codes.set(authId, { code, validUntil })
     return { code, validUntil, remainingSeconds: Math.ceil(ON_DEMAND_LOGIN_CODE_TTL_MS / 1000) }
