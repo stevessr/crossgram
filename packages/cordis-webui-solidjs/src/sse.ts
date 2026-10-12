@@ -86,17 +86,18 @@ export class SseHub {
     const stream = new ReadableStream<Uint8Array>({
       start: (controller) => {
         const dispose = () => {
-          if (subscriber.closed) return
-          subscriber.closed = true
-          clearInterval(subscriber.heartbeat)
-          this.clients.delete(subscriber)
+          const current = subscriber
+          if (!current || current.closed) return
+          current.closed = true
+          clearInterval(current.heartbeat)
+          this.clients.delete(current)
           res._res.off('close', dispose)
           try { controller.close() } catch { /* already canceled */ }
         }
         subscriber = {
           controller, subscriptions, closed: false, dispose,
           heartbeat: setInterval(() => {
-            this.send(subscriber, encoder.encode(': heartbeat\n\n'))
+            if (subscriber) this.send(subscriber, encoder.encode(': heartbeat\n\n'))
           }, 15_000),
         }
         subscriber.heartbeat.unref?.()
