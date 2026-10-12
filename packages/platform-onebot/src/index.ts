@@ -79,9 +79,9 @@ export class OneBotPlatform implements IMPlatform<OneBotMediaLocator> {
 
   readonly client: OneBotClient
   private selfId?: string
-  private readonly conversations = new Map<string, IMConversation>()
-  private readonly requests = new Map<string, IMRequest>()
-  private dialogSnapshot?: { timestamp: number, items: IMDialog[] }
+  private readonly conversations = new Map<string, IMConversation<OneBotMediaLocator>>()
+  private readonly requests = new Map<string, IMRequest<OneBotMediaLocator>>()
+  private dialogSnapshot?: { timestamp: number, items: IMDialog<OneBotMediaLocator>[] }
 
   constructor(config: Config, onWarning?: (message: string) => void) {
     this.client = config.client ?? new OneBotClient({
@@ -98,7 +98,7 @@ export class OneBotPlatform implements IMPlatform<OneBotMediaLocator> {
     this.client.stop()
   }
 
-  async getAccount(): Promise<IMPlatformAccount> {
+  async getAccount(): Promise<IMPlatformAccount<OneBotMediaLocator>> {
     const info = record(await this.client.call('get_login_info'))
     const id = oneBotId(info.user_id)
     if (!id) throw new Error('OneBot get_login_info did not return user_id')
@@ -155,7 +155,7 @@ export class OneBotPlatform implements IMPlatform<OneBotMediaLocator> {
       if (!flag || !id) return
       const requestId = `${kind}:${flag}`
       const groupId = oneBotId(event.group_id)
-      const request: IMRequest = {
+      const request: IMRequest<OneBotMediaLocator> = {
         id: requestId,
         kind: kind === 'friend' ? 'friend' : 'group-join',
         state: 'pending',
@@ -173,13 +173,13 @@ export class OneBotPlatform implements IMPlatform<OneBotMediaLocator> {
     return
   }
 
-  async getDialogs(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage> {
+  async getDialogs(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMDialogPage<OneBotMediaLocator>> {
     if (!this.dialogSnapshot || Date.now() - this.dialogSnapshot.timestamp > 15_000) {
       const [friends, groups] = await Promise.all([
         this.client.call<unknown[]>('get_friend_list'),
         this.client.call<unknown[]>('get_group_list'),
       ])
-      const items: IMDialog[] = []
+      const items: IMDialog<OneBotMediaLocator>[] = []
       for (const friend of Array.isArray(friends) ? friends : []) {
         const conversation = mapOneBotConversation(friend, 'private')
         if (conversation.id === 'private:') continue
@@ -199,7 +199,7 @@ export class OneBotPlatform implements IMPlatform<OneBotMediaLocator> {
     return { dialogs: items.slice(start, end), total: items.length, nextCursor: end < items.length ? String(end) : undefined }
   }
 
-  async getContacts(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMUserPage> {
+  async getContacts(_session: PlatformSession, query: IMPageQuery = {}): Promise<IMUserPage<OneBotMediaLocator>> {
     const friends = await this.client.call<unknown[]>('get_friend_list')
     const users = (Array.isArray(friends) ? friends : []).map((friend) => mapOneBotUser(friend))
       .filter((user) => user.id)
@@ -207,7 +207,7 @@ export class OneBotPlatform implements IMPlatform<OneBotMediaLocator> {
     return { users: users.slice(start, end), nextCursor: end < users.length ? String(end) : undefined }
   }
 
-  async getConversation(_session: PlatformSession, conversationId: string): Promise<IMConversation | null> {
+  async getConversation(_session: PlatformSession, conversationId: string): Promise<IMConversation<OneBotMediaLocator> | null> {
     const target = parseConversationId(conversationId)
     if (target.kind === 'group') {
       const info = await this.client.call('get_group_info', { group_id: numericId(target.id), no_cache: false })
@@ -217,18 +217,18 @@ export class OneBotPlatform implements IMPlatform<OneBotMediaLocator> {
     return this.remember(mapOneBotConversation(user, 'private'))
   }
 
-  async getUser(_session: PlatformSession, userId: string): Promise<IMUser | null> {
+  async getUser(_session: PlatformSession, userId: string): Promise<IMUser<OneBotMediaLocator> | null> {
     const data = await this.client.call('get_stranger_info', { user_id: numericId(userId), no_cache: false })
     return mapOneBotUser(data, userId)
   }
 
   async getConversationMembers(
     _session: PlatformSession, conversation: IMConversationRef, query: IMPageQuery = {},
-  ): Promise<IMConversationMemberPage> {
+  ): Promise<IMConversationMemberPage<OneBotMediaLocator>> {
     const target = parseConversationId(conversation.id)
     if (target.kind !== 'group') return { members: [], total: 0 }
     const data = await this.client.call<unknown[]>('get_group_member_list', { group_id: numericId(target.id) })
-    const members: IMConversationMember[] = (Array.isArray(data) ? data : []).map((item) => {
+    const members: IMConversationMember<OneBotMediaLocator>[] = (Array.isArray(data) ? data : []).map((item) => {
       const member = record(item)
       const role = member.role === 'owner' ? 'owner' : member.role === 'admin' ? 'administrator' : 'member'
       return {
@@ -248,7 +248,7 @@ export class OneBotPlatform implements IMPlatform<OneBotMediaLocator> {
     return { members: members.slice(start, end), total: members.length, nextCursor: end < members.length ? String(end) : undefined }
   }
 
-  async getRequests(_session: PlatformSession, query: IMRequestQuery = {}): Promise<IMRequestPage> {
+  async getRequests(_session: PlatformSession, query: IMRequestQuery = {}): Promise<IMRequestPage<OneBotMediaLocator>> {
     const requests = [...this.requests.values()].filter((x) => !query.kind || x.kind === query.kind)
     const start = Number(query.cursor ?? 0)
     if (!Number.isSafeInteger(start) || start < 0) throw new Error('Invalid OneBot request cursor')
@@ -256,7 +256,7 @@ export class OneBotPlatform implements IMPlatform<OneBotMediaLocator> {
     return { requests: requests.slice(start, end), nextCursor: end < requests.length ? String(end) : undefined }
   }
 
-  async resolveRequest(_session: PlatformSession, id: string, action: IMRequestAction): Promise<IMRequest> {
+  async resolveRequest(_session: PlatformSession, id: string, action: IMRequestAction): Promise<IMRequest<OneBotMediaLocator>> {
     const request = this.requests.get(id)
     if (!request || request.state !== 'pending') throw new Error(`Unknown pending OneBot request: ${id}`)
     const flag = String(request.metadata?.onebotFlag ?? '')
@@ -365,7 +365,7 @@ export class OneBotPlatform implements IMPlatform<OneBotMediaLocator> {
     }
   }
 
-  private fallbackConversation(id: string): IMConversation {
+  private fallbackConversation(id: string): IMConversation<OneBotMediaLocator> {
     const target = parseConversationId(id)
     return mapOneBotConversation(
       target.kind === 'group' ? { group_id: target.id } : { user_id: target.id },
@@ -373,7 +373,7 @@ export class OneBotPlatform implements IMPlatform<OneBotMediaLocator> {
     )
   }
 
-  private remember(conversation: IMConversation): IMConversation {
+  private remember(conversation: IMConversation<OneBotMediaLocator>): IMConversation<OneBotMediaLocator> {
     this.conversations.delete(conversation.id)
     this.conversations.set(conversation.id, conversation)
     if (this.conversations.size > 4_096) this.conversations.delete(this.conversations.keys().next().value!)
