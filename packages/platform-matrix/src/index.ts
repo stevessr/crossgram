@@ -157,9 +157,8 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     }
     for (const [roomId, room] of Object.entries(initial.rooms?.join ?? {})) {
       if (this.isSpaceRoom(roomId)) continue
-      const conversation = this.updateConversation(roomId, room)
-      // Reconcile formerly forum-nested rooms with the persisted bridge index.
-      await handler({ type: 'conversation', conversation })
+      this.updateConversation(roomId, room)
+      // Bridge startup reconciliation persists the complete room list in pages.
       for (const event of room.timeline?.events ?? []) {
         const relation = event.type === 'm.reaction' ? relationFromValue(event.content['m.relates_to']) : undefined
         if (event.event_id && relation?.rel_type === 'm.annotation' && relation.event_id) {
