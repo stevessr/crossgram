@@ -1,4 +1,5 @@
 /** @jsxImportSource solid-js */
+import { t } from '../i18n.js'
 import {
   createEffect,
   createResource,
@@ -184,8 +185,8 @@ export default function SsoPage(props: PageProps) {
   return (
     <>
       <PageHeader
-        title="Your account"
-        description="Sign in, manage your identity, and stay in control."
+        title={t("Your account")}
+        description={t("Sign in, manage your identity, and stay in control.")}
       />
       <ActionError
         error={action.error() || (account.error ? String(account.error) : '')}
@@ -199,7 +200,7 @@ export default function SsoPage(props: PageProps) {
         <div class="account-layout">
           <Show when={accountData()?.user}>
             <section class="panel stack">
-              <span class="eyebrow">SIGNED IN</span>
+              <span class="eyebrow">{t("SIGNED IN")}</span>
               <h2>
                 {accountData()!.user!.display ||
                   accountData()!.user!.name ||
@@ -207,9 +208,9 @@ export default function SsoPage(props: PageProps) {
               </h2>
               <p class="muted">Account #{accountData()!.user!.id}</p>
               <ConfirmAction
-                label="Sign out"
-                title="Sign out on this device?"
-                description="This revokes the current session. Other devices stay signed in."
+                label={t("Sign out")}
+                title={t("Sign out on this device?")}
+                description={t("This revokes the current session. Other devices stay signed in.")}
                 action={async () => {
                   try {
                     await ssoRequest(
@@ -229,7 +230,7 @@ export default function SsoPage(props: PageProps) {
                   }
                 }}
               />
-              <h3>Linked sign-in methods</h3>
+              <h3>{t("Linked sign-in methods")}</h3>
               <For each={accountData()?.identities}>
                 {(identity) => (
                   <div class="identity-row">
@@ -241,9 +242,9 @@ export default function SsoPage(props: PageProps) {
                       </small>
                     </div>
                     <ConfirmAction
-                      label="Unlink"
+                      label={t("Unlink")}
                       title={'Unlink ' + identity.provider + '?'}
-                      description="You will no longer be able to use this method to sign in. Your last sign-in method cannot be removed."
+                      description={t("You will no longer be able to use this method to sign in. Your last sign-in method cannot be removed.")}
                       disabled={(accountData()?.identities.length ?? 0) <= 1}
                       danger
                       action={async () => {
@@ -271,7 +272,7 @@ export default function SsoPage(props: PageProps) {
                   : 'Welcome back'}
             </h2>
             <Show when={!accountData()?.user}>
-              <div class="segmented" role="tablist" aria-label="Account action">
+              <div class="segmented" role="tablist" aria-label={t("Account action")}>
                 <button
                   role="tab"
                   aria-selected={intent() === 'login'}
@@ -281,9 +282,7 @@ export default function SsoPage(props: PageProps) {
                     setIntent('login')
                     resetChallenge()
                   }}
-                >
-                  Sign in
-                </button>
+                >{t("Sign in")}</button>
                 <button
                   role="tab"
                   aria-selected={intent() === 'register'}
@@ -293,9 +292,7 @@ export default function SsoPage(props: PageProps) {
                     setIntent('register')
                     resetChallenge()
                   }}
-                >
-                  Register
-                </button>
+                >{t("Register")}</button>
               </div>
             </Show>
             <Show
@@ -311,7 +308,7 @@ export default function SsoPage(props: PageProps) {
                 when={!stepup()}
                 fallback={
                   <div class="stack">
-                    <p>An additional verification factor is required.</p>
+                    <p>{t("An additional verification factor is required.")}</p>
                     <For each={stepup()?.factors}>
                       {(factor) => (
                         <button
@@ -332,9 +329,7 @@ export default function SsoPage(props: PageProps) {
                         </button>
                       )}
                     </For>
-                    <button class="button outlined" onClick={resetChallenge}>
-                      Start again
-                    </button>
+                    <button class="button outlined" onClick={resetChallenge}>{t("Start again")}</button>
                   </div>
                 }
               >
@@ -344,7 +339,7 @@ export default function SsoPage(props: PageProps) {
                     fallback={
                       <>
                         <label class="field">
-                          <span>Verification code</span>
+                          <span>{t("Verification code")}</span>
                           <input
                             required
                             autocomplete="one-time-code"
@@ -361,7 +356,7 @@ export default function SsoPage(props: PageProps) {
                         </label>
                         <Show when={challenge()?.data}>
                           <details>
-                            <summary>Verification instructions</summary>
+                            <summary>{t("Verification instructions")}</summary>
                             <JsonView value={challenge()?.data} />
                           </details>
                         </Show>
@@ -369,9 +364,9 @@ export default function SsoPage(props: PageProps) {
                     }
                   >
                     <label class="field">
-                      <span>Sign-in provider</span>
+                      <span>{t("Sign-in provider")}</span>
                       <select
-                        aria-label="Sign-in provider"
+                        aria-label={t("Sign-in provider")}
                         value={provider()}
                         disabled={action.busy()}
                         onChange={(event) => {
@@ -388,7 +383,7 @@ export default function SsoPage(props: PageProps) {
                     </label>
                     <Show when={selected()?.category !== 'redirect'}>
                       <label class="field">
-                        <span>Username</span>
+                        <span>{t("Username")}</span>
                         <input
                           required={selected()?.category === 'credentials'}
                           autocomplete="username"
@@ -401,7 +396,7 @@ export default function SsoPage(props: PageProps) {
                       </label>
                       <Show when={selected()?.category === 'credentials'}>
                         <label class="field">
-                          <span>Password</span>
+                          <span>{t("Password")}</span>
                           <input
                             required
                             type="password"
@@ -440,9 +435,7 @@ export default function SsoPage(props: PageProps) {
                       class="button outlined"
                       disabled={action.busy()}
                       onClick={resetChallenge}
-                    >
-                      Start again
-                    </button>
+                    >{t("Start again")}</button>
                   </Show>
                 </form>
               </Show>

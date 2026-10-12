@@ -1,4 +1,5 @@
 /** @jsxImportSource solid-js */
+import { t } from 'cordis-webui-solidjs/i18n'
 import { createEffect, createMemo, createSignal, For, Show } from 'solid-js'
 import type {
   CapturedMtprotoEvent,
@@ -70,8 +71,8 @@ export default function CapturePage(props: PageProps) {
   return (
     <>
       <PageHeader
-        title="MTProto capture"
-        description="Follow the conversation between your clients and the relay."
+        title={t("MTProto capture")}
+        description={t("Follow the conversation between your clients and the relay.")}
         actions={
           <>
             <button
@@ -89,9 +90,9 @@ export default function CapturePage(props: PageProps) {
               {rpc.data.capturing ? 'Pause capture' : 'Start capture'}
             </button>
             <ConfirmAction
-              label="Clear capture"
-              title="Clear all captured events?"
-              description="The in-memory capture buffer will be cleared. This does not disconnect clients."
+              label={t("Clear capture")}
+              title={t("Clear all captured events?")}
+              description={t("The in-memory capture buffer will be cleared. This does not disconnect clients.")}
               action={async () => {
                 await rpc.data.clear()
                 setExpanded(undefined)
@@ -107,7 +108,7 @@ export default function CapturePage(props: PageProps) {
         <section class="panel stack capture-controls">
           <div class="toolbar">
             <label class="field grow">
-              <span>Search captured events</span>
+              <span>{t("Search captured events")}</span>
               <input
                 type="search"
                 value={filters().grep ?? ''}
@@ -126,39 +127,39 @@ export default function CapturePage(props: PageProps) {
             </button>
           </div>
           <details>
-            <summary>Advanced filters</summary>
+            <summary>{t("Advanced filters")}</summary>
             <div class="capture-filter-grid">
               <label class="field">
-                <span>Direction</span>
+                <span>{t("Direction")}</span>
                 <select
-                  aria-label="Direction"
+                  aria-label={t("Direction")}
                   value={filters().direction ?? ''}
                   onChange={(event) =>
                     setFilter('direction', event.currentTarget.value)
                   }
                 >
-                  <option value="">Both directions</option>
-                  <option value="client->server">Client to server</option>
-                  <option value="server->client">Server to client</option>
+                  <option value="">{t("Both directions")}</option>
+                  <option value="client->server">{t("Client to server")}</option>
+                  <option value="server->client">{t("Server to client")}</option>
                 </select>
               </label>
               <label class="field">
-                <span>Phase</span>
+                <span>{t("Phase")}</span>
                 <select
-                  aria-label="Phase"
+                  aria-label={t("Phase")}
                   value={filters().phase ?? ''}
                   onChange={(event) =>
                     setFilter('phase', event.currentTarget.value)
                   }
                 >
-                  <option value="">All phases</option>
+                  <option value="">{t("All phases")}</option>
                   <option>handshake</option>
                   <option>message</option>
                   <option>connection</option>
                 </select>
               </label>
               <label class="field">
-                <span>Connection ID</span>
+                <span>{t("Connection ID")}</span>
                 <input
                   value={filters().connectionId ?? ''}
                   onInput={(event) =>
@@ -167,7 +168,7 @@ export default function CapturePage(props: PageProps) {
                 />
               </label>
               <label class="field">
-                <span>Since</span>
+                <span>{t("Since")}</span>
                 <input
                   placeholder="5m, 1h, or a timestamp"
                   value={filters().since ?? ''}
@@ -177,7 +178,7 @@ export default function CapturePage(props: PageProps) {
                 />
               </label>
               <label class="field">
-                <span>Exact payload field</span>
+                <span>{t("Exact payload field")}</span>
                 <input
                   placeholder="payload.userId=123"
                   value={filters().field ?? ''}
@@ -214,13 +215,11 @@ export default function CapturePage(props: PageProps) {
               retained · {capture.snapshot()?.dropped ?? 0} dropped
             </span>
             <Show when={capture.loading()}>
-              <span class="muted" role="status">
-                Updating…
-              </span>
+              <span class="muted" role="status">{t("Updating…")}</span>
             </Show>
           </div>
         </section>
-        <section class="capture-list" aria-label="Captured MTProto events">
+        <section class="capture-list" aria-label={t("Captured MTProto events")}>
           <For each={ids()}>
             {(id) => {
               const group = () => groups().get(id)!,
@@ -250,7 +249,7 @@ export default function CapturePage(props: PageProps) {
           </For>
           <Show when={!ids().length && !capture.loading()}>
             <div class="panel empty-state">
-              <h2>No matching events</h2>
+              <h2>{t("No matching events")}</h2>
               <p>
                 Start capture or adjust your filters. Payloads are fetched only
                 when you expand an event.
@@ -264,29 +263,23 @@ export default function CapturePage(props: PageProps) {
             disabled={
               !rpc.ready || capture.loading() || !capture.snapshot()?.hasOlder
             }
-            aria-label="Load older events"
+            aria-label={t("Load older events")}
             onClick={() => void capture.load('older')}
-          >
-            Older
-          </button>
+          >{t("Older")}</button>
           <button
             class="button tonal"
             disabled={!rpc.ready || capture.loading()}
-            aria-label="Show latest events"
+            aria-label={t("Show latest events")}
             onClick={() => void capture.load('latest')}
-          >
-            Latest
-          </button>
+          >{t("Latest")}</button>
           <button
             class="button outlined"
             disabled={
               !rpc.ready || capture.loading() || !capture.snapshot()?.hasNewer
             }
-            aria-label="Load newer events"
+            aria-label={t("Load newer events")}
             onClick={() => void capture.load('newer')}
-          >
-            Newer
-          </button>
+          >{t("Newer")}</button>
         </div>
       </LiveContent>
     </>
@@ -387,23 +380,17 @@ function EventDetail(props: {
         <button
           class="button outlined"
           onClick={() => props.filter('include', props.event.name)}
-        >
-          Only this type
-        </button>
+        >{t("Only this type")}</button>
         <button
           class="button outlined"
           onClick={() => props.filter('exclude', props.event.name)}
-        >
-          Exclude this type
-        </button>
+        >{t("Exclude this type")}</button>
         <a
           class="button outlined"
           href={props.rawLink(props.event.id)}
           target="_blank"
           rel="noopener noreferrer"
-        >
-          Raw event
-        </a>
+        >{t("Raw event")}</a>
         <button
           class="button tonal"
           disabled={props.event.payloadOmitted}
@@ -412,9 +399,7 @@ function EventDetail(props: {
               copyText(JSON.stringify(props.event.payload, null, 2)),
             )
           }
-        >
-          Copy payload
-        </button>
+        >{t("Copy payload")}</button>
       </div>
       <dl class="event-metadata">
         <For
@@ -442,8 +427,7 @@ function EventDetail(props: {
         when={!props.event.payloadOmitted}
         fallback={
           <p class="muted" role="status">
-            <Icon name="refresh" size={15} /> Loading payload…
-          </p>
+            <Icon name="refresh" size={15} />{t("Loading payload…")}</p>
         }
       >
         <div class="json-tree">
