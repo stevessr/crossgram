@@ -69,14 +69,14 @@ export function normalizeSegments(value: unknown): OneBotSegment[] {
   })
 }
 
-export function mapOneBotUser(value: unknown, fallbackId?: string): IMUser {
+export function mapOneBotUser(value: unknown, fallbackId?: string): IMUser<OneBotMediaLocator> {
   const sender = record(value)
   const id = oneBotId(sender.user_id ?? sender.qq ?? fallbackId)
   const name = String(sender.card || sender.remark || sender.nickname || sender.nick || id)
   return { id, firstName: name, metadata: { onebotId: id } }
 }
 
-export function mapOneBotConversation(value: unknown, kind: 'private' | 'group', fallbackName?: string): IMConversation {
+export function mapOneBotConversation(value: unknown, kind: 'private' | 'group', fallbackName?: string): IMConversation<OneBotMediaLocator> {
   const data = record(value)
   const id = oneBotId(kind === 'group' ? data.group_id : data.user_id)
   const title = String(kind === 'group' ? data.group_name || fallbackName || id : data.remark || data.nickname || fallbackName || id)
@@ -88,7 +88,7 @@ export function mapOneBotConversation(value: unknown, kind: 'private' | 'group',
   }
 }
 
-export function mapOneBotMessage(value: unknown, conversation: IMConversation, selfId?: string): IMMessage {
+export function mapOneBotMessage(value: unknown, conversation: IMConversation<OneBotMediaLocator>, selfId?: string): IMMessage<OneBotMediaLocator> {
   const event = record(value)
   const sender = mapOneBotUser(event.sender, oneBotId(event.user_id) || selfId)
   const parts: IMMessagePart<OneBotMediaLocator>[] = []
