@@ -623,7 +623,7 @@ describe('bridge login e2e', () => {
         settings: { _: 'codeSettings' },
       }, 2)
       const code = current()?.loginCode
-      expect(code).toMatch(/^\\d{6}$/)
+      expect(code).toMatch(/^\d{6}$/)
       expect(current()?.validUntil).toBeGreaterThan(Date.now())
       expect(await callRpc(client, key, session, {
         _: 'auth.signIn', phoneNumber: account.auth.virtualPhone,
