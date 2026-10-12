@@ -31,7 +31,7 @@ import { TelegramResourceService } from './resource-provider.js'
 import {
   migrateLegacyVirtualPhones, PlatformAccountProvisioner, type ProvisionedPlatformAccount,
 } from './platform-account.js'
-import { verifyLoginCode } from './login-code.js'
+import { ON_DEMAND_LOGIN_CODE_TTL_MS, OnDemandLoginCodeStore, verifyLoginCode } from './login-code.js'
 import {
   SRP_PRIME_HEX, SrpChallengeStore, generateSrpVerifier, isValidSrpVerifier, verifySrpChallenge,
 } from './login-srp.js'
@@ -123,6 +123,8 @@ export interface BridgeConfig {
   altEndpoints?: string[]
   /** HTTP prefix for platform account assets (default: /api). */
   apiPrefix?: string
+  /** Generate login codes only on explicit requests, rather than rotating TOTP (default: true). */
+  onDemandLoginCodes?: boolean
   /** Telegram attachment-menu Mini App for browsing platform-native group files. */
   groupFilesMiniApp?: {
     enabled?: boolean
@@ -172,6 +174,7 @@ export const Config = z.object({
     }
   })).default([]),
   apiPrefix: z.string().default('/api'),
+  onDemandLoginCodes: z.boolean().default(true),
   groupFilesMiniApp: z.object({
     enabled: z.boolean().default(true),
     path: z.string().default('/group-files'),
@@ -206,7 +209,7 @@ export const Config = z.object({
 /**
  * Bridge backend — a native cordis plugin. Translates MTProto RPC to an IM
  * platform. Each adapter supplies its own current-user profile; bridge assigns
- * one stable virtual phone and a 30-second login code to the Cordis entry.
+ * one stable virtual phone and on-demand login codes to the Cordis entry.
  */
 export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const generation = {}
@@ -537,6 +540,13 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     const migrated = await migrateLegacyVirtualPhones(ctx.database)
     if (migrated) bridgeLogger.info('migrated %d non-888 virtual phones to +888', migrated)
   })
+  const onDemandLoginCodes = config.onDemandLoginCodes ?? true
+  const onDemandCodeStore = new OnDemandLoginCodeStore()
+  const codeExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  ctx.effect(() => () => {
+    for (const timer of codeExpiryTimers.values()) clearTimeout(timer)
+    codeExpiryTimers.clear()
+  }, 'mtproto-bridge.login-code-expiration')
   const provisionedAccounts = new Map<string, ProvisionedPlatformAccount>()
   const accountErrors = new Map<string, unknown>()
   let publishedStickerPacks: StickerDashboardPack[] = []
@@ -546,6 +556,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       config.serverHost ?? '127.0.0.1', config.serverPort ?? 4430, ctx.mtproto.rsaKey.publicKeyPem,
     ),
     loginTokenApprovalUrl: `${apiPrefix}/login-tokens`,
+    onDemandLoginCodes,
+    loginCodeTtlSeconds: onDemandLoginCodes ? ON_DEMAND_LOGIN_CODE_TTL_MS / 1_000 : 30,
     updatedAt: Date.now(),
     stickerAccounts: [],
     stickerPacks: [],
@@ -576,6 +588,12 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       await setStickerPackAssignment(ctx.database, platformSessionId, providerId, packId, assigned)
       await publishStickerPacks()
     },
+    async requestLoginCode(platformId) {
+      if (!onDemandLoginCodes) throw new Error('On-demand login codes are disabled.')
+      const account = provisionedAccounts.get(platformId)
+      if (!account) throw new Error('Platform account is not available.')
+      issueLoginCode(account.auth.id, true)
+    },
     async setLoginPassword(platformId, password) {
       const [auth] = await ctx.database.get('mtproto_auth_session', { platformId })
       if (!auth) throw new Error('目标账号不存在，请刷新后重试。')
@@ -597,7 +615,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     const platform = registry.require(platformId)
     const kind = platform.platformKind ?? platformId
     const account = provisionedAccounts.get(platformId)
-    if (account) return makePlatformAccountView(platformId, kind, account, apiPrefix, now)
+    if (account) return makePlatformAccountView(
+      platformId, kind, account, apiPrefix, now,
+      onDemandLoginCodes ? onDemandCodeStore.get(account.auth.id, now) ?? null : undefined,
+    )
     if (!platform.getAccount) return makeUnavailableAccountView(platformId, kind, 'unsupported')
     const error = accountErrors.get(platformId)
     return makeUnavailableAccountView(platformId, kind, error ? 'error' : 'loading', error)
@@ -608,6 +629,21 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
       value.updatedAt = now
       value.accounts = currentAccounts(now)
     })
+  }
+
+  // One expiry timer per identity only clears the WebUI snapshot; it never
+  // generates a replacement code. Codes are also checked against TTL on read.
+  const issueLoginCode = (authId: string, replace = false) => {
+    const code = onDemandCodeStore.issue(authId, Date.now(), replace)
+    const previous = codeExpiryTimers.get(authId)
+    if (previous) clearTimeout(previous)
+    const timer = setTimeout(() => {
+      codeExpiryTimers.delete(authId)
+      publishAccounts()
+    }, Math.max(1, code.validUntil - Date.now() + 1))
+    timer.unref?.()
+    codeExpiryTimers.set(authId, timer)
+    publishAccounts()
   }
 
   const stickerSourceAccounts = (): StickerDashboardSourceAccount[] => [...provisionedAccounts]
@@ -865,6 +901,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     const [auth] = await ctx.database.get('mtproto_auth_session', { virtualPhone: phone })
     if (!auth) throw new RpcError(400, 'PHONE_NUMBER_UNOCCUPIED')
     rememberCodeLogin(rpc.authKeyId, auth.id)
+    if (onDemandLoginCodes) issueLoginCode(auth.id)
     return {
       _: 'auth.sentCode',
       flags: 0,
@@ -881,7 +918,11 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     // five-digit input) opts into the second factor: the client is told a
     // password is required and continues with auth.checkPassword instead.
     if (/^0+$/.test(phoneCode) && isValidSrpVerifier(auth.passwordSrp)) throw new RpcError(400, 'SESSION_PASSWORD_NEEDED')
-    if (!verifyLoginCode(auth.totpSecret, phoneCode)) throw new RpcError(400, 'PHONE_CODE_INVALID')
+    const valid = onDemandLoginCodes
+      ? onDemandCodeStore.consume(auth.id, phoneCode)
+      : verifyLoginCode(auth.totpSecret, phoneCode)
+    if (!valid) throw new RpcError(400, 'PHONE_CODE_INVALID')
+    if (onDemandLoginCodes) publishAccounts()
     return authorizePlatformSession(rpc, {
       platformId: auth.platformId,
       platformSessionId: auth.platformSessionId,
@@ -1409,10 +1450,12 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     )
     return result
   })
-  rpc.register('auth.resendCode', async (_rpc, req) => {
+  rpc.register('auth.resendCode', async (rpc, req) => {
     const phone = normPhone((req as unknown as { phoneNumber: string }).phoneNumber)
     const [auth] = await ctx.database.get('mtproto_auth_session', { virtualPhone: phone })
     if (!auth) throw new RpcError(400, 'PHONE_NUMBER_UNOCCUPIED')
+    rememberCodeLogin(rpc.authKeyId, auth.id)
+    if (onDemandLoginCodes) issueLoginCode(auth.id, true)
     return {
       _: 'auth.sentCode', flags: 0,
       type: { _: 'auth.sentCodeTypeApp', length: 6 },
