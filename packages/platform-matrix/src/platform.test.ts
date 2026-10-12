@@ -618,7 +618,7 @@ describe('MatrixPlatform', () => {
     }])
   })
 
-  it('promotes a joined child back to a root when its parent Space is left', async () => {
+  it('removes the folder but preserves its chat when a Space is left', async () => {
     const space = '!space:example.org'
     const child = '!child:example.org'
     let incremental = 0
@@ -643,16 +643,13 @@ describe('MatrixPlatform', () => {
     const platform = createPlatform(fetch, { userId: '@me:example.org', syncTimeoutMs: 50 })
     const events: IMEvent[] = []
     const unsubscribe = await platform.subscribe(session, (value) => { events.push(value) })
-    await vi.waitFor(() => expect(events.some((value) =>
-      value.type === 'conversation' && value.conversation.id === child)).toBe(true))
+    await vi.waitFor(() => expect((platform as any).joinedRoomIds.has(space)).toBe(false))
     await unsubscribe()
 
-    expect(events).toMatchObject([{
-      type: 'conversation', conversation: { id: child, kind: 'group', parentId: undefined },
-    }])
+    expect(events).toEqual([])
     const roots = await platform.getDialogs(session)
     expect(roots.dialogs.map((dialog) => dialog.conversation.id)).toEqual([child])
-    expect((await platform.getSubdialogs(session, { id: space })).total).toBe(0)
+    expect(await platform.getChatFolders(session)).toEqual([])
   })
 
   it('keeps pin events and Space hierarchy updates together in one incremental sync', async () => {
