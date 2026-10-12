@@ -8,6 +8,7 @@ import {
   waitForConnection,
 } from './browser-test-utils.js'
 import { resolve } from 'node:path'
+import { gzipSync } from 'node:zlib'
 import { safeAsset } from './entry.js'
 import { decodeFrame, encodeFrame, unpackFrame } from './wire.js'
 
@@ -207,6 +208,74 @@ describe('Solid WebUI production service', () => {
       )
     } finally {
       socket.close()
+      await app.stop()
+    }
+  })
+  it('negotiates HTTP compression and safely decodes compressed JSON uploads', async () => {
+    const app = await start()
+    try {
+      app.ctx.server.get('/__compression_probe', (_req, res) => {
+        res.json({ text: 'compressible-payload'.repeat(2000) })
+      })
+      app.ctx.server.post('/__compression_echo', async (req, res) => {
+        res.json({ echo: await req.json() })
+      })
+      const gzipResponse = await fetch(app.url + '/__compression_probe', {
+        headers: { 'accept-encoding': 'gzip' },
+      })
+      expect(gzipResponse.status).toBe(200)
+      expect(gzipResponse.headers.get('content-encoding')).toBe('gzip')
+      expect(gzipResponse.headers.get('vary')).toContain('Accept-Encoding')
+      expect((await gzipResponse.json() as any).text).toContain('compressible-payload')
+      const brResponse = await fetch(app.url + '/__compression_probe', {
+        headers: { 'accept-encoding': 'br' },
+      })
+      expect(brResponse.headers.get('content-encoding')).toBe('br')
+      expect((await brResponse.json() as any).text).toContain('compressible-payload')
+      const upload = await fetch(app.url + '/__compression_echo', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-encoding': 'gzip' },
+        body: gzipSync(JSON.stringify({ valid: true })),
+      })
+      expect(upload.status).toBe(200)
+      expect(await upload.json()).toEqual({ echo: { valid: true } })
+      const corrupt = await fetch(app.url + '/__compression_echo', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'content-encoding': 'gzip' },
+        body: 'broken gzip',
+      })
+      expect(corrupt.status).toBe(400)
+    } finally {
+      await app.stop()
+    }
+  })
+  it('delivers incremental SSE events with IDs and skips response compression', async () => {
+    const app = await start()
+    const controller = new AbortController()
+    try {
+      const response = await fetch(app.url + '/api/events?entry=demo', {
+        headers: { accept: 'text/event-stream', 'accept-encoding': 'gzip' },
+        signal: controller.signal,
+      })
+      expect(response.status).toBe(200)
+      expect(response.headers.get('content-type')).toContain('text/event-stream')
+      expect(response.headers.get('content-encoding')).toBe(null)
+      const reader = response.body!.getReader()
+      const initial = new TextDecoder().decode((await reader.read()).value)
+      expect(initial).toContain('event: entry:init')
+      app.ui.broadcast('entry:delta', { id: 'demo', patch: 'increment' })
+      let received = ''
+      for (let i = 0; i < 4 && !received.includes('entry:delta'); i++) {
+        const chunk = await reader.read()
+        if (chunk.done) break
+        received += new TextDecoder().decode(chunk.value)
+      }
+      expect(received).toContain('event: entry:delta')
+      expect(received).toMatch(/id: [0-9]+/)
+      controller.abort()
+      await vi.waitFor(() => expect(app.ui.sse.activeClients).toBe(0))
+    } finally {
+      controller.abort()
       await app.stop()
     }
   })
