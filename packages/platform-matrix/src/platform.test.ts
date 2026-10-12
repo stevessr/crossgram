@@ -696,7 +696,7 @@ describe('MatrixPlatform', () => {
     })])
   })
 
-  it('updates child metadata after a Space relationship is removed in incremental sync', async () => {
+  it('removes a room from a Space folder without mutating its chat metadata', async () => {
     const space = '!space:example.org'
     const child = '!child:example.org'
     let sync = 0
@@ -720,15 +720,15 @@ describe('MatrixPlatform', () => {
     const platform = createPlatform(fetch, { userId: '@me:example.org', syncTimeoutMs: 50 })
     const events: IMEvent[] = []
     const unsubscribe = await platform.subscribe(session, (value) => { events.push(value) })
-    await vi.waitFor(() => expect(events.some((value) =>
-      value.type === 'conversation' && value.conversation.id === child)).toBe(true))
+    await vi.waitFor(() => expect((platform as any).spaceFolders).toEqual([{
+      id: space, title: space, conversationIds: [],
+    }]))
     await unsubscribe()
-    const root = events.find((value) =>
-      value.type === 'conversation' && value.conversation.id === space)
-    const updatedChild = events.find((value) =>
-      value.type === 'conversation' && value.conversation.id === child)
-    expect(root).toMatchObject({ conversation: { metadata: { hasSubchannels: false } } })
-    expect(updatedChild).toMatchObject({ conversation: { kind: 'group', parentId: undefined } })
+    expect(events).toEqual([])
+    // Removing a Space relationship updates only folder membership.
+    expect((platform as any).conversations.get(child)).toMatchObject({
+      id: child, kind: 'group', parentId: undefined,
+    })
   })
   it('shows Matrix invites in the request inbox, paginates them, and accepts or rejects rooms', async () => {
     const actions: Array<{ path: string, method: string }> = []
