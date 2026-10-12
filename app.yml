@@ -74,6 +74,14 @@
   disabled: true
   config:
     eventIntervalMs: 20000
+- id: onebot
+  name: '@mtproto-relay/platform-onebot'
+  disabled: true
+  config:
+    endpoint: ws://127.0.0.1:3001
+    # accessToken: ${ONEBOT_ACCESS_TOKEN}
+    requestTimeoutMs: 15000
+    reconnectDelayMs: 1000
 - id: qqnt
   name: '@mtproto-relay/platform-qqnt'
   config:
