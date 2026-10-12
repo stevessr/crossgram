@@ -111,6 +111,7 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
   }
 
   private ready(): Promise<void> {
+    if (this._closed) return Promise.reject(new Error('SQLite update store is closed'))
     return this._ready ??= this.initialize()
   }
 
@@ -214,6 +215,7 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
   }
 
   private open(sessionId: string): Shard {
+    if (this._closed) throw new Error('SQLite update store is closed')
     const cached = this._shards.get(sessionId)
     if (cached) return cached
     const path = this.pathFor(sessionId)
@@ -527,13 +529,17 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
   }
 
   async close(): Promise<void> {
-    if (!this._ready) return
-    await this._ready
-    // Do not reject already accepted work on shutdown.
+    if (this._closed) return
+    // Initialization can fail after opening some account files. Even in that
+    // case disposal must release those file descriptors and pending timers.
+    if (this._ready) await this._ready.catch(() => {})
     this._closed = true
     for (const shard of this._shards.values()) {
-      this.flush(shard)
-      shard.db.close()
+      try {
+        this.flush(shard)
+      } finally {
+        shard.db.close()
+      }
     }
     this._shards.clear()
   }
