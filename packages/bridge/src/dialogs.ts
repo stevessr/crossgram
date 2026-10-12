@@ -1394,12 +1394,17 @@ export class DialogRpc {
         : refConversation?.kind !== 'direct')) {
         ref = undefined
       }
+      // Preserve a cold-cache projection for rendering. Otherwise a miss
+      // fetches the same persisted message twice: once to fill the TL ID
+      // index and again immediately after conversation hydration.
+      let coldProjected: Awaited<ReturnType<MessageStore['findProjectedByTlId']>>
       if (!ref && this._store) {
         const projected = await this._store.findProjectedByTlId(
           this._session.platformSessionId,
           requestedId,
           expectedPeerId,
         )
+        coldProjected = projected
         if (projected) {
           const conversation = this._conversations.get(projected.source.conversationId)
           const allowed = expectedPeerId
@@ -1426,9 +1431,9 @@ export class DialogRpc {
         continue
       }
       await this._hydrateMessageConversation(ref.peerId)
-      const projected = this._store
+      const projected = coldProjected ?? (this._store
         ? await this._store.findProjectedByTlId(this._session.platformSessionId, requestedId, ref.peerId)
-        : undefined
+        : undefined)
       const history = projected
         ? projected.parts.map((part): MaterializedMessage => ({
             source: projected.source,
