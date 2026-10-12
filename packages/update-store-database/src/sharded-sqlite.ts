@@ -46,6 +46,7 @@ interface Shard {
   batchWindowMs: number
   maxBatchSize: number
   queue: PendingOperation[]
+  flushScheduled?: boolean
   committedBatches: number
   committedOperations: number
   timer?: ReturnType<typeof setTimeout>
@@ -288,6 +289,7 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
   }
 
   private flush(shard: Shard): void {
+    shard.flushScheduled = false
     if (shard.timer) clearTimeout(shard.timer)
     shard.timer = undefined
     const batch = shard.queue.splice(0)
@@ -314,10 +316,16 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
     if (this._closed) return Promise.reject(new Error('SQLite update store is closed'))
     return new Promise<T>((resolve, reject) => {
       shard.queue.push({ action, resolve, reject } as PendingOperation)
-      if (shard.queue.length >= shard.maxBatchSize || shard.batchWindowMs === 0) {
-        if (shard.timer) clearTimeout(shard.timer)
-        shard.timer = undefined
-        queueMicrotask(() => this.flush(shard))
+      if (shard.queue.length >= shard.maxBatchSize) {
+        // Flush synchronously at the threshold, not on the next microtask:
+        // a burst of thousands of calls in one turn must not produce a
+        // thousand-statement transaction or unbounded pending queue.
+        this.flush(shard)
+      } else if (shard.batchWindowMs === 0) {
+        if (!shard.flushScheduled) {
+          shard.flushScheduled = true
+          queueMicrotask(() => this.flush(shard))
+        }
       } else if (!shard.timer) {
         shard.timer = setTimeout(() => this.flush(shard), shard.batchWindowMs)
       }
