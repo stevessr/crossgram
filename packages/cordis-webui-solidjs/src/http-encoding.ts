@@ -21,7 +21,7 @@ export interface HttpEncodingOptions {
 const order: readonly Encoding[] = ['zstd', 'br', 'gzip']
 const COMPRESSIBLE = /^(?:text\/(?!event-stream)|application\/(?:json|[^;\s+]+\+json|javascript|xml|[^;\s+]+\+xml|x-www-form-urlencoded|graphql-response\+json)|image\/svg\+xml)(?:;|$)/i
 const REQUEST_BODY = /^(?:application\/(?:json|[^;\s+]+\+json|x-www-form-urlencoded)|text\/)/i
-const zstd = zlib as typeof zlib & {
+const zstd = zlib as unknown as {
   zstdCompressSync?: (buffer: Uint8Array, options?: object) => Buffer
   zstdDecompressSync?: (buffer: Uint8Array, options?: object) => Buffer
 }
