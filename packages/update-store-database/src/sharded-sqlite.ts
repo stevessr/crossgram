@@ -40,6 +40,8 @@ interface Shard {
   batchWindowMs: number
   maxBatchSize: number
   queue: PendingOperation[]
+  committedBatches: number
+  committedOperations: number
   timer?: ReturnType<typeof setTimeout>
 }
 
@@ -87,6 +89,7 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
   private readonly _shards = new Map<string, Shard>()
   private readonly _knownPaths = new Map<string, string>()
   private readonly _owners = new Map<string, string>()
+  private readonly _ownerCacheLimit = 4096
   private _ready?: Promise<void>
   private _closed = false
 
@@ -218,6 +221,8 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
         batchWindowMs: Math.max(0, Math.min(1_000, account?.batchWindowMs ?? this._config.batchWindowMs ?? 8)),
         maxBatchSize: Math.max(1, Math.min(1_024, account?.maxBatchSize ?? this._config.maxBatchSize ?? 64)),
         queue: [],
+        committedBatches: 0,
+        committedOperations: 0,
       }
       this._knownPaths.set(sessionId, path)
       this._shards.set(sessionId, shard)
@@ -250,6 +255,8 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
       try {
         for (const operation of batch) results.push(operation.action())
         shard.db.exec('COMMIT')
+        shard.committedBatches++
+        shard.committedOperations += batch.length
       } catch (error) {
         shard.db.exec('ROLLBACK')
         throw error
@@ -274,6 +281,24 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
     })
   }
 
+  private rememberOwner(eventKey: string, sessionId: string): void {
+    this._owners.delete(eventKey)
+    this._owners.set(eventKey, sessionId)
+    if (this._owners.size > this._ownerCacheLimit) {
+      this._owners.delete(this._owners.keys().next().value!)
+    }
+  }
+
+  /** Commit counters are per account, useful for verifying the actual batch ratio. */
+  statistics(): Record<string, { committedBatches: number, committedOperations: number }> {
+    return Object.fromEntries([...this._shards].map(([sessionId, shard]) => [
+      sessionId, {
+        committedBatches: shard.committedBatches,
+        committedOperations: shard.committedOperations,
+      },
+    ]))
+  }
+
   private async locate(eventKey: string): Promise<Shard | undefined> {
     await this.ready()
     const owned = this._owners.get(eventKey)
@@ -283,7 +308,7 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
       this.flush(shard)
       const row = shard.db.prepare('SELECT 1 FROM delivery WHERE event_key = ?').get(eventKey)
       if (row) {
-        this._owners.set(eventKey, sessionId)
+        this.rememberOwner(eventKey, sessionId)
         return shard
       }
     }
@@ -337,7 +362,7 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
       if (row) return this.fromRow(row)
       return { ...delivery, messageId: Number(inserted.lastInsertRowid) }
     })
-    this._owners.set(delivery.eventKey, delivery.platformSessionId)
+    this.rememberOwner(delivery.eventKey, delivery.platformSessionId)
     return value
   }
 
