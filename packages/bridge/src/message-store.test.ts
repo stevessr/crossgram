@@ -3,6 +3,7 @@ import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
 import type { tl } from '@mtcute/core'
+import type { UpdateStoreBackend } from '@mtproto-relay/update-store'
 import { __tlWriterMap } from '@mtcute/core/utils.js'
 import { TlBinaryWriter, TlSerializationCounter } from '@mtcute/tl-runtime'
 import Long from 'long'
@@ -53,6 +54,29 @@ function reorderJsonKeys<T>(value: T): T {
 }
 
 describe('MessageStore', () => {
+  it('permits unrelated sharded journal writes concurrently but preserves per-event ordering', async () => {
+    const { ctx } = await createStore()
+    const entered: string[] = []
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const backend = {
+      concurrentPerEventWrites: true,
+      async markPublished(eventKey: string) {
+        entered.push(eventKey)
+        await gate
+      },
+    } as unknown as UpdateStoreBackend
+    const store = new MessageStore(ctx.database, undefined, backend)
+    const first = store.markUpdatePublished('account-a:1')
+    const otherAccount = store.markUpdatePublished('account-b:1')
+    const second = store.markUpdatePublished('account-a:1')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    expect(entered).toEqual(['account-a:1', 'account-b:1'])
+    release()
+    await Promise.all([first, otherAccount, second])
+    expect(entered).toEqual(['account-a:1', 'account-b:1', 'account-a:1'])
+  })
+
   it('preserves conversation moderation state across durable reloads and partial updates', async () => {
     const { ctx, store } = await createStore()
     const selfPermissions = {
