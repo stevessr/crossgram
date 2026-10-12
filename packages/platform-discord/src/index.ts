@@ -409,7 +409,8 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
       const response = await api.users('@me')['settings-proto'](1).get()
       const folders = decodeProtoGuildFolders(response?.settings)
       if (!folders) throw new Error('Discord returned invalid guild folder settings')
-      this.guildFolderState = folders
+      // A newer Gateway update may have arrived while REST was in flight.
+      if (!this.guildFolderState) this.guildFolderState = folders
     })()
     this.guildFolderLoad = pending
     try {
