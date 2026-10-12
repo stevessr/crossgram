@@ -147,10 +147,10 @@ export async function applyRequestDecoding(req: Request, res: Response, options:
     // before route handlers parse JSON/form data, retaining all other headers.
     req.headers.delete('content-encoding')
     req.headers.delete('content-length')
-    ;(req as unknown as { _bodyImpl: globalThis.Response })._bodyImpl = new globalThis.Response(decoded, { headers })
+    ;(req as unknown as { _bodyImpl: globalThis.Response })._bodyImpl = new globalThis.Response(new Uint8Array(decoded), { headers })
     return true
   } catch (error) {
-    res.status = error instanceof RangeError || (error as Error).code === 'ERR_BUFFER_TOO_LARGE' ? 413 : 400
+    res.status = error instanceof RangeError || (error as NodeJS.ErrnoException).code === 'ERR_BUFFER_TOO_LARGE' ? 413 : 400
     res.json({ error: res.status === 413 ? 'Compressed HTTP request exceeds limit' : 'Invalid compressed HTTP request' })
     return false
   }
@@ -173,7 +173,7 @@ export function applyResponseEncoding(req: Request, res: Response, options: Http
   if (!encoding) return
   const result = compress(data, encoding)
   if (result.byteLength >= data.byteLength) return
-  res.body = result
+  res.body = new Uint8Array(result)
   res.headers.set('content-encoding', encoding)
   res.headers.delete('content-length')
   res.headers.delete('content-md5')
