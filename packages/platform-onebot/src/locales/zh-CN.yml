@@ -1,0 +1,4 @@
+endpoint: OneBot V11 正向 WebSocket 地址（ws:// 或 wss://），请在 QQ 的 OneBot 实现中启用正向 WebSocket。
+accessToken: OneBot 访问令牌（可选）。通过标准 WebSocket 查询参数传递；非本机连接建议使用 wss://。
+requestTimeoutMs: 建立连接和执行 OneBot API 调用的超时时间（毫秒）。
+reconnectDelayMs: WebSocket 断线重连的初始指数退避间隔（毫秒）。
