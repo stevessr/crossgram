@@ -183,6 +183,42 @@ describe('Solid WebUI production service', () => {
       await app.stop()
     }
   })
+  it('streams async RPC chunks across a real WebSocket without replacing legacy RPC', async () => {
+    const app = await start()
+    let entry: ReturnType<SolidWebUI['addEntry']> | undefined
+    const plugin = app.ctx.plugin({
+      name: 'test-stream',
+      inject: ['webui'],
+      apply(ctx: Context) {
+        entry = (ctx.get('webui') as unknown as SolidWebUI).addEntry<any>(
+          { baseUrl: import.meta.url, client: 'loader' },
+          {
+            async *count() {
+              yield { chunk: 1 }
+              yield { chunk: 2 }
+            },
+          },
+        )
+      },
+    })
+    let connected: Awaited<ReturnType<typeof connect>> | undefined
+    try {
+      await plugin
+      await vi.waitFor(() => expect(entry?.id && app.ui.entries[entry.id]).toBeDefined())
+      connected = await connect(app.url)
+      connected.send('rpc:request', {
+        sn: 18, entryId: entry!.id, method: 'count', args: [], stream: true,
+      })
+      await vi.waitFor(() => expect(connected!.frames.some(frame =>
+        frame.type === 'rpc:complete' && frame.body.sn === 18)).toBe(true))
+      const kinds = connected.frames.filter(frame => frame.body?.sn === 18).map(frame => frame.type)
+      expect(kinds).toEqual(['rpc:start', 'rpc:delta', 'rpc:delta', 'rpc:complete'])
+    } finally {
+      connected?.socket.close()
+      await plugin.dispose()
+      await app.stop()
+    }
+  })
   it('upgrades real WebSocket frames to protobuf and processes binary ping/pong', async () => {
     const app = await start()
     const socket = new WebSocket(app.url.replace('http:', 'ws:') + '/api')
