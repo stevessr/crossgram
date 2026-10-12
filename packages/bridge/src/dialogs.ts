@@ -258,6 +258,8 @@ export class DialogRpc {
   private readonly _store?: MessageStore
   private readonly _readInboxMaxMessageIds = new Map<string, string>()
   private readonly _conversations = new Map<string, import('./platform.js').IMConversation>()
+  /** Incremental parent -> child ID index; maintained alongside every conversation update. */
+  private readonly _subchannelIds = new Map<string, Set<string>>()
   private readonly _peerUsers = new Map<string, tl.RawUser>()
   private readonly _pendingPeerUsers = new Map<string, Promise<tl.RawUser>>()
   private readonly _usernameByPeer = new Map<string, string>()
@@ -403,7 +405,7 @@ export class DialogRpc {
     ]))
     const usersMs = performance.now() - usersAt
     for (const dialog of all) {
-      this._conversations.set(dialog.conversation.id, dialog.conversation)
+      this._cacheConversation(dialog.conversation.id, dialog.conversation)
       this._peerId(dialog.conversation.id)
     }
 
@@ -588,7 +590,7 @@ export class DialogRpc {
           if (cached && !cached.parentId && cached.metadata?.matrixSpace !== true) continue
           const conversation = await this._platform.getConversation?.(this._session, id)
           if (!conversation) continue
-          this._conversations.set(id, conversation)
+          this._cacheConversation(id, conversation)
           this._peerId(id)
           await this._store?.upsertConversation(this._session, conversation)
           if (conversation.kind === 'direct') await this._persistUsers([directConversationUser(conversation)])
@@ -667,7 +669,7 @@ export class DialogRpc {
       if (!changed.has(peerId) && conversation.metadata.qqGroupMsgMask === mask) continue
       try {
         await this._platform.setConversationNotificationMask(this._session, peerId, mask)
-        this._conversations.set(peerId, {
+        this._cacheConversation(peerId, {
           ...conversation,
           metadata: { ...conversation.metadata, qqGroupMsgMask: mask },
         })
@@ -1524,7 +1526,7 @@ export class DialogRpc {
       // or a removed friend as a contact. Rebuild it from this snapshot.
       this._peerUsers.clear()
       users = resolvedUsers.map((user) => {
-        this._conversations.set(user.id, { id: user.id, kind: 'direct', title: user.firstName })
+        this._cacheConversation(user.id, { id: user.id, kind: 'direct', title: user.firstName })
         return this._makePeerUser(user)
       })
     } else {
@@ -1686,7 +1688,7 @@ export class DialogRpc {
     if (systemPeer) {
       const conversation = systemPeer.peer.conversation
       if (conversation.kind !== 'direct') throw new RpcError(400, 'USERNAME_NOT_OCCUPIED')
-      this._conversations.set(conversation.id, conversation)
+      this._cacheConversation(conversation.id, conversation)
       const sourceUser = directConversationUser(conversation)
       await this._persistUsers([sourceUser])
       const user = this._makePeerUser(sourceUser)
@@ -3053,7 +3055,7 @@ export class DialogRpc {
       const upstream = await this._platform.getConversation?.(this._session, conversationId)
       if (!upstream || upstream.id !== conversationId) return null
       await this._store?.upsertConversation(this._session, upstream)
-      this._conversations.set(upstream.id, upstream)
+      this._cacheConversation(upstream.id, upstream)
       this._peerId(upstream.id)
       return upstream
     })()
@@ -4051,7 +4053,7 @@ export class DialogRpc {
   ) {
     source = await this._visibleDialog(source)
     const platformPeerId = source.conversation.id
-    this._conversations.set(platformPeerId, source.conversation)
+    this._cacheConversation(platformPeerId, source.conversation)
     const peer = this._conversationPeer(source.conversation)
     const users = source.conversation.kind === 'direct'
       ? [this._store
@@ -4363,7 +4365,7 @@ export class DialogRpc {
       await this._syncStoredUsers([peerId])
       return
     }
-    this._conversations.set(peerId, conversation)
+    this._cacheConversation(peerId, conversation)
     this._peerId(peerId)
     if (conversation.kind === 'direct') {
       await this._persistUsers([directConversationUser(conversation)])
@@ -4425,11 +4427,11 @@ export class DialogRpc {
         .map((dialog) => directConversationUser(dialog.conversation))
       await this._persistUsers(directUsers)
       for (const conversation of storedConversations) {
-        this._conversations.set(conversation.id, conversation)
+        this._cacheConversation(conversation.id, conversation)
         this._peerId(conversation.id)
       }
       for (const dialog of dialogs) {
-        this._conversations.set(dialog.conversation.id, dialog.conversation)
+        this._cacheConversation(dialog.conversation.id, dialog.conversation)
         this._peerId(dialog.conversation.id)
       }
       await this._syncStoredUsers([
@@ -4459,7 +4461,7 @@ export class DialogRpc {
       : await this._requireHistory(this._platform.getDialogs).call(this._platform, this._session, query)
     const dialogs = page.dialogs
     for (const dialog of dialogs) {
-      this._conversations.set(dialog.conversation.id, dialog.conversation)
+      this._cacheConversation(dialog.conversation.id, dialog.conversation)
       if (dialog.readInboxMaxMessage) {
         this._readInboxMaxMessageIds.set(dialog.conversation.id, dialog.readInboxMaxMessage.id)
       } else {
@@ -4557,7 +4559,7 @@ export class DialogRpc {
     let unreadMutedMessagesCount = 0
     let unreadUnmutedMessagesCount = 0
     for (const source of archived) {
-      this._conversations.set(source.conversation.id, source.conversation)
+      this._cacheConversation(source.conversation.id, source.conversation)
       if (!source.unreadCount) continue
       const settings = await this._peerNotifySettings(source.conversation.id)
       const category = source.conversation.kind === 'direct' ? 'users'
@@ -4618,7 +4620,7 @@ export class DialogRpc {
       ? await this._data.getSubdialogsPage(parentId, query)
       : await load.call(this._platform, this._session, { id: parentId }, query)
     for (const dialog of page.dialogs) {
-      this._conversations.set(dialog.conversation.id, dialog.conversation)
+      this._cacheConversation(dialog.conversation.id, dialog.conversation)
       if (dialog.readInboxMaxMessage) {
         this._readInboxMaxMessageIds.set(dialog.conversation.id, dialog.readInboxMaxMessage.id)
       }
@@ -5693,6 +5695,29 @@ export class DialogRpc {
     }
   }
 
+  private _cacheConversation(id: string, conversation: IMConversation): void {
+    const previous = this._conversations.get(id)
+    // A refreshed conversation may move between Spaces, lose its parent or
+    // cease being a channel. Remove its previous membership before indexing
+    // the new one; otherwise a root can retain ghost subchannels forever.
+    const oldParent = previous?.kind === 'channel' ? previous.parentId : undefined
+    const nextParent = conversation.kind === 'channel' ? conversation.parentId : undefined
+    if (oldParent && oldParent !== nextParent) {
+      const children = this._subchannelIds.get(oldParent)
+      children?.delete(id)
+      if (children?.size === 0) this._subchannelIds.delete(oldParent)
+    }
+    this._conversations.set(id, conversation)
+    if (nextParent) {
+      let children = this._subchannelIds.get(nextParent)
+      if (!children) {
+        children = new Set<string>()
+        this._subchannelIds.set(nextParent, children)
+      }
+      children.add(id)
+    }
+  }
+
   private _conversation(peerId: string): import('./platform.js').IMConversation {
     return this._conversations.get(peerId) ?? { id: peerId, kind: 'direct', title: peerId }
   }
@@ -5726,8 +5751,10 @@ export class DialogRpc {
       defaultBannedRights: makeDefaultBannedRights(conversation.metadata?.readOnly === true),
       id, accessHash: Long.ONE, title: conversation.title,
       broadcast: broadcast || undefined, megagroup: !broadcast || undefined,
+      // The top-level dialog list can render thousands of chats. Consult the
+      // indexed child count rather than scanning and sorting every peer each time.
       forum: !broadcast && (
-        this._subchannels(conversation.id).length > 0
+        (this._subchannelIds.get(conversation.id)?.size ?? 0) > 0
         || conversation.metadata?.hasSubchannels === true
       ) || undefined,
       photo: conversation.avatar ? this._makeAvatarPhoto(conversation.avatar, 'chat') : { _: 'chatPhotoEmpty' }, date: 0,
@@ -5756,9 +5783,14 @@ export class DialogRpc {
   }
 
   private _subchannels(parentId: string): import('./platform.js').IMConversation[] {
-    return [...this._conversations.values()]
-      .filter((conversation) => conversation.kind === 'channel' && conversation.parentId === parentId)
-      .sort((left, right) => left.title.localeCompare(right.title))
+    const ids = this._subchannelIds.get(parentId)
+    if (!ids) return []
+    const children: IMConversation[] = []
+    for (const id of ids) {
+      const conversation = this._conversations.get(id)
+      if (conversation) children.push(conversation)
+    }
+    return children.sort((left, right) => left.title.localeCompare(right.title))
   }
 
   private async _hydrateSubdialogs(parentId: string): Promise<void> {
@@ -5935,7 +5967,7 @@ export class DialogRpc {
     const mask = isMuted ? QQ_GROUP_MSG_MASK.RECEIVE : QQ_GROUP_MSG_MASK.NOTIFY
     try {
       await this._platform.setConversationNotificationMask(this._session, peerId, mask)
-      this._conversations.set(peerId, {
+      this._cacheConversation(peerId, {
         ...conversation,
         metadata: { ...conversation.metadata, qqGroupMsgMask: mask },
       })
