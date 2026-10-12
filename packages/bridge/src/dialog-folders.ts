@@ -4,6 +4,7 @@ import Long from 'long'
 import type { JsonObject, JsonValue } from './platform.js'
 
 export interface StoredDialogFilter {
+  sourceId?: string
   kind: 'dialogFilter' | 'dialogFilterChatlist'
   contacts?: boolean
   nonContacts?: boolean
