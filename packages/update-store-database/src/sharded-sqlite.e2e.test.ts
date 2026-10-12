@@ -146,6 +146,23 @@ describe('account-sharded SQLite delivery store', () => {
     expect((await updates.getPending('alpha')).map((row) => row.eventKey)).toEqual(['alpha:1'])
   })
 
+  it('avoids allocating database files and caches for read-only or offline accounts', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'crossgram-shards-idle-'))
+    cleanups.push(() => rm(dir, { recursive: true, force: true }))
+    const directory = join(dir, 'shards')
+    const { updates } = await start(join(dir, 'main.db'), {
+      enabled: true, directory, batchWindowMs: 10,
+    })
+    expect(await updates.getPending('offline-account')).toEqual([])
+    expect(await updates.getAfter('offline-account', 'account', 0, 10)).toEqual([])
+    expect(await updates.getSince('offline-account', 0, 10)).toEqual([])
+    expect(await updates.getChangedChannelScopes('offline-account', 0)).toEqual([])
+    await updates.prune('offline-account', 'account')
+    expect(await readdir(directory)).toEqual([])
+    await updates.create(record('online:1', 'online-account', 1))
+    expect((await readdir(directory)).filter((name) => name.endsWith('.db'))).toHaveLength(1)
+  })
+
   it('applies page-cache budgets individually to hot and cold adapter accounts', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'crossgram-shards-cache-'))
     cleanups.push(() => rm(dir, { recursive: true, force: true }))
