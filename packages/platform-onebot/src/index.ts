@@ -230,7 +230,7 @@ export class OneBotPlatform implements IMPlatform<OneBotMediaLocator> {
     const data = await this.client.call<unknown[]>('get_group_member_list', { group_id: numericId(target.id) })
     const members: IMConversationMember<OneBotMediaLocator>[] = (Array.isArray(data) ? data : []).map((item) => {
       const member = record(item)
-      const role = member.role === 'owner' ? 'owner' : member.role === 'admin' ? 'administrator' : 'member'
+      const role: IMConversationMember<OneBotMediaLocator>['role'] = member.role === 'owner' ? 'owner' : member.role === 'admin' ? 'administrator' : 'member'
       return {
         user: mapOneBotUser(member),
         role,
@@ -348,20 +348,27 @@ export class OneBotPlatform implements IMPlatform<OneBotMediaLocator> {
     let skip = response.status === 206 ? 0 : offset
     let remaining = limit
     let transferredBytes = 0
-    for await (const piece of response.body) {
-      let bytes = piece
-      if (skip) {
-        const amount = Math.min(skip, bytes.length)
-        bytes = bytes.subarray(amount)
-        skip -= amount
+    const reader = response.body.getReader()
+    try {
+      while (remaining > 0) {
+        const { done, value } = await reader.read()
+        if (done) break
+        let bytes = value
+        if (skip) {
+          const amount = Math.min(skip, bytes.length)
+          bytes = bytes.subarray(amount)
+          skip -= amount
+        }
+        if (!bytes.length) continue
+        const chunk = bytes.subarray(0, Math.min(remaining, bytes.length))
+        transferredBytes += chunk.length
+        await options.onProgress?.({ phase: 'download', mediaIndex: 0, transferredBytes, totalBytes: media.size })
+        yield chunk
+        remaining -= chunk.length
       }
-      if (!bytes.length) continue
-      const chunk = bytes.subarray(0, Math.min(remaining, bytes.length))
-      transferredBytes += chunk.length
-      await options.onProgress?.({ phase: 'download', mediaIndex: 0, transferredBytes, totalBytes: media.size })
-      yield chunk
-      remaining -= chunk.length
-      if (!remaining) break
+    } finally {
+      await reader.cancel().catch(() => {})
+      reader.releaseLock()
     }
   }
 
