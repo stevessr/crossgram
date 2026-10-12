@@ -1,7 +1,7 @@
 import type { Database } from '@cordisjs/plugin-database'
 import type { tl } from '@mtcute/core'
 import Long from 'long'
-import type { JsonObject, JsonValue } from './platform.js'
+import type { IMChatFolder, JsonObject, JsonValue } from './platform.js'
 
 export interface StoredDialogFilter {
   sourceId?: string
