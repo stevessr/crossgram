@@ -1310,6 +1310,9 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       id: roomId,
       kind: direct ? 'direct' : 'group',
       title,
+      // Explicitly clear legacy forum parents when merging with persisted rooms.
+      parentId: undefined,
+      spaceId: undefined,
       selfRole: selfMember?.role,
       selfPermissions: selfMember?.permissions,
       avatar: avatar?.url ? avatarMedia(roomId, avatar.url) : direct && hero?.avatar_url
