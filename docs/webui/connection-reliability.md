@@ -62,3 +62,53 @@ If the compressed transport fails to negotiate, inspect WS frames and verify
 that the reverse proxy preserves both text and binary WebSocket frames. A
 proxy must never rewrite the WebSocket frame payload, and TLS/CDN termination
 must allow WebSocket upgrades.
+
+
+## HTTP content encoding (origin server)
+
+The Solid WebUI service now installs HTTP content encoding for the shared Cordis
+HTTP listener. This is independent of the WebSocket `protobuf-gzip-v1` format.
+
+- Buffered textual responses (HTML, JS, CSS, JSON, SVG, XML) larger than 1 KiB
+  negotiate `gzip`, `br`, or `zstd` from `Accept-Encoding`, respecting
+  quality weights, explicit exclusions, and a server-side availability check.
+  Zstandard is enabled only if Node's zlib binding exposes both encoder and
+  decoder. The server does not double-compress pre-encoded responses.
+- JSON, form, and text request bodies with `Content-Encoding` are decoded
+  before routing. Encoded request bodies are capped at 4 MiB; decompressed bodies
+  at 8 MiB. Unsupported codings return HTTP 415, malformed bodies HTTP 400, and
+  limit violations HTTP 413.
+- Streaming payloads, SSE, file/media types, ranges, tiny payloads, and
+  responses marked `Cache-Control: no-transform` retain their original bytes.
+  Response compression is disabled by setting `enableHttpEncoding: false` on
+  the Solid WebUI plugin. All compressed response variants emit
+  `Vary: Accept-Encoding`.
+
+Reverse proxies may apply their own content coding; do not force gzip on an
+already compressed response. WebSocket binary frames are *not* HTTP response
+bodies and continue to use their existing frame-layer compression negotiation.
+
+## Incremental SSE alternative
+
+`GET /api/events` (or `<apiPath>/events`) provides a read-only Server-Sent
+Events view of WebUI entry metadata and Muon deltas:
+
+```http
+GET /api/events?entry=<entry-id>&entry=<another-id>
+Accept: text/event-stream
+Last-Event-ID: 123
+```
+
+The endpoint emits `entry:init` followed by initial `entry:snapshot`
+frames for the requested entries, then `entry:delta` whenever the underlying
+entry state changes. Events carry monotonically increasing numeric IDs.
+Clients can resume from `Last-Event-ID` within a bounded 512-event ring; a
+missing/stale cursor instead triggers fresh snapshots. A comment heartbeat
+is sent every 15 seconds and slow readers are closed rather than buffered
+indefinitely. `no-transform` and `X-Accel-Buffering: no` prevent proxy
+batching. Cross-origin requests are rejected and existing HTTP authentication
+middleware remains in force.
+
+SSE intentionally cannot mutate state or invoke RPC; those capabilities
+remain on the authenticated WebSocket control plane. Disable this transport
+with `enableSse: false` if the endpoint is not needed.
