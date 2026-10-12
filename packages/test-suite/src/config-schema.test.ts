@@ -147,6 +147,8 @@ describe('plugin config schemas', () => {
         batchWindowMs: 8,
         maxBatchSize: 64,
         busyTimeoutMs: 5_000,
+        cacheSizeKiB: 1_024,
+        mmapSizeMiB: 0,
         accounts: {},
       },
     })
