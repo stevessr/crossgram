@@ -1234,7 +1234,8 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         ...(room.timeline?.events ?? []).filter((event) => event.state_key !== undefined),
       ]
       if (!hierarchyDirty && stateEvents.some((event) =>
-        event.state_key !== undefined && (event.type === 'm.space.child' || event.type === 'm.room.create'))) {
+        event.state_key !== undefined && (event.type === 'm.space.child' || event.type === 'm.room.create'
+          || (this.isSpaceRoom(roomId) && (event.type === 'm.room.name' || event.type === 'm.room.canonical_alias'))))) {
         hierarchyDirty = true
       }
       this.ingestState(roomId, stateEvents)
@@ -1242,9 +1243,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     // Most /sync responses contain only messages/receipts. Rebuilding a
     // graph from every joined room for each of them costs CPU and allocations.
     if (hierarchyDirty) {
-      const hierarchy = buildSpaceHierarchy(this.roomState, this.joinedRoomIds)
-      this.spaceParents = hierarchy.parents
-      this.spaceChildren = hierarchy.children
+      this.spaceFolders = buildSpaceFolders(this.roomState, this.joinedRoomIds)
     }
     return hierarchyDirty
   }
