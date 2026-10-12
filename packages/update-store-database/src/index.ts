@@ -58,9 +58,9 @@ export const Config = z.object({
     maxBatchSize: z.natural().min(1).max(1024).default(64),
     busyTimeoutMs: z.natural().max(60000).default(5000),
     accounts: z.dict(z.object({
-      path: z.string().role('path').default(''),
-      batchWindowMs: z.natural().max(1000).default(8),
-      maxBatchSize: z.natural().min(1).max(1024).default(64),
+      path: z.string().role('path'),
+      batchWindowMs: z.natural().max(1000),
+      maxBatchSize: z.natural().min(1).max(1024),
     })).default({}),
   }).description('Per-adapter-account SQLite journal files and transactional write batching (opt-in).').default({ enabled: false, directory: './data/update-shards',
     batchWindowMs: 8, maxBatchSize: 64, busyTimeoutMs: 5000, accounts: {} }),
