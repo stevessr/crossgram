@@ -72,7 +72,7 @@ function guildChannels(childCount: number) {
     id: '700000000000000001', name: 'Large guild', systemChannelId: '800000000000000000',
     memberCount: 42, iconURL: () => null, channels: { cache: new Collection() },
   }
-  const channels = Array.from({ length: childCount + 1 }, (_, index) => {
+  const channels: any[] = Array.from({ length: childCount + 1 }, (_, index) => {
     const id = `8${String(index).padStart(17, '0')}`
     return {
       id, type: 'GUILD_TEXT', guild, name: index === 0 ? 'general' : `channel-${index}`,
@@ -334,6 +334,37 @@ describe('DiscordPlatform userbot', () => {
     expect(guild.members.fetch).toHaveBeenCalledWith({ limit: 1_000 })
     expect(channel.permissionsFor).toHaveBeenCalledTimes(2)
     expect(result).toMatchObject({ total: 2, members: [{ user: { id: '101' } }, { user: { id: '102' } }] })
+  })
+
+  it('reuses guild visibility projections and invalidates them when role permissions change', async () => {
+    const { guild, channels } = guildChannels(1)
+    let canRead = true
+    let permissionChecks = 0
+    const viewable = vi.fn(() => true)
+    for (const channel of channels) {
+      channel.permissionsFor = vi.fn(() => {
+        permissionChecks++
+        return { has: (permission?: string) => permission !== 'READ_MESSAGE_HISTORY' || canRead }
+      })
+      Object.defineProperty(channel, 'viewable', { configurable: true, get: viewable })
+    }
+    const client = fakeClient(channels)
+    const platform = new DiscordPlatform({ token: 'token' }, { client })
+    const unsubscribe = await platform.subscribe(session, vi.fn())
+
+    expect((platform as any).mapConversation(channels[0]).id).toBe(`discord:guild:${guild.id}`)
+    expect((platform as any).mapConversation(channels[0]).id).toBe(`discord:guild:${guild.id}`)
+    expect(permissionChecks).toBe(2)
+    expect(viewable).not.toHaveBeenCalled()
+
+    canRead = false
+    ;(client as any).emit('roleUpdate', { guild }, { guild })
+    expect((platform as any).mapConversation(channels[0]).id).toBe(channels[0]!.id)
+    expect(permissionChecks).toBe(4)
+    expect(viewable).not.toHaveBeenCalled()
+
+    await unsubscribe()
+    expect((client as any).listenerCount('roleUpdate')).toBe(0)
   })
 
   it('maps user mentions, channel links, custom emoji, attachments, replies, and sender aliases', async () => {

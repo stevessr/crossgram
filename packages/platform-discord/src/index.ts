@@ -6,8 +6,8 @@ import { fetch as undiciFetch, ProxyAgent as UndiciProxyAgent } from 'undici'
 import {
   Client, type AnyChannel, type ClientEvents, type DMChannel, type Guild, type GuildBasedChannel,
   type GuildEmoji, type GuildMember, type GroupDMChannel, type Message, type MessageAttachment,
-  type MessageReaction, type NewsChannel, type PartialMessage, Permissions, type TextChannel,
-  type ThreadChannel, type User,
+  type MessageReaction, type NewsChannel, type PartialGuildMember, type PartialMessage,
+  Permissions, type Role, type TextChannel, type ThreadChannel, type User,
 } from 'discord.js-selfbot-v13'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationPermissions,
@@ -243,6 +243,16 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     }
     const onChannelDelete = (channel: AnyChannel) => invalidateGuild(channel)
     const onThreadDelete = (channel: ThreadChannel) => invalidateGuild(channel)
+    const invalidateMemberGuild = (member: GuildMember | PartialGuildMember) => {
+      this.guildProjections.delete(member.guild)
+    }
+    const invalidateRoleGuild = (role: Role) => { this.guildProjections.delete(role.guild) }
+    const onGuildUpdate = (_old: Guild, updated: Guild) => { this.guildProjections.delete(updated) }
+    const onGuildMemberAdd = (member: GuildMember) => invalidateMemberGuild(member)
+    const onGuildMemberRemove = (member: GuildMember | PartialGuildMember) => invalidateMemberGuild(member)
+    const onGuildMemberUpdate = (_old: GuildMember | PartialGuildMember, updated: GuildMember) =>
+      invalidateMemberGuild(updated)
+    const onRoleUpdate = (_old: Role, updated: Role) => { invalidateRoleGuild(updated) }
     const onReactionAdd = onReaction('add')
     const onReactionRemove = onReaction('remove')
     const onChannelUpdate = (_old: AnyChannel, updated: AnyChannel) => onConversation(updated)
@@ -260,6 +270,13 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     this.client.on('threadUpdate', onThreadUpdate)
     this.client.on('channelDelete', onChannelDelete)
     this.client.on('threadDelete', onThreadDelete)
+    this.client.on('guildUpdate', onGuildUpdate)
+    this.client.on('guildMemberAdd', onGuildMemberAdd)
+    this.client.on('guildMemberRemove', onGuildMemberRemove)
+    this.client.on('guildMemberUpdate', onGuildMemberUpdate)
+    this.client.on('roleCreate', invalidateRoleGuild)
+    this.client.on('roleDelete', invalidateRoleGuild)
+    this.client.on('roleUpdate', onRoleUpdate)
 
     return () => {
       this.handlers.delete(session.platformSessionId)
@@ -275,6 +292,13 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
       this.client.off('threadUpdate', onThreadUpdate)
       this.client.off('channelDelete', onChannelDelete)
       this.client.off('threadDelete', onThreadDelete)
+      this.client.off('guildUpdate', onGuildUpdate)
+      this.client.off('guildMemberAdd', onGuildMemberAdd)
+      this.client.off('guildMemberRemove', onGuildMemberRemove)
+      this.client.off('guildMemberUpdate', onGuildMemberUpdate)
+      this.client.off('roleCreate', invalidateRoleGuild)
+      this.client.off('roleDelete', invalidateRoleGuild)
+      this.client.off('roleUpdate', onRoleUpdate)
     }
   }
 
@@ -751,8 +775,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     if (cached && now < cached.expiresAt
       && cached.channelCount === guild.channels.cache.size
       && cached.systemChannelId === guild.systemChannelId
-      && cached.viewerId === viewer.id
-      && (!cached.root || isVisibleChannel(cached.root, viewer))) return cached
+      && cached.viewerId === viewer.id) return cached
     const channels = visibleGuildChannels(guild, viewer)
     const root = selectGuildRoot(channels)
     const projection: GuildProjection = {
@@ -1123,7 +1146,8 @@ function isGuildChannel(channel: DiscordChannel): channel is DiscordGuildChannel
 
 function isVisibleChannel(channel: DiscordChannel, self: User): boolean {
   if (!isGuildChannel(channel)) return true
-  return channel.viewable && Boolean(channel.permissionsFor(self)?.has('READ_MESSAGE_HISTORY'))
+  const permissions = channel.permissionsFor(self)
+  return Boolean(permissions?.has('VIEW_CHANNEL') && permissions.has('READ_MESSAGE_HISTORY'))
 }
 
 function visibleGuildChannels(guild: Guild, self: User): DiscordChannel[] {

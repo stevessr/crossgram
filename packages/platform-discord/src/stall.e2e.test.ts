@@ -134,6 +134,7 @@ describe('Discord stall regression E2E', () => {
 
   it('keeps a five-thousand-channel guild out of the root dialog ingestion transaction', async () => {
     const self = user('100', 'Self')
+    let visibilityChecks = 0
     const guild: any = {
       id: '700000000000000001', name: 'Large guild', systemChannelId: '800000000000000000',
       memberCount: 5_000, iconURL: () => null, channels: { cache: new Collection() },
@@ -142,11 +143,16 @@ describe('Discord stall regression E2E', () => {
       const id = `8${String(index).padStart(17, '0')}`
       return {
         id, type: 'GUILD_TEXT', guild, name: index === 0 ? 'general' : `channel-${index}`,
-        parent: null, rawPosition: index, viewable: true,
+        parent: null, rawPosition: index,
         lastMessageId: `9${String(index).padStart(17, '0')}`,
         createdTimestamp: 1_900_000_000_000 + index,
         messages: { cache: new Collection(), fetch: vi.fn() },
-        permissionsFor: () => ({ has: () => true }), isThread: () => false,
+        permissionsFor: () => {
+          visibilityChecks++
+          return { has: () => true }
+        },
+        get viewable() { return this.permissionsFor(self).has('VIEW_CHANNEL') },
+        isThread: () => false,
       }
     })
     guild.channels.cache = new Collection(channels.map((channel) => [channel.id, channel]))
@@ -181,6 +187,11 @@ describe('Discord stall regression E2E', () => {
     expect(await database.get('mtproto_im_conversation', {})).toHaveLength(1)
     expect(await database.get('mtproto_im_message', {})).toHaveLength(0)
     expect(channels.every((channel) => !channel.messages.fetch.mock.calls.length)).toBe(true)
+    // Six independent RPC instances trigger six platform dialog scans. Each
+    // scan does one permission check/channel; mapping the selected guild
+    // root performs one additional projection scan. No duplicate
+    // `viewable` permission calculation or per-message root recheck occurs.
+    expect(visibilityChecks).toBe(channels.length * (connections.length + 1))
     platform.stop()
   })
 })
