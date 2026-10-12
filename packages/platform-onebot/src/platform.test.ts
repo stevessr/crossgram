@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { OneBotClient, type OneBotSocket } from './client.js'
 import { OneBotPlatform } from './index.js'
 import {
@@ -181,10 +181,11 @@ describe('OneBot V11 transport and platform integration', () => {
 
   it('fails timed-out API calls and stops pending actions after disconnect', async () => {
     const socket = new MockOneBotSocket()
-    const client = new OneBotClient({ endpoint: 'ws://localhost:3001', socketFactory: () => socket, requestTimeoutMs: 30 })
+    const client = new OneBotClient({ endpoint: 'ws://localhost:3001', socketFactory: () => socket, requestTimeoutMs: 100 })
     await expect(client.call('get_missing')).rejects.toThrow('timed out')
     const pending = client.call('get_later')
-    await vi.waitFor(() => expect(socket.sent).toHaveLength(2))
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    expect(socket.sent).toHaveLength(2)
     socket.close()
     await expect(pending).rejects.toThrow('closed')
     client.stop()
