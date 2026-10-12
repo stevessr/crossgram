@@ -19,11 +19,17 @@ export interface SQLiteShardOptions {
   batchWindowMs?: number
   maxBatchSize?: number
   busyTimeoutMs?: number
+  /** Per-connection SQLite page cache budget; separate from the OS page cache. */
+  cacheSizeKiB?: number
+  /** SQLite memory-mapped read window; 0 disables mmap. */
+  mmapSizeMiB?: number
   /** Keys are stable mtproto_platform_session.id values, not platform kinds. */
   accounts?: Record<string, {
     path?: string
     batchWindowMs?: number
     maxBatchSize?: number
+    cacheSizeKiB?: number
+    mmapSizeMiB?: number
   }>
 }
 
@@ -228,6 +234,13 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
       db.exec('PRAGMA journal_mode = WAL')
       // FULL is intentional: a resolved mutation remains durable across a power loss.
       db.exec('PRAGMA synchronous = FULL')
+      const account = this._config.accounts?.[sessionId]
+      const cacheKiB = Math.max(256, Math.min(65_536,
+        account?.cacheSizeKiB ?? this._config.cacheSizeKiB ?? 1_024))
+      const mmapMiB = Math.max(0, Math.min(1_024,
+        account?.mmapSizeMiB ?? this._config.mmapSizeMiB ?? 0))
+      db.exec('PRAGMA cache_size = -' + cacheKiB)
+      db.exec('PRAGMA mmap_size = ' + (mmapMiB * 1_048_576))
       db.exec(SCHEMA)
       const stored = db.prepare("SELECT value FROM shard_metadata WHERE key='sessionId'").get() as
         | { value: string } | undefined
@@ -237,7 +250,6 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
       if (!stored) {
         db.prepare("INSERT INTO shard_metadata(key, value) VALUES ('sessionId', ?)").run(sessionId)
       }
-      const account = this._config.accounts?.[sessionId]
       const shard: Shard = {
         sessionId, path, db,
         batchWindowMs: Math.max(0, Math.min(1_000, account?.batchWindowMs ?? this._config.batchWindowMs ?? 8)),
