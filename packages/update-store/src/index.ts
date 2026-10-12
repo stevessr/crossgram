@@ -43,6 +43,8 @@ export interface ChannelScopeUpdate {
 }
 
 export interface UpdateStoreBackend {
+  /** Backends with independent account journals permit per-event write scheduling. */
+  readonly concurrentPerEventWrites?: boolean
   get(eventKey: string): Promise<UpdateDelivery | undefined>
   create(delivery: NewUpdateDelivery): Promise<UpdateDelivery>
   markPublished(eventKey: string): Promise<void>
