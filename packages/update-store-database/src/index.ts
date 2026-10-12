@@ -2,6 +2,7 @@ import { $, type Database } from '@cordisjs/plugin-database'
 import type { Context } from 'cordis'
 import { decode, encode } from '@msgpack/msgpack'
 import z from 'schemastery'
+import { ShardedSQLiteUpdateStoreBackend, type SQLiteShardOptions } from './sharded-sqlite.js'
 import {
   UpdateStore,
   type ChannelScopeUpdate,
@@ -41,6 +42,8 @@ export interface Config {
    * evicts them.
    */
   retentionSeconds?: number
+  /** Opt-in account-level SQLite journals, one WAL file and batch queue per adapter identity. */
+  sqliteShards?: SQLiteShardOptions
 }
 
 export const Config = z.object({
@@ -48,6 +51,19 @@ export const Config = z.object({
     .description('Maximum retained update deliveries for each Telegram account and update scope.'),
   retentionSeconds: z.natural().max(90 * 24 * 3600).default(3 * 24 * 3600)
     .description('delivery 的保留时长（秒）：更旧的会被清理，0 表示只按条数保留。'),
+  sqliteShards: z.object({
+    enabled: z.boolean().default(false),
+    directory: z.string().role('path').default('./data/update-shards'),
+    batchWindowMs: z.natural().max(1000).default(8),
+    maxBatchSize: z.natural().min(1).max(1024).default(64),
+    busyTimeoutMs: z.natural().max(60000).default(5000),
+    accounts: z.dict(z.object({
+      path: z.string().role('path').default(''),
+      batchWindowMs: z.natural().max(1000).default(8),
+      maxBatchSize: z.natural().min(1).max(1024).default(64),
+    })).default({}),
+  }).default({ enabled: false, directory: './data/update-shards',
+    batchWindowMs: 8, maxBatchSize: 64, busyTimeoutMs: 5000, accounts: {} }),
 })
 
 /**
@@ -210,12 +226,22 @@ export class DatabaseUpdateStoreBackend implements UpdateStoreBackend {
 export class DatabaseUpdateStore extends UpdateStore {
   static inject = ['database', 'model']
   static Config = Config
-  private readonly _backend: DatabaseUpdateStoreBackend
+  private readonly _backend: DatabaseUpdateStoreBackend | ShardedSQLiteUpdateStoreBackend
 
   constructor(ctx: Context, config: Config = {}) {
     defineModel(ctx)
     super(ctx)
-    this._backend = new DatabaseUpdateStoreBackend(ctx.database, config)
+    this._backend = config.sqliteShards?.enabled
+      ? new ShardedSQLiteUpdateStoreBackend(
+          ctx.database, config.sqliteShards,
+          Math.max(0, Math.trunc(config.retention ?? 10_000)),
+          Math.max(0, Math.trunc(config.retentionSeconds ?? DEFAULT_RETENTION_SECONDS)),
+        )
+      : new DatabaseUpdateStoreBackend(ctx.database, config)
+    if (this._backend instanceof ShardedSQLiteUpdateStoreBackend) {
+      ctx.effect(() => () => this._backend instanceof ShardedSQLiteUpdateStoreBackend
+        ? this._backend.close() : undefined, 'update-store-database.sqlite-shards')
+    }
     if (this._backend.retentionSeconds) {
       const logger = ctx.logger('update-store')
       const sweep = setInterval(() => {
