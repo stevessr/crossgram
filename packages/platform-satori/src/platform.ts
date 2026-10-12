@@ -158,25 +158,32 @@ export class SatoriPlatform implements IMPlatform<SatoriMediaLocator> {
       state = { guilds: page.data, guildNext: page.next, pending: [] }
     }
     const dialogs: IMDialog<SatoriMediaLocator>[] = []
-    while (dialogs.length < limit && (state.pending.length || state.guilds.length)) {
-      const guild = state.guilds[0]
-      if (!state.pending.length) {
+    // Array.shift() moves every remaining item. Track offsets instead, then
+    // retain only the unconsumed cursor suffix once per page.
+    let guildOffset = 0
+    let pendingOffset = 0
+    while (dialogs.length < limit && (pendingOffset < state.pending.length || guildOffset < state.guilds.length)) {
+      const guild = state.guilds[guildOffset]!
+      if (pendingOffset >= state.pending.length) {
         const page = await bot.getChannelList(guild.id, state.channelNext)
-        state.pending.push(...page.data.filter((channel) => channel.type === 0 || channel.type === 1))
+        state.pending = page.data.filter((channel) => channel.type === 0 || channel.type === 1)
+        pendingOffset = 0
         state.channelNext = page.next
         if (!state.pending.length && !state.channelNext) {
-          state.guilds.shift()
+          guildOffset++
           continue
         }
       }
-      while (dialogs.length < limit && state.pending.length) {
-        const channel = state.pending.shift()!
+      while (dialogs.length < limit && pendingOffset < state.pending.length) {
+        const channel = state.pending[pendingOffset++]!
         const conversation = this.remember(mapSatoriConversation(channel, guild))
         dialogs.push({ conversation, unreadCount: 0 })
       }
-      if (!state.pending.length && !state.channelNext) state.guilds.shift()
+      if (pendingOffset >= state.pending.length && !state.channelNext) guildOffset++
       if (state.channelNext && dialogs.length >= limit) break
     }
+    state.pending = state.pending.slice(pendingOffset)
+    state.guilds = state.guilds.slice(guildOffset)
     const after = query.afterId ? dialogs.findIndex((dialog) => dialog.conversation.id === query.afterId) : -1
     const page = after >= 0 ? dialogs.slice(after + 1) : dialogs
     const hasNext = Boolean(state.pending.length || state.guilds.length || state.guildNext)

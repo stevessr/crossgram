@@ -65,7 +65,6 @@ type DiscordChannel = DMChannel | GroupDMChannel | DiscordGuildChannel
 interface DiscordDialogRoot {
   id: string
   primary: DiscordChannel
-  channels: DiscordChannel[]
   lastActivityId: string
 }
 
@@ -276,9 +275,10 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
 
   private async loadDialogs(query: IMPageQuery): Promise<IMDialogPage<DiscordMediaLocator>> {
     await this.ensureReady()
+    // The roots are ordered by activity below. Sorting every individual
+    // channel first only adds work and a large temporary array per request.
     const channels = [...this.client.channels.cache.values()]
       .filter((channel): channel is DiscordChannel => isSupportedChannel(channel) && this.isVisible(channel))
-      .sort(compareChannels)
     const roots = this.dialogRoots(channels)
     const start = pageStart(roots.map((root) => root.id), query)
     const limit = clampLimit(query.limit)
@@ -763,7 +763,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     for (const channel of channels) {
       if (channel.type === 'DM' || channel.type === 'GROUP_DM') {
         roots.push({
-          id: channel.id, primary: channel, channels: [channel],
+          id: channel.id, primary: channel,
           lastActivityId: channel.lastMessageId ?? channel.id,
         })
         continue
@@ -775,10 +775,9 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     for (const grouped of guildChannels.values()) {
       const primary = selectGuildRoot(grouped)
       if (!primary) continue
-      const channels = [primary, ...grouped.filter((channel) => channel.id !== primary.id).sort(compareChannels)]
       roots.push({
-        id: guildConversationId(primary.guild.id), primary, channels,
-        lastActivityId: channels.reduce((latest, channel) => {
+        id: guildConversationId(primary.guild.id), primary,
+        lastActivityId: grouped.reduce((latest, channel) => {
           const candidate = channel.lastMessageId ?? channel.id
           return compareSnowflakes(candidate, latest) > 0 ? candidate : latest
         }, primary.lastMessageId ?? primary.id),
@@ -1091,17 +1090,22 @@ function isSupportedGuildChannel(channel: GuildBasedChannel): channel is Discord
 }
 
 function selectGuildRoot(channels: DiscordChannel[]): DiscordGuildChannel | undefined {
-  const guildChannels = channels.filter(isGuildChannel)
-  if (!guildChannels.length) return
-  const regular = guildChannels.filter((channel): channel is TextChannel | NewsChannel => !channel.isThread())
-  const guild = guildChannels[0]!.guild
-  const system = regular.find((channel) => channel.id === guild.systemChannelId)
-  if (system) return system
-  const byPosition = (left: DiscordGuildChannel, right: DiscordGuildChannel) =>
+  // Called once per projected guild message too: select the same priority
+  // (system > general > regular > thread) in one pass without sorting arrays.
+  const before = (left: DiscordGuildChannel, right: DiscordGuildChannel) =>
     channelPosition(left) - channelPosition(right) || compareSnowflakes(left.id, right.id)
-  const general = regular.filter((channel) => channel.name.toLowerCase() === 'general').sort(byPosition)[0]
-  if (general) return general
-  return (regular.length ? regular : guildChannels).slice().sort(byPosition)[0]
+  let fallback: DiscordGuildChannel | undefined
+  let regular: TextChannel | NewsChannel | undefined
+  let general: TextChannel | NewsChannel | undefined
+  for (const channel of channels) {
+    if (!isGuildChannel(channel)) continue
+    if (!fallback || before(channel, fallback) < 0) fallback = channel
+    if (channel.isThread()) continue
+    if (channel.id === channel.guild.systemChannelId) return channel
+    if (!regular || before(channel, regular) < 0) regular = channel
+    if (channel.name.toLowerCase() === 'general' && (!general || before(channel, general) < 0)) general = channel
+  }
+  return general ?? regular ?? fallback
 }
 
 function channelPosition(channel: DiscordGuildChannel): number {

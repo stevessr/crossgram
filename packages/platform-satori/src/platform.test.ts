@@ -86,6 +86,31 @@ describe('SatoriPlatform', () => {
     expect(bot.deleteMessage).toHaveBeenCalledTimes(2)
   })
 
+  it('paginates a large channel page across guilds without skipping entries', async () => {
+    const bot = makeBot()
+    vi.mocked(bot.getGuildList!).mockResolvedValue({
+      data: [{ id: 'guild-a', name: 'A' }, { id: 'guild-b', name: 'B' }],
+    } as never)
+    vi.mocked(bot.getChannelList!).mockImplementation(async (guildId) => ({
+      data: Array.from({ length: guildId === 'guild-a' ? 45 : 3 }, (_, index) => ({
+        id: `${guildId}-${index}`, type: 0, name: `Channel ${index}`,
+      })),
+    }) as never)
+    const platform = new SatoriPlatform(context(bot), 'mock:self')
+    const received: string[] = []
+    let cursor: string | undefined
+    do {
+      const page = await platform.getDialogs(session, { cursor, limit: 16 })
+      received.push(...page.dialogs.map((dialog) => dialog.conversation.id))
+      cursor = page.nextCursor
+    } while (cursor)
+    expect(received).toEqual([
+      ...Array.from({ length: 45 }, (_, index) => `guild-a-${index}`),
+      ...Array.from({ length: 3 }, (_, index) => `guild-b-${index}`),
+    ])
+    expect(bot.getChannelList).toHaveBeenCalledTimes(2)
+  })
+
   it('requires an explicit SID when more than one imported bot exists', () => {
     const first = makeBot()
     const second = { ...makeBot(), sid: 'mock:second' } as Bot

@@ -416,6 +416,28 @@ describe('MatrixPlatform', () => {
     await expect(platform.getConversation(session, '!not-joined:example.org')).resolves.toBeNull()
   })
 
+  it('does not rebuild Space hierarchy on message-only sync but refreshes child state', () => {
+    const platform = createPlatform(routeFetch(() => { throw new Error('unexpected network request') }))
+    const room = '!space:example.org'
+    const child = '!child:example.org'
+    const internal = platform as any
+    internal.refreshJoinedRoomState({ [room]: { state: { events: [
+      event('m.room.create', { type: 'm.space' }, { stateKey: '' }),
+    ] } }, [child]: { state: { events: [] } } }, true)
+    const existingParents = internal.spaceParents
+    const existingChildren = internal.spaceChildren
+    internal.refreshJoinedRoomState({ [room]: { timeline: { events: [
+      event('m.room.message', { body: 'hello' }),
+    ] } } }, false)
+    expect(internal.spaceParents).toBe(existingParents)
+    expect(internal.spaceChildren).toBe(existingChildren)
+    internal.refreshJoinedRoomState({ [room]: { state: { events: [
+      event('m.space.child', { via: ['example.org'] }, { stateKey: child }),
+    ] } } }, false)
+    expect(internal.spaceParents).not.toBe(existingParents)
+    expect(internal.spaceParents.get(child)).toBe(room)
+  })
+
   it('shares one full-state request across concurrent Space and dialog reads', async () => {
     let reads = 0
     const space = '!space:example.org'

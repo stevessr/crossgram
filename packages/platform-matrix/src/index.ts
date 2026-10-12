@@ -998,12 +998,13 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       }
       this.pendingInvites.set(roomId, request)
     }
+    let joinedMembershipChanged = false
     for (const roomId of Object.keys(response.rooms?.leave ?? {})) {
-      this.joinedRoomIds.delete(roomId)
+      if (this.joinedRoomIds.delete(roomId)) joinedMembershipChanged = true
       this.roomState.delete(roomId)
       this.conversations.delete(roomId)
     }
-    this.refreshJoinedRoomState(response.rooms?.join ?? {}, false)
+    this.refreshJoinedRoomState(response.rooms?.join ?? {}, false, joinedMembershipChanged)
     for (const [roomId, room] of Object.entries(response.rooms?.join ?? {})) {
       const invite = this.pendingInvites.get(roomId)
       const settled = this.locallyResolvedInvites.get(roomId)
@@ -1206,22 +1207,37 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     if (isEncrypted()) throw new Error('Matrix room is end-to-end encrypted; CrossGram cannot send without Matrix E2EE support')
   }
 
-  private refreshJoinedRoomState(rooms: Record<string, MatrixJoinedRoom>, fullSnapshot: boolean): void {
+  private refreshJoinedRoomState(
+    rooms: Record<string, MatrixJoinedRoom>,
+    fullSnapshot: boolean,
+    membershipChanged = false,
+  ): void {
     if (fullSnapshot) {
       this.joinedRoomIds.clear()
       this.roomState.clear()
       this.conversations.clear()
     }
+    let hierarchyDirty = fullSnapshot || membershipChanged
     for (const [roomId, room] of Object.entries(rooms)) {
+      if (!this.joinedRoomIds.has(roomId)) hierarchyDirty = true
       this.joinedRoomIds.add(roomId)
-      this.ingestState(roomId, [
+      const stateEvents = [
         ...(room.state?.events ?? []),
         ...(room.timeline?.events ?? []).filter((event) => event.state_key !== undefined),
-      ])
+      ]
+      if (!hierarchyDirty && stateEvents.some((event) =>
+        event.state_key !== undefined && (event.type === 'm.space.child' || event.type === 'm.room.create'))) {
+        hierarchyDirty = true
+      }
+      this.ingestState(roomId, stateEvents)
     }
-    const hierarchy = buildSpaceHierarchy(this.roomState, this.joinedRoomIds)
-    this.spaceParents = hierarchy.parents
-    this.spaceChildren = hierarchy.children
+    // Most /sync responses contain only messages/receipts. Rebuilding a
+    // graph from every joined room for each of them costs CPU and allocations.
+    if (hierarchyDirty) {
+      const hierarchy = buildSpaceHierarchy(this.roomState, this.joinedRoomIds)
+      this.spaceParents = hierarchy.parents
+      this.spaceChildren = hierarchy.children
+    }
   }
 
   private ingestState(roomId: string, events: MatrixEvent[]): void {

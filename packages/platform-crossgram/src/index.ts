@@ -3084,6 +3084,20 @@ function isFilteredConversationId(value: string): boolean {
   return isInvalidZeroPeerConversationId(value)
 }
 
+// A reaction catalog is reused by many incoming messages. Index it once and
+// release it with the catalog; do not scan all definitions for every QQ face.
+const qqFaceDefinitionIndex = new WeakMap<IMReactionContext, Map<string, IMReactionContext['available'][number]>>()
+
+function findQQFaceDefinition(catalog: IMReactionContext | undefined, faceId: string) {
+  if (!catalog) return undefined
+  let definitions = qqFaceDefinitionIndex.get(catalog)
+  if (!definitions) {
+    definitions = new Map(catalog.available.map((definition) => [definition.key, definition]))
+    qqFaceDefinitionIndex.set(catalog, definitions)
+  }
+  return definitions.get(`1:${faceId}`)
+}
+
 function normalizeTextPart(
   part: Extract<WireMessage['parts'][number], { type: 'text' }>,
   reactionCatalog?: IMReactionContext,
@@ -3109,7 +3123,7 @@ function normalizeTextPart(
     if (face.offset < cursor || face.offset < 0 || face.length <= 0 || face.offset + face.length > part.text.length) continue
     output += part.text.slice(cursor, face.offset)
     const outputOffset = output.length
-    const definition = reactionCatalog?.available.find((item) => item.key === `1:${face.faceId}`)
+    const definition = findQQFaceDefinition(reactionCatalog, face.faceId)
     const sourceText = part.text.slice(face.offset, face.offset + face.length)
     let replacement = sourceText
     if (definition?.presentation.type === 'emoji') replacement = definition.presentation.emoticon

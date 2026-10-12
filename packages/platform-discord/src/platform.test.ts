@@ -265,6 +265,23 @@ describe('DiscordPlatform userbot', () => {
       dialog.conversation.metadata?.discordChannelType !== 'GUILD_PUBLIC_THREAD')).toBe(true)
   })
 
+  it('keeps system-channel precedence with unsorted guild channels and does not duplicate a root', async () => {
+    const { guild, channels } = guildChannels(5)
+    // A later-positioned system channel outranks the earliest general channel.
+    guild.systemChannelId = channels[4]!.id
+    guild.channels.cache = new Collection([...channels].reverse().map((channel) => [channel.id, channel]))
+    const platform = new DiscordPlatform({ token: 'token' }, { client: fakeClient([...channels].reverse()) })
+    const roots = await platform.getDialogs(session)
+    expect(roots.total).toBe(1)
+    expect(roots.dialogs[0]?.conversation).toMatchObject({
+      id: `discord:guild:${guild.id}`,
+      metadata: { discordRootChannelId: channels[4]!.id },
+    })
+    const subdialogs = await platform.getSubdialogs(session, { id: `discord:guild:${guild.id}` })
+    expect(subdialogs.total).toBe(channels.length - 1)
+    expect(subdialogs.dialogs.every((item) => item.conversation.id !== channels[4]!.id)).toBe(true)
+  })
+
   it('maps user mentions, channel links, custom emoji, attachments, replies, and sender aliases', async () => {
     const channel = dmChannel()
     const mentioned = user('300', 'Mentioned')
