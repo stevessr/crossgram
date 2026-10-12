@@ -107,7 +107,7 @@ describe('account-sharded SQLite delivery store', () => {
       batchWindowMs: 50, maxBatchSize: 16,
       accounts: { quiet: { batchWindowMs: 0, maxBatchSize: 1 } },
     }
-    const { ctx, updates } = await start(mainPath, shards)
+    const { source, updates } = await start(mainPath, shards)
     const created = await Promise.all(
       Array.from({ length: 12 }, (_, index) => updates.create(record('busy:' + index, 'busy', index + 1))),
     )
@@ -120,7 +120,7 @@ describe('account-sharded SQLite delivery store', () => {
       updates.claim('busy:2', 1_700_000_000),
       updates.setPayload('busy:3', { _: 'updates', updates: [], chats: [], users: [] }),
     ])
-    const backend = (ctx.updateStore as unknown as { _backend: ShardedSQLiteUpdateStoreBackend })._backend
+    const backend = (source as unknown as { _backend: ShardedSQLiteUpdateStoreBackend })._backend
     expect(backend.statistics().busy.committedOperations).toBeGreaterThanOrEqual(15)
     expect(backend.statistics().busy.committedBatches)
       .toBeLessThan(backend.statistics().busy.committedOperations)
@@ -175,7 +175,7 @@ describe('account-sharded SQLite delivery store', () => {
       await updates.create(record(key, 'a', Number(key.slice(-1)), 'channel:1'))
       await updates.setPayload(key, { _: 'updates', updates: [], chats: [], users: [] })
     }
-    await updates.create(record('b:1', 'b', 2, 'channel:1'))
+    await updates.create({ ...record('b:1', 'b', 2, 'channel:1'), date: 150 })
     expect((await updates.getAfter('a', 'channel:1', 0, 20)).map((row) => row.eventKey))
       .toEqual(['a:2', 'a:3'])
     expect((await updates.getAfter('b', 'channel:1', 0, 20)).map((row) => row.eventKey))
