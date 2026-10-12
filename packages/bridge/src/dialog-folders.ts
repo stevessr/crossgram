@@ -44,6 +44,41 @@ export class DialogFolderStore {
     return ordered
   }
 
+
+  /** Reconcile native platform folders without claiming user-authored filter IDs. */
+  async syncPlatformFolders(platformSessionId: string, folders: readonly IMChatFolder[]): Promise<void> {
+    const existing = await this._database.get('mtproto_dialog_filter', { platformSessionId })
+    const bySource = new Map(existing.filter((row) => typeof (row.payload as StoredDialogFilter | null)?.sourceId === 'string')
+      .map((row) => [(row.payload as StoredDialogFilter).sourceId!, row]))
+    const ids = new Set(existing.map((row) => row.filterId))
+    const desired = new Set<string>()
+    let order = Math.max(0, ...existing.map((row) => row.sortOrder)) + 1
+    for (const folder of [...new Map(folders.map((entry) => [entry.id, entry])).values()].sort((a, b) => a.id.localeCompare(b.id))) {
+      if (!folder.id) continue
+      desired.add(folder.id)
+      const previous = bySource.get(folder.id)
+      let filterId = previous?.filterId
+      if (filterId === undefined) {
+        for (let id = 2; id <= 255; id++) if (!ids.has(id)) { filterId = id; break }
+      }
+      if (filterId === undefined) break
+      ids.add(filterId)
+      const payload: StoredDialogFilter = {
+        kind: 'dialogFilter', sourceId: folder.id,
+        title: encodeDialogFilterTitle({ _: 'textWithEntities', text: folder.title, entities: [] }),
+        pinnedPeerIds: [], includePeerIds: [...new Set(folder.conversationIds)], excludePeerIds: [],
+      }
+      if (previous && JSON.stringify(previous.payload) === JSON.stringify(payload)) continue
+      await this._database.upsert('mtproto_dialog_filter', [{
+        id: filterKey(platformSessionId, filterId), platformSessionId, filterId,
+        sortOrder: previous?.sortOrder ?? order++, payload: payload as unknown as JsonObject, updatedAt: new Date(),
+      }])
+    }
+    for (const [sourceId, row] of bySource) if (!desired.has(sourceId)) {
+      await this._database.remove('mtproto_dialog_filter', { platformSessionId, filterId: row.filterId })
+    }
+  }
+
   async putFilter(
     platformSessionId: string,
     filterId: number,
