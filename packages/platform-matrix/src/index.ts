@@ -156,7 +156,10 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       this.pendingInvites.set(roomId, request)
     }
     for (const [roomId, room] of Object.entries(initial.rooms?.join ?? {})) {
-      this.updateConversation(roomId, room)
+      if (this.isSpaceRoom(roomId)) continue
+      const conversation = this.updateConversation(roomId, room)
+      // Reconcile formerly forum-nested rooms with the persisted bridge index.
+      await handler({ type: 'conversation', conversation })
       for (const event of room.timeline?.events ?? []) {
         const relation = event.type === 'm.reaction' ? relationFromValue(event.content['m.relates_to']) : undefined
         if (event.event_id && relation?.rel_type === 'm.annotation' && relation.event_id) {
@@ -261,6 +264,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       this.refreshJoinedRoomState(response.rooms?.join ?? {}, true)
       const dialogs: IMDialog<MatrixMediaLocator>[] = []
       for (const [roomId, room] of Object.entries(response.rooms?.join ?? {})) {
+        if (this.isSpaceRoom(roomId)) continue
         this.ingestPollClosures(roomId, room.timeline?.events ?? [])
         const conversation = this.updateConversation(roomId, room)
         const lastMessage = [...(room.timeline?.events ?? [])].reverse()
@@ -1022,6 +1026,10 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         event.type === 'm.room.pinned_events' && event.state_key === '').at(-1)
       const previousPins = this.pinSnapshots.get(roomId)
       this.ingestState(roomId, stateEvents)
+      if (this.isSpaceRoom(roomId)) {
+        this.conversations.delete(roomId)
+        continue
+      }
       const prior = this.conversations.get(roomId)
       const conversation = this.updateConversation(roomId, room)
       const hierarchyChanged = prior && (prior.parentId !== conversation.parentId || prior.spaceId !== conversation.spaceId
