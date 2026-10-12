@@ -127,6 +127,6 @@ export function buildSpaceFolders(
       if (nested) pending.push(...nested.children.toReversed())
       else rooms.add(child)
     }
-    return { id, title: space.title, conversationIds: [...rooms] }
+    return { id, title: space.title, conversationIds: [...rooms].sort((a, b) => a.localeCompare(b)) }
   })
 }
