@@ -82,9 +82,9 @@ export class SseHub {
     res.headers.set('x-accel-buffering', 'no')
     res.headers.set('x-content-type-options', 'nosniff')
 
+    let subscriber: Subscriber | undefined
     const stream = new ReadableStream<Uint8Array>({
       start: (controller) => {
-        let subscriber: Subscriber
         const dispose = () => {
           if (subscriber.closed) return
           subscriber.closed = true
@@ -120,13 +120,9 @@ export class SseHub {
       },
       cancel: () => {
         // Called by the underlying HTTP stream when the client disconnects.
-        for (const subscriber of this.clients) {
-          if (subscriber.controller === controllerRef) subscriber.dispose()
-        }
+        subscriber?.dispose()
       },
     }, { highWaterMark: MAX_PENDING_EVENTS })
-    // Keep a reference so stream cancellation can find the matching subscriber.
-    const controllerRef = undefined as unknown as ReadableStreamDefaultController<Uint8Array>
     res.body = stream
   }
 
