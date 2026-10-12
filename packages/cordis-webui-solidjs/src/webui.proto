@@ -1,0 +1,23 @@
+syntax = "proto3";
+package crossgram.webui.v1;
+
+// The WebUI only upgrades to protobuf after a JSON handshake. Large bodies
+// are gzip-compressed when beneficial; gzip applies solely to json_payload.
+message Frame {
+  enum Kind {
+    UNSPECIFIED = 0;
+    ENTRY_INIT = 1;
+    ENTRY_SNAPSHOT = 2;
+    ENTRY_DELTA = 3;
+    ENTRY_MISSING = 4;
+    RPC_REQUEST = 5;
+    RPC_RESPONSE = 6;
+    ENTRY_SUBSCRIBE = 7;
+    ENTRY_UNSUBSCRIBE = 8;
+    PING = 9;
+    PONG = 10;
+  }
+  Kind kind = 1;
+  bytes json_payload = 2;
+  bool gzip = 3;
+}
