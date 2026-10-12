@@ -34,7 +34,7 @@ import {
 } from './statistics-model.js'
 type Tab = 'overview' | 'rpc' | 'network' | 'files' | 'runtime'
 const tabs: { id: Tab; label: string }[] = [
-  { id: 'overview', label: t("Overview") },
+  { id: 'overview', label: 'Overview' },
   { id: 'rpc', label: 'RPC' },
   { id: 'network', label: 'Network & IPs' },
   { id: 'files', label: 'File routes' },
@@ -81,7 +81,7 @@ export function StatisticsDashboard(props: {
     points().map((point) => point[key])
   const runtime = () => snapshot().runtime
   const methodColumns: Column<any>[] = [
-    { label: t("Method"), key: 'method' },
+    { label: 'Method', key: 'method' },
     { label: 'Calls', key: 'count', format: formatNumber },
     { label: 'Average', key: 'averageMs', format: formatMs },
     { label: 'P90', key: 'p90Ms', format: formatMs },
@@ -91,11 +91,11 @@ export function StatisticsDashboard(props: {
   ]
   const slowColumns: Column<any>[] = [
     { label: 'When', key: 'at', format: formatTimestamp },
-    { label: t("Method"), key: 'method' },
-    { label: t("Duration"), key: 'durationMs', format: formatMs },
-    { label: t("Connection"), key: 'connectionId' },
+    { label: 'Method', key: 'method' },
+    { label: 'Duration', key: 'durationMs', format: formatMs },
+    { label: 'Connection', key: 'connectionId' },
     { label: 'IP', key: 'remoteAddress' },
-    { label: t("Error"), key: 'error' },
+    { label: 'Error', key: 'error' },
   ]
   return (
     <div class="stack statistics-dashboard">
@@ -109,7 +109,7 @@ export function StatisticsDashboard(props: {
                 classList={{ selected: tab() === item.id }}
                 onClick={() => setTab(item.id)}
               >
-                {item.label}
+                {t(item.label)}
               </button>
             )}
           </For>
@@ -285,7 +285,7 @@ export function StatisticsDashboard(props: {
           title={t("RPC failure reasons")}
           rows={snapshot().failureReasons}
           columns={[
-            { label: t("Method"), key: 'method' },
+            { label: 'Method', key: 'method' },
             { label: 'Category', key: 'category' },
             { label: 'Code', key: 'errorCode' },
             { label: 'Reason', key: 'errorMessage' },
@@ -316,7 +316,7 @@ export function StatisticsDashboard(props: {
             }
             rows={snapshot().missingRpcs.methods}
             columns={[
-              { label: t("Method"), key: 'method' },
+              { label: 'Method', key: 'method' },
               { label: 'Count', key: 'count' },
               {
                 label: 'Last seen',
@@ -331,11 +331,11 @@ export function StatisticsDashboard(props: {
           rows={snapshot().recentFailures}
           columns={[
             { label: 'When', key: 'at', format: formatTimestamp },
-            { label: t("Method"), key: 'method' },
+            { label: 'Method', key: 'method' },
             { label: 'Request', key: 'requestSummary' },
             { label: 'Code', key: 'errorCode' },
             { label: 'Reason', key: 'errorMessage' },
-            { label: t("Connection"), key: 'connectionId' },
+            { label: 'Connection', key: 'connectionId' },
             { label: 'IP', key: 'remoteAddress' },
           ]}
         />
@@ -387,13 +387,13 @@ export function StatisticsDashboard(props: {
             { label: 'Active', key: 'activeConnections' },
             { label: 'Total', key: 'totalConnections' },
             { label: 'RPCs', key: 'rpcCount' },
-            { label: t("Received"), key: 'receivedBytes', format: formatBytes },
+            { label: 'Received', key: 'receivedBytes', format: formatBytes },
             {
               label: 'Receive rate',
               key: 'receivedBytesPerSecond',
               format: (value) => formatBytes(value) + '/s',
             },
-            { label: t("Sent"), key: 'sentBytes', format: formatBytes },
+            { label: 'Sent', key: 'sentBytes', format: formatBytes },
             {
               label: 'Send rate',
               key: 'sentBytesPerSecond',
@@ -706,7 +706,7 @@ export function StatsTable<T extends object>(props: {
           <thead>
             <tr>
               <For each={props.columns}>
-                {(column) => <th>{column.label}</th>}
+                {(column) => <th>{t(column.label)}</th>}
               </For>
             </tr>
           </thead>

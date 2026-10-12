@@ -436,8 +436,7 @@ function initialLanguage(): Language {
     // Web storage can be unavailable (for example, private browsing).
   }
   return typeof navigator !== 'undefined' &&
-    (navigator.languages?.some((value) => /^zh(?:-|$)/i.test(value)) ||
-      /^zh(?:-|$)/i.test(navigator.language))
+    (/^zh(?:-|$)/i.test(navigator.languages?.[0] ?? navigator.language))
     ? 'zh-CN'
     : 'en-US'
 }

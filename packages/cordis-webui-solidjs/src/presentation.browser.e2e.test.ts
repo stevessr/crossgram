@@ -143,4 +143,42 @@ describe('Solid WebUI presentation contract', () => {
         await Promise.resolve((fiber as any).dispose?.())
     }
   }, 90_000)
+  it('offers Chinese by browser locale and preserves manual language changes', async () => {
+    const ctx = new Context()
+    const fibers = [
+      ctx.plugin(Server, { host: '127.0.0.1', port: 0 }),
+      ctx.plugin(SolidWebUI, { uiPath: '/console' }),
+      ctx.plugin(Timer),
+    ]
+    let browser: Awaited<ReturnType<typeof chromium.launch>> | undefined
+    try {
+      await Promise.all(fibers)
+      await vi.waitFor(() =>
+        expect(fibers.every((fiber) => fiber.state === 2)).toBe(true),
+      )
+      browser = await chromium.launch({
+        executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
+      })
+      const page = await browser.newPage({ locale: 'zh-CN' })
+      await page.goto(ctx.server.baseUrl + '/console/')
+      await waitForConnection(page)
+      await expect.poll(() => page.locator('.crumb-current').innerText()).toBe('概览')
+      await page.locator('.sidebar-footer .nav-item').click()
+      await expect.poll(() => page.locator('h1').innerText()).toBe('个性化设置')
+      await page.getByLabel('界面语言').selectOption('en-US')
+      await expect.poll(() => page.locator('h1').innerText()).toBe('Make yourself at home')
+      expect(await page.evaluate(() => document.documentElement.lang)).toBe('en-US')
+      await page.reload()
+      await waitForConnection(page)
+      expect(await page.getByLabel('Interface language').inputValue()).toBe('en-US')
+      await page.getByLabel('Interface language').selectOption('zh-CN')
+      await expect.poll(() => page.locator('h1').innerText()).toBe('个性化设置')
+      expect(await page.evaluate(() => localStorage.getItem('crossgram:webui-language'))).toBe('zh-CN')
+    } finally {
+      await browser?.close()
+      for (const fiber of fibers.reverse())
+        await Promise.resolve((fiber as any).dispose?.())
+    }
+  }, 90_000)
+
 })
