@@ -90,7 +90,7 @@ export class OnDemandLoginCodeStore {
   /** Consume before authorization, so parallel sign-in attempts cannot reuse it. */
   consume(authId: string, candidate: string, now = Date.now()): boolean {
     const entry = this.get(authId, now)
-    if (!entry || !/^\\d{6}$/.test(candidate)) return false
+    if (!entry || !/^\d{6}$/.test(candidate)) return false
     if (!timingSafeEqual(Buffer.from(entry.code), Buffer.from(candidate))) return false
     this._codes.delete(authId)
     return true
