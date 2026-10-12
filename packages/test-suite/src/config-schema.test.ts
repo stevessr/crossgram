@@ -53,7 +53,7 @@ const cases = [
   ['telegram-sticker-importer', stickerImporterConfig, [
     'botToken', 'apiBase', 'maxImportsPerSession', 'importCooldownMs',
   ]],
-  ['update-store-database', databaseUpdateStoreConfig, ['retention', 'retentionSeconds']],
+  ['update-store-database', databaseUpdateStoreConfig, ['retention', 'retentionSeconds', 'sqliteShards']],
   ['update-store-memory', memoryUpdateStoreConfig, ['retention']],
 ] as const
 
@@ -138,7 +138,21 @@ describe('plugin config schemas', () => {
       topMethods: 40,
       topIps: 100,
     })
-    expect(databaseUpdateStoreConfig({})).toEqual({ retention: 10_000, retentionSeconds: 259_200 })
+    expect(databaseUpdateStoreConfig({})).toEqual({
+      retention: 10_000,
+      retentionSeconds: 259_200,
+      sqliteShards: {
+        enabled: false,
+        directory: './data/update-shards',
+        batchWindowMs: 8,
+        maxBatchSize: 64,
+        busyTimeoutMs: 5_000,
+        accounts: {},
+      },
+    })
+    expect(databaseUpdateStoreConfig({
+      sqliteShards: { enabled: true, accounts: { 'account-id': { batchWindowMs: 25 } } },
+    }).sqliteShards.accounts['account-id']).toMatchObject({ batchWindowMs: 25, maxBatchSize: 64 })
     expect(memoryUpdateStoreConfig({})).toEqual({ retention: 1_000 })
   })
 
