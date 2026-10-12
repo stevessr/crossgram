@@ -102,7 +102,7 @@ Last-Event-ID: 123
 The endpoint emits `entry:init` followed by initial `entry:snapshot`
 frames for the requested entries, then `entry:delta` whenever the underlying
 entry state changes. Events carry monotonically increasing numeric IDs.
-Clients can resume from `Last-Event-ID` within a bounded 512-event ring; a
+Clients can resume from `Last-Event-ID` within a bounded 512-event / 4 MiB ring; a
 missing/stale cursor instead triggers fresh snapshots. A comment heartbeat
 is sent every 15 seconds and slow readers are closed rather than buffered
 indefinitely. `no-transform` and `X-Accel-Buffering: no` prevent proxy
@@ -140,3 +140,8 @@ streams on WS disconnect rather than replaying side effects.
 A method that returns a non-iterable value with `stream: true` yields one
 `rpc:delta` and then completes. Streaming is **opt-in**, preserving compatibility
 with all existing WebUI plugins and non-streaming clients.
+
+SSE fanout encodes each published event only once across subscribers. Replay
+history stores encoded bytes rather than retaining a second reference to mutable
+entry state. Events too large to cache invalidate older resume cursors and
+force an initial snapshot on the next connection.
