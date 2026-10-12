@@ -95,10 +95,10 @@ export function buildSpaceFolders(
   const spaces = new Map<string, { title: string, children: string[] }>()
   for (const [id, state] of states) {
     if (!joinedRoomIds.has(id)) continue
-    const create = state.get('m.room.create\\0')?.content as { type?: string } | undefined
+    const create = state.get('m.room.create\0')?.content as { type?: string } | undefined
     if (create?.type !== 'm.space') continue
-    const name = state.get('m.room.name\\0')?.content as { name?: string } | undefined
-    const alias = state.get('m.room.canonical_alias\\0')?.content as { alias?: string } | undefined
+    const name = state.get('m.room.name\0')?.content as { name?: string } | undefined
+    const alias = state.get('m.room.canonical_alias\0')?.content as { alias?: string } | undefined
     const edges: Array<{ id: string, order?: string }> = []
     for (const event of state.values()) {
       if (event.type !== 'm.space.child' || !event.state_key
