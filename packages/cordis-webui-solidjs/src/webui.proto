@@ -16,6 +16,11 @@ message Frame {
     ENTRY_UNSUBSCRIBE = 8;
     PING = 9;
     PONG = 10;
+    RPC_START = 11;
+    RPC_DELTA = 12;
+    RPC_COMPLETE = 13;
+    RPC_ERROR = 14;
+    RPC_CANCEL = 15;
   }
   Kind kind = 1;
   bytes json_payload = 2;

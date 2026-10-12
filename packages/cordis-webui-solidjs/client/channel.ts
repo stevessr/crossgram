@@ -22,6 +22,14 @@ export interface ClientConfig {
   heartbeatInterval?: number
   heartbeatTimeout?: number
 }
+interface PendingStream {
+  queue: unknown[]
+  done: boolean
+  error?: Error
+  notify?: () => void
+  timer?: ReturnType<typeof setTimeout>
+  timeoutMs: number
+}
 interface Pending {
   resolve: (value: any) => void
   reject: (error: Error) => void
@@ -73,6 +81,8 @@ export class Connection {
   private setState: ReturnType<typeof createStore<Connection['state']>>[1]
   private channels = new Map<string, Channel>()
   private pending = new Map<number, Pending>()
+  private readonly streams = new Map<number, PendingStream>()
+  private supportsStream = false
   private socket?: WebSocket
   private protobuf = false
   private upgradeRequested = false
@@ -210,6 +220,7 @@ export class Connection {
         this.stop()
         return
       }
+      if (body.reset) this.supportsStream = body.features?.rpcStream === true
       if (body.transport === PROTO_TRANSPORT && !this.upgradeRequested) {
         this.upgradeRequested = true
         this.send('transport:upgrade', { version: 1 })
@@ -252,6 +263,26 @@ export class Connection {
     }
     if (type === 'entry:missing') {
       this.channels.get(body.id)?.clear()
+      return
+    }
+    if (type === 'rpc:start' || type === 'rpc:delta' ||
+        type === 'rpc:complete' || type === 'rpc:error') {
+      const stream = this.streams.get(body?.sn)
+      if (!stream || stream.done) return
+      this.armStreamTimer(body.sn, stream)
+      if (type === 'rpc:delta') {
+        if (stream.queue.length >= 16) {
+          stream.error = new Error('RPC stream consumer is too slow')
+          stream.done = true
+          try { this.send('rpc:cancel', { sn: body.sn }) } catch { /* offline */ }
+        } else stream.queue.push(body.value)
+      } else if (type === 'rpc:complete') {
+        stream.done = true
+      } else if (type === 'rpc:error') {
+        stream.done = true
+        stream.error = new Error(String(body.message ?? 'RPC stream failed'))
+      }
+      stream.notify?.()
       return
     }
     if (type === 'rpc:response') {
@@ -302,7 +333,7 @@ export class Connection {
       )
     if (!this.state.entries[entryId]?.methods.includes(method))
       return Promise.reject(new Error('Method unavailable: ' + method))
-    if (this.pending.size >= 64)
+    if (this.pending.size + this.streams.size >= 64)
       return Promise.reject(new Error('Too many pending requests'))
     const sn = ++this.serial
     return new Promise<T>((resolve, reject) => {
@@ -323,6 +354,58 @@ export class Connection {
         reject(error)
       }
     })
+  }
+  /**
+   * Explicit opt-in streaming RPC; legacy Promise RPC remains unchanged.
+   * Breaking from the iterator sends rpc:cancel to stop server production.
+   */
+  async *rpcStream<T = unknown>(
+    entryId: string,
+    method: string,
+    args: unknown[] = [],
+    timeoutMs = 30_000,
+  ): AsyncGenerator<T> {
+    if (this.state.status !== 'connected') throw new Error('Not connected')
+    if (!this.supportsStream) throw new Error('Server does not support streaming RPC')
+    if (!this.state.entries[entryId]?.methods.includes(method))
+      throw new Error('Method unavailable: ' + method)
+    if (this.pending.size + this.streams.size >= 64)
+      throw new Error('Too many pending requests')
+    const sn = ++this.serial
+    const stream: PendingStream = { queue: [], done: false, timeoutMs }
+    this.streams.set(sn, stream)
+    this.armStreamTimer(sn, stream)
+    try {
+      this.send('rpc:request', { sn, entryId, method, args, stream: true })
+      while (true) {
+        if (stream.queue.length) {
+          yield stream.queue.shift() as T
+          continue
+        }
+        if (stream.error) throw stream.error
+        if (stream.done) return
+        await new Promise<void>(resolve => { stream.notify = resolve })
+        stream.notify = undefined
+      }
+    } finally {
+      const wasOpen = !stream.done
+      stream.done = true
+      if (stream.timer) clearTimeout(stream.timer)
+      this.streams.delete(sn)
+      if (wasOpen && this.socket?.readyState === 1) {
+        try { this.send('rpc:cancel', { sn }) } catch { /* disconnected */ }
+      }
+    }
+  }
+  private armStreamTimer(sn: number, stream: PendingStream) {
+    if (stream.timer) clearTimeout(stream.timer)
+    if (stream.done) return
+    stream.timer = setTimeout(() => {
+      stream.done = true
+      stream.error = new Error('RPC stream timed out; server outcome may be unknown')
+      try { if (this.socket?.readyState === 1) this.send('rpc:cancel', { sn }) } catch { /* offline */ }
+      stream.notify?.()
+    }, stream.timeoutMs)
   }
   private send(type: string, body?: unknown) {
     if (this.socket?.readyState !== 1) throw new Error('Connection is not open')
@@ -378,6 +461,14 @@ export class Connection {
     this.socket = undefined
     this.protobuf = false
     this.upgradeRequested = false
+    this.supportsStream = false
+    for (const stream of this.streams.values()) {
+      if (stream.timer) clearTimeout(stream.timer)
+      stream.done = true
+      stream.error = new Error(reason + '. RPC stream interrupted.')
+      stream.notify?.()
+    }
+    this.streams.clear()
     this.incoming = []
     this.draining = false
     clearTimeout(this.handshakeTimer)
