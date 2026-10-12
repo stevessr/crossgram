@@ -51,12 +51,23 @@ export class DialogFolderStore {
       const existing = await database.get('mtproto_dialog_filter', { platformSessionId })
       const bySource = new Map(existing.filter((row) => typeof (row.payload as unknown as StoredDialogFilter | null)?.sourceId === 'string')
         .map((row) => [(row.payload as unknown as StoredDialogFilter).sourceId!, row]))
+      // Preserve source order (Discord server-folder order, or the stable Matrix
+      // order). Local Telegram filters keep their own IDs and sort positions.
+      const requested = [...new Map(folders.filter((folder) => folder.id)
+        .map((folder) => [folder.id, folder])).values()]
+      const desired = new Set(requested.map((folder) => folder.id))
       const ids = new Set(existing.map((row) => row.filterId))
-      const desired = new Set<string>()
-      let order = Math.max(0, ...existing.map((row) => row.sortOrder)) + 1
-      for (const folder of [...new Map(folders.map((entry) => [entry.id, entry])).values()].sort((a, b) => a.id.localeCompare(b.id))) {
-        if (!folder.id) continue
-        desired.add(folder.id)
+      const nativeSlots = [...bySource.values()]
+        .sort((a, b) => a.sortOrder - b.sortOrder || a.filterId - b.filterId)
+        .map((row) => row.sortOrder)
+      let appendOrder = Math.max(0, ...existing.map((row) => row.sortOrder))
+      // Recycle IDs of removed native folders within the same refresh.
+      for (const [sourceId, row] of bySource) if (!desired.has(sourceId)) {
+        await database.remove('mtproto_dialog_filter', { platformSessionId, filterId: row.filterId })
+        ids.delete(row.filterId)
+      }
+      const accepted: Array<{ folder: IMChatFolder, filterId: number, previous?: typeof existing[number] }> = []
+      for (const folder of requested) {
         const previous = bySource.get(folder.id)
         let filterId = previous?.filterId
         if (filterId === undefined) {
@@ -64,19 +75,21 @@ export class DialogFolderStore {
         }
         if (filterId === undefined) continue
         ids.add(filterId)
+        accepted.push({ folder, filterId, previous })
+      }
+      for (const [index, { folder, filterId, previous }] of accepted.entries()) {
+        const sortOrder = nativeSlots[index] ?? ++appendOrder
         const payload: StoredDialogFilter = {
           kind: 'dialogFilter', sourceId: folder.id,
           title: encodeDialogFilterTitle({ _: 'textWithEntities', text: folder.title, entities: [] }),
           pinnedPeerIds: [], includePeerIds: [...new Set(folder.conversationIds)], excludePeerIds: [],
         }
-        if (previous && JSON.stringify(previous.payload) === JSON.stringify(payload)) continue
+        if (previous?.sortOrder === sortOrder
+          && JSON.stringify(previous.payload) === JSON.stringify(payload)) continue
         await database.upsert('mtproto_dialog_filter', [{
           id: filterKey(platformSessionId, filterId), platformSessionId, filterId,
-          sortOrder: previous?.sortOrder ?? order++, payload: payload as unknown as JsonObject, updatedAt: new Date(),
+          sortOrder, payload: payload as unknown as JsonObject, updatedAt: new Date(),
         }])
-      }
-      for (const [sourceId, row] of bySource) if (!desired.has(sourceId)) {
-        await database.remove('mtproto_dialog_filter', { platformSessionId, filterId: row.filterId })
       }
     })
   }
