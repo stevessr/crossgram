@@ -3,7 +3,7 @@ import { afterAll, describe, expect, it, vi } from 'vitest'
 import { Context } from 'cordis'
 import Database from '@cordisjs/plugin-database'
 import SQLiteDriver from '@cordisjs/plugin-database-sqlite'
-import { Collection, type Client } from 'discord.js-selfbot-v13'
+import { Collection, Permissions, type Client } from 'discord.js-selfbot-v13'
 import type { tl } from '@mtcute/core'
 import Long from 'long'
 import { MessageStore, type PlatformSession } from '@mtproto-relay/bridge'
@@ -134,7 +134,8 @@ describe('Discord stall regression E2E', () => {
 
   it('keeps a five-thousand-channel guild out of the root dialog ingestion transaction', async () => {
     const self = user('100', 'Self')
-    let visibilityChecks = 0
+    let overwriteChecks = 0
+    let roleCacheReads = 0
     const guild: any = {
       id: '700000000000000001', name: 'Large guild', systemChannelId: '800000000000000000',
       memberCount: 5_000, iconURL: () => null, channels: { cache: new Collection() },
@@ -147,15 +148,23 @@ describe('Discord stall regression E2E', () => {
         lastMessageId: `9${String(index).padStart(17, '0')}`,
         createdTimestamp: 1_900_000_000_000 + index,
         messages: { cache: new Collection(), fetch: vi.fn() },
-        permissionsFor: () => {
-          visibilityChecks++
-          return { has: () => true }
-        },
-        get viewable() { return this.permissionsFor(self).has('VIEW_CHANNEL') },
+        permissionsFor: () => { throw new Error('permissionsFor must not rebuild roles per channel') },
+        overwritesFor: () => { overwriteChecks++; return { roles: [] } },
         isThread: () => false,
       }
     })
     guild.channels.cache = new Collection(channels.map((channel) => [channel.id, channel]))
+    const everyone = {
+      id: guild.id,
+      permissions: new Permissions(
+        Permissions.FLAGS.VIEW_CHANNEL | Permissions.FLAGS.READ_MESSAGE_HISTORY,
+      ),
+    }
+    const selfMember: any = { id: self.id, guild }
+    selfMember.roles = Object.defineProperty({}, 'cache', {
+      get() { roleCacheReads++; return new Collection([[guild.id, everyone]]) },
+    })
+    guild.members = { cache: new Collection([[self.id, selfMember]]) }
 
     const client = new EventEmitter() as any
     client.user = self
@@ -187,11 +196,12 @@ describe('Discord stall regression E2E', () => {
     expect(await database.get('mtproto_im_conversation', {})).toHaveLength(1)
     expect(await database.get('mtproto_im_message', {})).toHaveLength(0)
     expect(channels.every((channel) => !channel.messages.fetch.mock.calls.length)).toBe(true)
-    // Six independent RPC instances trigger six platform dialog scans. Each
-    // scan does one permission check/channel; mapping the selected guild
-    // root performs one additional projection scan. No duplicate
-    // `viewable` permission calculation or per-message root recheck occurs.
-    expect(visibilityChecks).toBe(channels.length * (connections.length + 1))
+    // Six independent RPC instances trigger six dialog scans, and mapping the
+    // root performs one projection scan. Every channel checks its overwrites,
+    // but the expensive GuildMemberRoleManager.cache role filter is evaluated
+    // only once for the guild, not once per channel or message.
+    expect(overwriteChecks).toBe(channels.length * (connections.length + 1))
+    expect(roleCacheReads).toBe(1)
     platform.stop()
   })
 })

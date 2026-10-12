@@ -23,12 +23,13 @@ describe('RuntimeMonitor', () => {
     let now = 1_000
     const readHeapStatistics = vi.fn(getHeapStatistics)
     const monitor = new RuntimeMonitor({
+      heapStatisticsSampleIntervalMs: 60_000,
       getHeapStatistics: readHeapStatistics,
       now: () => now,
     })
     try {
       const first = monitor.sample()
-      now += 9_000
+      now += 59_000
       const second = monitor.sample()
       expect(readHeapStatistics).toHaveBeenCalledOnce()
       expect(second.cpuPercent).toBeGreaterThanOrEqual(0)

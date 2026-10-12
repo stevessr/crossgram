@@ -10,7 +10,10 @@ import { getHeapStatistics } from 'node:v8'
 import type { RuntimeSnapshot } from './types.js'
 
 const CGROUP_SAMPLE_INTERVAL_MS = 5_000
-const HEAP_STATISTICS_SAMPLE_INTERVAL_MS = 10_000
+// Bun/JSC heapStats traverses enough of the live heap to be visible in CPU
+// profiles. Heap telemetry can be minute-granularity; keep the cheaper CPU,
+// event-loop, and process-memory samples at the normal one-second cadence.
+const HEAP_STATISTICS_SAMPLE_INTERVAL_MS = 60_000
 
 export interface RuntimeMonitorOptions {
   /** Heap traversal is expensive on Bun/JSC; refresh it less often than CPU/ELU. */

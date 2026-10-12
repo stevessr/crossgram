@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events'
-import { Collection, type Client } from 'discord.js-selfbot-v13'
+import { Collection, Permissions, type Client } from 'discord.js-selfbot-v13'
 import { describe, expect, it, vi } from 'vitest'
 import type { IMEvent, IMMedia, PlatformSession } from '@mtproto-relay/bridge'
 import { DiscordPlatform, type DiscordMediaLocator } from './index.js'
@@ -365,6 +365,57 @@ describe('DiscordPlatform userbot', () => {
 
     await unsubscribe()
     expect((client as any).listenerCount('roleUpdate')).toBe(0)
+  })
+
+  it('resolves guild channel permissions from one cached member-role set', async () => {
+    const { guild, channels } = guildChannels(2)
+    const view = Permissions.FLAGS.VIEW_CHANNEL
+    const history = Permissions.FLAGS.READ_MESSAGE_HISTORY
+    const everyone = { id: guild.id, permissions: new Permissions(0n) }
+    const extraRole = { id: '700000000000000099', permissions: new Permissions(view | history) }
+    guild.ownerId = '999'
+    guild.roles = {
+      everyone,
+      cache: new Collection([[everyone.id, everyone], [extraRole.id, extraRole]]),
+    }
+    let roleCacheReads = 0
+    const roles = new Collection([[everyone.id, everyone], [extraRole.id, extraRole]])
+    const selfMember: any = { id: '100', guild, _roles: [extraRole.id] }
+    selfMember.roles = Object.defineProperty({}, 'cache', {
+      get() { roleCacheReads++; return roles },
+    })
+    guild.members = {
+      cache: new Collection([[selfMember.id, selfMember]]),
+    }
+    const deny = (permission: bigint) => new Permissions(permission)
+    const empty = () => new Permissions(0n)
+    channels[0]!.overwritesFor = vi.fn(() => ({ roles: [] }))
+    channels[1]!.overwritesFor = vi.fn(() => ({
+      everyone: { deny: deny(view), allow: empty() }, roles: [],
+    }))
+    channels[2]!.overwritesFor = vi.fn(() => ({
+      roles: [{ deny: deny(history), allow: empty() }],
+      member: { deny: empty(), allow: deny(history) },
+    }))
+    for (const channel of channels) channel.permissionsFor = vi.fn(() => {
+      throw new Error('per-channel Discord permissionsFor should not be called')
+    })
+
+    const client = fakeClient(channels)
+    const platform = new DiscordPlatform({ token: 'token' }, { client })
+    const unsubscribe = await platform.subscribe(session, vi.fn())
+    const page = await platform.getDialogs(session)
+
+    expect(page.dialogs).toHaveLength(1)
+    expect(page.dialogs[0]!.conversation.id).toBe(`discord:guild:${guild.id}`)
+    expect(roleCacheReads).toBe(1)
+    expect(channels.every((channel) => channel.overwritesFor.mock.calls.length > 0)).toBe(true)
+    extraRole.permissions = new Permissions(0n)
+    ;(client as any).emit('roleUpdate', { guild }, { guild })
+    await expect(platform.getDialogs(session)).resolves.toMatchObject({ dialogs: [] })
+    expect(roleCacheReads).toBe(2)
+    await unsubscribe()
+    platform.stop()
   })
 
   it('maps user mentions, channel links, custom emoji, attachments, replies, and sender aliases', async () => {

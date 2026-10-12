@@ -82,6 +82,12 @@ interface GuildProjection {
   viewerId: string
 }
 
+interface GuildPermissionSnapshot {
+  member: GuildMember
+  roles: GuildMember['roles']['cache']
+  permissions: Permissions
+}
+
 export interface DiscordPlatformDependencies {
   client?: Client
   fetch?: typeof globalThis.fetch
@@ -129,6 +135,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
   private readonly dialogLoads = new Map<string, Promise<IMDialogPage<DiscordMediaLocator>>>()
   // Weak keys avoid retaining a Discord guild after discord.js evicts it.
   private readonly guildProjections = new WeakMap<Guild, GuildProjection>()
+  private readonly guildPermissions = new WeakMap<Guild, GuildPermissionSnapshot>()
   private loginPromise?: Promise<void>
   private lastKnownUser?: User
   private stopped = false
@@ -245,9 +252,16 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     const onThreadDelete = (channel: ThreadChannel) => invalidateGuild(channel)
     const invalidateMemberGuild = (member: GuildMember | PartialGuildMember) => {
       this.guildProjections.delete(member.guild)
+      this.guildPermissions.delete(member.guild)
     }
-    const invalidateRoleGuild = (role: Role) => { this.guildProjections.delete(role.guild) }
-    const onGuildUpdate = (_old: Guild, updated: Guild) => { this.guildProjections.delete(updated) }
+    const invalidateRoleGuild = (role: Role) => {
+      this.guildProjections.delete(role.guild)
+      this.guildPermissions.delete(role.guild)
+    }
+    const onGuildUpdate = (_old: Guild, updated: Guild) => {
+      this.guildProjections.delete(updated)
+      this.guildPermissions.delete(updated)
+    }
     const onGuildMemberAdd = (member: GuildMember) => invalidateMemberGuild(member)
     const onGuildMemberRemove = (member: GuildMember | PartialGuildMember) => invalidateMemberGuild(member)
     const onGuildMemberUpdate = (_old: GuildMember | PartialGuildMember, updated: GuildMember) =>
@@ -352,7 +366,9 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     const guildId = parseGuildConversationId(parent.id)
     const guild = guildId ? this.client.guilds.cache.get(guildId) : undefined
     if (!guild) return { dialogs: [], total: 0 }
-    const channels = visibleGuildDirectoryChannels(guild, this.selfUser()).sort(compareChannels)
+    const channels = visibleGuildDirectoryChannels(
+      guild, this.selfUser(), this.guildPermissionSnapshot(guild),
+    ).sort(compareChannels)
     const root = selectGuildRoot(channels)
     const children = root ? channels.filter((channel) => channel.id !== root.id) : channels
     const start = pageStart(children.map((channel) => channel.id), query)
@@ -712,7 +728,24 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
   }
 
   private isVisible(channel: DiscordChannel): boolean {
-    return isVisibleChannel(channel, this.selfUser())
+    if (!isGuildChannel(channel)) return true
+    return hasChannelPermissions(channel, this.guildPermissionSnapshot(channel.guild), this.selfUser())
+  }
+
+  private guildPermissionSnapshot(guild: Guild): GuildPermissionSnapshot | undefined {
+    const self = this.selfUser()
+    const cached = this.guildPermissions.get(guild)
+    if (cached?.member.id === self.id) return cached
+    const member = guild.members?.cache?.get(self.id)
+    if (!member) return undefined
+    // GuildMemberRoleManager.cache filters every guild role each time it is
+    // accessed. Keep the resolved roles and their base bitset once per guild;
+    // channel overwrites can then be applied without repeating that scan.
+    const roles = member.roles.cache
+    const permissions = new Permissions(roles.map((role) => role.permissions))
+    const snapshot = { member, roles, permissions }
+    this.guildPermissions.set(guild, snapshot)
+    return snapshot
   }
 
   private shouldExposeMessage(
@@ -776,7 +809,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
       && cached.channelCount === guild.channels.cache.size
       && cached.systemChannelId === guild.systemChannelId
       && cached.viewerId === viewer.id) return cached
-    const channels = visibleGuildChannels(guild, viewer)
+    const channels = visibleGuildChannels(guild, viewer, this.guildPermissionSnapshot(guild))
     const root = selectGuildRoot(channels)
     const projection: GuildProjection = {
       root,
@@ -1144,20 +1177,62 @@ function isGuildChannel(channel: DiscordChannel): channel is DiscordGuildChannel
   return channel.type !== 'DM' && channel.type !== 'GROUP_DM'
 }
 
+function hasChannelPermissions(
+  channel: DiscordGuildChannel,
+  snapshot: GuildPermissionSnapshot | undefined,
+  self: User,
+): boolean {
+  if (!snapshot) return isVisibleChannel(channel, self)
+  const { member, roles, permissions: base } = snapshot
+  if (member.id === channel.guild.ownerId) return true
+  if (base.has(Permissions.FLAGS.ADMINISTRATOR)) return true
+
+  // ThreadChannel.permissionsFor delegates directly to its parent. Reuse
+  // that same overwrite source while sharing the expensive member role set.
+  const overwriteChannel = channel.isThread()
+    ? (channel.parent as TextChannel | NewsChannel | null)
+    : channel as TextChannel | NewsChannel
+  if (!overwriteChannel || typeof (overwriteChannel as any).overwritesFor !== 'function') {
+    return isVisibleChannel(channel, self)
+  }
+  const overwrites = (overwriteChannel as any).overwritesFor(member, true, roles) as {
+    everyone?: { deny: Permissions, allow: Permissions }
+    roles: Array<{ deny: Permissions, allow: Permissions }>
+    member?: { deny: Permissions, allow: Permissions }
+  }
+  const permissions = new Permissions(base)
+    .remove(overwrites.everyone?.deny ?? 0n)
+    .add(overwrites.everyone?.allow ?? 0n)
+    .remove(overwrites.roles.length ? overwrites.roles.map((role) => role.deny) : 0n)
+    .add(overwrites.roles.length ? overwrites.roles.map((role) => role.allow) : 0n)
+    .remove(overwrites.member?.deny ?? 0n)
+    .add(overwrites.member?.allow ?? 0n)
+  return permissions.has(Permissions.FLAGS.VIEW_CHANNEL)
+    && permissions.has(Permissions.FLAGS.READ_MESSAGE_HISTORY)
+}
+
 function isVisibleChannel(channel: DiscordChannel, self: User): boolean {
   if (!isGuildChannel(channel)) return true
   const permissions = channel.permissionsFor(self)
   return Boolean(permissions?.has('VIEW_CHANNEL') && permissions.has('READ_MESSAGE_HISTORY'))
 }
 
-function visibleGuildChannels(guild: Guild, self: User): DiscordChannel[] {
+function visibleGuildChannels(
+  guild: Guild,
+  self: User,
+  snapshot?: GuildPermissionSnapshot,
+): DiscordChannel[] {
   return [...guild.channels.cache.values()]
     .filter((channel): channel is DiscordGuildChannel => isSupportedGuildChannel(channel)
-      && isVisibleChannel(channel, self))
+      && hasChannelPermissions(channel, snapshot, self))
 }
 
-function visibleGuildDirectoryChannels(guild: Guild, self: User): Array<TextChannel | NewsChannel> {
-  return visibleGuildChannels(guild, self)
+function visibleGuildDirectoryChannels(
+  guild: Guild,
+  self: User,
+  snapshot?: GuildPermissionSnapshot,
+): Array<TextChannel | NewsChannel> {
+  return visibleGuildChannels(guild, self, snapshot)
     .filter((channel): channel is TextChannel | NewsChannel => !channel.isThread())
 }
 
