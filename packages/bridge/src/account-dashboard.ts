@@ -1,5 +1,5 @@
 import type { ProvisionedPlatformAccount } from './platform-account.js'
-import { getLoginCodeState } from './login-code.js'
+import { getLoginCodeState, type IssuedLoginCode } from './login-code.js'
 import { isValidSrpVerifier } from './login-srp.js'
 
 import type { CrossGramServerConfig, PlatformAccountStatus, PlatformAccountView } from './dashboard-types.js'
@@ -26,8 +26,9 @@ export function makePlatformAccountView(
   account: ProvisionedPlatformAccount,
   apiPrefix: string,
   now = Date.now(),
+  issuedCode?: IssuedLoginCode | null,
 ): PlatformAccountView {
-  const code = getLoginCodeState(account.auth.totpSecret, now)
+  const code = issuedCode === undefined ? getLoginCodeState(account.auth.totpSecret, now) : issuedCode
   const profile = account.profile
   return {
     platformId,
@@ -42,9 +43,9 @@ export function makePlatformAccountView(
       ? `${apiPrefix}/platforms/${encodeURIComponent(platformId)}/avatar?v=${encodeURIComponent(profile.avatar.id)}`
       : undefined,
     virtualPhone: `+${account.auth.virtualPhone}`,
-    loginCode: code.code,
-    validUntil: code.validUntil,
-    remainingSeconds: code.remainingSeconds,
+    loginCode: code?.code,
+    validUntil: code?.validUntil,
+    remainingSeconds: code?.remainingSeconds,
     hasPassword: isValidSrpVerifier(account.auth.passwordSrp),
   }
 }

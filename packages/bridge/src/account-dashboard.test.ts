@@ -32,6 +32,19 @@ describe('platform account dashboard projection', () => {
     expect(JSON.stringify(view)).not.toContain('credentials')
   })
 
+  it('never materializes a TOTP code in on-demand mode without issuance', () => {
+    const empty = makePlatformAccountView('qq/primary', 'qq', provisioned, '/api', 59_000, null)
+    expect(empty.loginCode).toBeUndefined()
+    expect(empty.validUntil).toBeUndefined()
+    expect(JSON.stringify(empty)).not.toContain('287082')
+
+    const issued = { code: '675321', validUntil: 300_000, remainingSeconds: 241 }
+    const active = makePlatformAccountView('qq/primary', 'qq', provisioned, '/api', 59_000, issued)
+    expect(active.loginCode).toBe('675321')
+    expect(active.validUntil).toBe(300_000)
+    expect(active.remainingSeconds).toBe(241)
+  })
+
   it('represents adapter errors and unsupported identity providers explicitly', () => {
     expect(makeUnavailableAccountView('broken', 'qq', 'error', new Error('not ready')))
       .toMatchObject({ status: 'error', error: 'not ready' })

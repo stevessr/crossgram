@@ -605,6 +605,46 @@ describe('BotFather physical MTProto e2e', () => {
 })
 
 describe('bridge login e2e', () => {
+  it('issues a code on Telegram request, displays it in management and consumes it once', async () => {
+    const { ctx, port, pubKey, stop } = await startApp({
+      bridgeConfig: { onDemandLoginCodes: true },
+    })
+    let client: TestClient | undefined
+    try {
+      const account = await waitForPlatformLogin(ctx, 'static')
+      const current = () => ctx.bridgeManagement.accounts()
+        .find(item => item.platformId === 'static')
+      expect(current()?.loginCode).toBeUndefined()
+      client = await TestClient.connect(port)
+      const key = await doClientHandshake(client, pubKey)
+      const session = Long.fromInt(0x77331140)
+      const sent = await callRpc(client, key, session, {
+        _: 'auth.sendCode', phoneNumber: `+${account.auth.virtualPhone}`, apiId: 1, apiHash: 'x',
+        settings: { _: 'codeSettings' },
+      }, 2)
+      const code = current()?.loginCode
+      expect(code).toMatch(/^\d{6}$/)
+      expect(current()?.validUntil).toBeGreaterThan(Date.now())
+      expect(await callRpc(client, key, session, {
+        _: 'auth.signIn', phoneNumber: account.auth.virtualPhone,
+        phoneCodeHash: sent.phoneCodeHash, phoneCode: '000000',
+      }, 4)).toMatchObject({ _: 'mt_rpc_error', errorMessage: 'PHONE_CODE_INVALID' })
+      expect(await callRpc(client, key, session, {
+        _: 'auth.signIn', phoneNumber: account.auth.virtualPhone,
+        phoneCodeHash: sent.phoneCodeHash, phoneCode: code!,
+      }, 6)).toMatchObject({ _: 'auth.authorization' })
+      expect(current()?.loginCode).toBeUndefined()
+      expect(await callRpc(client, key, session, {
+        _: 'auth.signIn', phoneNumber: account.auth.virtualPhone,
+        phoneCodeHash: sent.phoneCodeHash, phoneCode: code!,
+      }, 8)).toMatchObject({ _: 'mt_rpc_error', errorMessage: 'PHONE_CODE_INVALID' })
+    } finally {
+      client?.close()
+      await stop()
+    }
+  }, 30_000)
+
+
   it('returns auth.loggedOut before revoking only the current authenticated device', async () => {
     const { ctx, port, pubKey, stop } = await startApp()
     let currentClient: TestClient | undefined

@@ -40,6 +40,11 @@ export interface PlatformAccountDashboardData {
   serverConfig: CrossGramServerConfig
   loginTokenApprovalUrl: string
   updatedAt: number
+  /** True by default: codes are issued only on Telegram or WebUI requests. */
+  onDemandLoginCodes: boolean
+  loginCodeTtlSeconds: number
+  /** Issue or replace the login code shown in the account view. */
+  requestLoginCode(platformId: string): Promise<void>
   refresh(): Promise<void>
   /** Set, replace, or clear (null/empty) the two-step verification password. */
   setLoginPassword(platformId: string, password: string | null): Promise<void>

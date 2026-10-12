@@ -152,6 +152,9 @@ export default function AccountsPage(props: PageProps) {
                 account={accounts().get(id)!}
                 now={now()}
                 connected={rpc.ready}
+                onDemandLoginCodes={rpc.data.onDemandLoginCodes ?? true}
+                loginCodeTtlSeconds={rpc.data.loginCodeTtlSeconds ?? 300}
+                requestCode={() => rpc.data.requestLoginCode(id)}
                 setPassword={(password) => rpc.data.setLoginPassword(id, password)}
               />
             )}
@@ -201,6 +204,9 @@ export function AccountCard(props: {
   account: PlatformAccountView
   now: number
   connected: boolean
+  onDemandLoginCodes: boolean
+  loginCodeTtlSeconds: number
+  requestCode: () => Promise<void>
   setPassword: (password: string | null) => Promise<void>
 }) {
   const [failedAvatar, setFailedAvatar] = createSignal(false),
@@ -305,7 +311,9 @@ export function AccountCard(props: {
               {code()
                 ? remaining() + 's remaining'
                 : props.connected
-                  ? 'Waiting for a fresh code'
+                  ? props.onDemandLoginCodes
+                    ? '等待登录请求 / Waiting for login request'
+                    : 'Waiting for a fresh code'
                   : 'Reconnecting…'}
             </span>
           </div>
@@ -325,16 +333,28 @@ export function AccountCard(props: {
             aria-label="Login code validity"
             aria-valuenow={remaining()}
             aria-valuemin={0}
-            aria-valuemax={30}
+            aria-valuemax={props.loginCodeTtlSeconds}
           >
             <span
-              style={{ width: Math.min(100, (remaining() / 30) * 100) + '%' }}
+              style={{ width: Math.min(100, (remaining() / props.loginCodeTtlSeconds) * 100) + '%' }}
             />
           </div>
+          <Show when={props.onDemandLoginCodes}>
+            <button
+              class="button outlined"
+              aria-label={'Generate login code for ' + props.account.platformId}
+              disabled={!props.connected || action.busy()}
+              onClick={() => void action.run(() => props.requestCode())}
+            >
+              生成 / Generate code
+            </button>
+          </Show>
           <small>
             {copied() === 'code'
               ? 'Code copied'
-              : 'Enter this phone number and code in your Telegram client.'}
+              : props.onDemandLoginCodes
+                ? 'Telegram 请求登录时会自动生成；也可在此手动生成，有效期 5 分钟。'
+                : 'Enter this phone number and code in your Telegram client.'}
           </small>
         </div>
         <div class="phone-row">

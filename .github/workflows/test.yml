@@ -77,3 +77,5 @@ jobs:
       - run: yarn playwright install --with-deps chromium
       - run: yarn typecheck:webui
       - run: yarn test:e2e:webui
+      - name: Run on-demand Telegram login e2e
+        run: yarn vitest run --config vitest.mtproto-e2e.config.mts packages/test-suite/src/login.e2e.test.ts -t 'issues a code on Telegram request, displays it in management and consumes it once' --maxWorkers=1

@@ -86,6 +86,9 @@ describe('Crossgram accounts, stickers and bots in the Solid shell', () => {
           dcs: [],
         },
         loginTokenApprovalUrl: '/bridge/login-tokens',
+        onDemandLoginCodes: false,
+        loginCodeTtlSeconds: 30,
+        async requestLoginCode() {},
         updatedAt: Date.now(),
         stickerAccounts: [
           {

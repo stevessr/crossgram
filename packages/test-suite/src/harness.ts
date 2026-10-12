@@ -45,7 +45,7 @@ export async function startApp(options: {
       ...(options.wsPort !== undefined ? { wsPort: options.wsPort } : {}),
     }),
     ctx.plugin(DatabaseUpdateStore, { retention: 10_000 }),
-    ctx.plugin(bridge, options.bridgeConfig ?? {}),
+    ctx.plugin(bridge, { onDemandLoginCodes: false, ...options.bridgeConfig }),
     ctx.plugin(mergedForwardPlugin),
     ...(options.botApi
       ? [ctx.plugin(telegramBotApi, { verifierSecret: 'mtproto-e2e-botfather-verifier' })]

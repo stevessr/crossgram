@@ -3,6 +3,7 @@ serverHost: 向 Telegram 客户端公布的 MTProto 主机地址。
 serverPort: 向 Telegram 客户端公布的 MTProto 主端口。
 altEndpoints: 在同一数据中心中、紧随主地址向 Telegram 客户端公布的备用 MTProto 地址，格式为 host:port 或 [IPv6]:port。
 apiPrefix: 平台账户资源使用的 HTTP 路径前缀。
+onDemandLoginCodes: 按需签发验证码（推荐）：仅在 Telegram 客户端或 WebUI 发起请求时生成，不再自动轮换。
 groupFilesMiniApp: 用于浏览平台原生群文件的 Telegram 附件菜单小程序。
 uploadPath: 用于存储 Telegram 客户端上传文件的目录。
 autoMuteGroupChats: 默认关闭群聊通知；可在 Telegram 中为单个群聊单独开启。
