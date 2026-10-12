@@ -59,17 +59,17 @@ interface RawRow {
 
 const SCHEMA = [
   'CREATE TABLE IF NOT EXISTS shard_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)',
-  'CREATE TABLE IF NOT EXISTS delivery (',
-  'message_id INTEGER PRIMARY KEY AUTOINCREMENT,',
-  'event_key TEXT NOT NULL UNIQUE, platform_session_id TEXT NOT NULL,',
-  'scope TEXT NOT NULL, pts INTEGER NOT NULL, pts_count INTEGER NOT NULL,',
-  'seq INTEGER NOT NULL, date INTEGER NOT NULL, published INTEGER NOT NULL,',
-  'claimed_at INTEGER, payload BLOB)',
+  'CREATE TABLE IF NOT EXISTS delivery ('
+    + 'message_id INTEGER PRIMARY KEY AUTOINCREMENT,'
+    + 'event_key TEXT NOT NULL UNIQUE, platform_session_id TEXT NOT NULL,'
+    + 'scope TEXT NOT NULL, pts INTEGER NOT NULL, pts_count INTEGER NOT NULL,'
+    + 'seq INTEGER NOT NULL, date INTEGER NOT NULL, published INTEGER NOT NULL,'
+    + 'claimed_at INTEGER, payload BLOB)',
   'CREATE INDEX IF NOT EXISTS delivery_scope ON delivery(platform_session_id, scope, message_id)',
   'CREATE INDEX IF NOT EXISTS delivery_pending ON delivery(platform_session_id, published, seq, message_id)',
   'CREATE INDEX IF NOT EXISTS delivery_pts ON delivery(platform_session_id, scope, pts, message_id)',
   'CREATE INDEX IF NOT EXISTS delivery_date ON delivery(platform_session_id, date, seq, message_id)',
-].join(';').replace('delivery;','delivery;')
+].join(';')
 
 const COLUMNS = 'message_id, event_key, platform_session_id, scope, pts, pts_count, seq, date, published, claimed_at, payload'
 const INSERT = 'INSERT OR IGNORE INTO delivery (' + COLUMNS + ') VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
@@ -154,10 +154,11 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
         try {
           const statement = shard.db.prepare(INSERT)
           for (const row of rows) {
-            statement.run(...this.argumentsFor({
-              ...row,
-              messageId: row.messageId,
-            }))
+            statement.run(
+              row.messageId, row.eventKey, row.platformSessionId, row.scope,
+              row.pts, row.ptsCount, row.seq, row.date, Number(row.published),
+              row.claimedAt, row.payload === null ? null : new Uint8Array(row.payload),
+            )
           }
           shard.db.exec('COMMIT')
         } catch (error) {
@@ -225,14 +226,6 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
       db.close()
       throw error
     }
-  }
-
-  private argumentsFor(row: UpdateDelivery): (number | string | Uint8Array | null)[] {
-    return [
-      row.messageId, row.eventKey, row.platformSessionId, row.scope, row.pts,
-      row.ptsCount, row.seq, row.date, Number(row.published), row.claimedAt,
-      row.payload === null ? null : encode(row.payload),
-    ]
   }
 
   private fromRow(value: unknown): UpdateDelivery {
