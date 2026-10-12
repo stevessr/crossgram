@@ -66,7 +66,7 @@ export function encodeFrame(
   const source = body === undefined
     ? new Uint8Array()
     : encoder.encode(JSON.stringify(body))
-  let payload = source, gzip = false
+  let payload: Uint8Array = source, gzip = false
   if (compress && source.byteLength >= 2048) {
     const candidate = compress(source)
     if (candidate.byteLength < source.byteLength * 0.875) {
