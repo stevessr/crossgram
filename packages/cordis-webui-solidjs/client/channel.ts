@@ -176,7 +176,7 @@ export class Connection {
       /* The browser may already have disposed the socket. */
     }
   }
-  private receive({ type, body }: { type: string; body: any }) {
+  private receive({ type, body }: { type: string; body?: any }) {
     if (type === 'transport:ready') {
       if (this.upgradeRequested && body?.version === 1) this.protobuf = true
       return
