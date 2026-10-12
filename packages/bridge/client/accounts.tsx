@@ -564,7 +564,7 @@ function QrLogin(props: {
         class="qr-camera-video"
         aria-label="摄像头预览"
         muted
-        playsInline
+        playsinline
         style={{ display: cameraState() === 'idle' ? 'none' : 'block' }}
       />
       <Show when={cameraState() === 'starting'}>
