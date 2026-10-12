@@ -167,6 +167,64 @@ function wireRoundTrip<T>(object: T): T {
 }
 
 describe('DialogRpc', () => {
+  it('indexes subchannels instead of rescanning every cached peer for each Telegram chat', () => {
+    const rpc = new DialogRpc(new DialogTestPlatform(), session)
+    const internal = rpc as any
+    const root = { id: 'root', kind: 'channel' as const, title: 'Root' }
+    const otherRoot = { id: 'other-root', kind: 'channel' as const, title: 'Other Root' }
+    internal._cacheConversation(root.id, root)
+    internal._cacheConversation(otherRoot.id, otherRoot)
+    for (let i = 0; i < 3_000; i++) {
+      internal._cacheConversation(`unrelated-${i}`, {
+        id: `unrelated-${i}`, kind: 'group', title: String(i),
+      })
+    }
+    internal._cacheConversation('beta', { id: 'beta', kind: 'channel', title: 'Beta', parentId: root.id })
+    internal._cacheConversation('alpha', { id: 'alpha', kind: 'channel', title: 'Alpha', parentId: root.id })
+    expect(internal._subchannels(root.id).map((child: { id: string }) => child.id)).toEqual(['alpha', 'beta'])
+
+    // The hot path must not enumerate or sort the complete conversation map.
+    const entries = internal._conversations
+    const originalValues = entries.values
+    entries.values = () => { throw new Error('full conversation scan in _makeChat') }
+    try {
+      for (let i = 0; i < 500; i++) {
+        expect(internal._makeChat(root).forum).toBe(true)
+        expect(internal._makeChat(otherRoot).forum).toBeUndefined()
+      }
+    } finally {
+      entries.values = originalValues
+    }
+
+    // Moving a child changes both parent counts; refreshing metadata does not
+    // accidentally create duplicate membership. Demoting the final child
+    // removes the index entry entirely.
+    internal._cacheConversation('alpha', {
+      id: 'alpha', kind: 'channel', title: 'Alpha moved', parentId: otherRoot.id,
+    })
+    internal._cacheConversation('alpha', {
+      id: 'alpha', kind: 'channel', title: 'Alpha moved again', parentId: otherRoot.id,
+    })
+    expect(internal._subchannels(root.id).map((child: { id: string }) => child.id)).toEqual(['beta'])
+    expect(internal._subchannels(otherRoot.id).map((child: { id: string }) => child.id)).toEqual(['alpha'])
+    internal._cacheConversation('beta', { id: 'beta', kind: 'direct', title: 'Promoted' })
+    expect(internal._subchannels(root.id)).toEqual([])
+    expect(internal._subchannelIds.has(root.id)).toBe(false)
+    expect(internal._makeChat(root).forum).toBeUndefined()
+    expect(internal._makeChat(otherRoot).forum).toBe(true)
+    internal._cacheConversation('alpha', { id: 'alpha', kind: 'channel', title: 'Detached' })
+    expect(internal._subchannelIds.has(otherRoot.id)).toBe(false)
+
+    // Explicit upstream subchannel hints remain authoritative even before
+    // individual children have been hydrated.
+    expect(internal._makeChat({
+      ...root, metadata: { hasSubchannels: true },
+    }).forum).toBe(true)
+    expect(internal._makeChat({
+      ...root, metadata: { hasSubchannels: true, broadcast: true },
+    }).forum).toBeUndefined()
+  })
+
   it('loads senders from projected dialog sources before materializing', async () => {
     const conversation = { id: 'room', kind: 'group' as const, title: 'Room' }
     const upstream = {
