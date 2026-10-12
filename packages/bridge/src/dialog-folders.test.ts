@@ -64,6 +64,34 @@ describe('DialogFolderStore', () => {
     expect((await store.listFilters('session')).map((entry) => entry.filterId)).toEqual([0, 2])
   })
 
+
+  it('mirrors Space folders with stable IDs without overwriting local filters', async () => {
+    const { ctx, store } = await createStore()
+    await store.putFilter('matrix-session', 2, filter('Personal', 'personal'))
+    await store.syncPlatformFolders('matrix-session', [
+      { id: '!space:test', title: 'Work', conversationIds: ['!one:test', '!two:test', '!one:test'] },
+    ])
+    const first = await store.listFilters('matrix-session')
+    expect(first.map((entry) => entry.filterId)).toEqual([0, 2, 3])
+    expect(first[2]?.filter).toMatchObject({
+      sourceId: '!space:test', includePeerIds: ['!one:test', '!two:test'],
+    })
+    await new DialogFolderStore(ctx.database).syncPlatformFolders('matrix-session', [
+      { id: '!space:test', title: 'New title', conversationIds: ['!two:test'] },
+      { id: '!other:test', title: 'Other', conversationIds: ['!two:test'] },
+    ])
+    const updated = await store.listFilters('matrix-session')
+    expect(updated.find((entry) => entry.filter?.sourceId === '!space:test')?.filterId).toBe(3)
+    expect(updated.find((entry) => entry.filter?.sourceId === '!space:test')?.filter?.includePeerIds)
+      .toEqual(['!two:test'])
+    expect(decodeDialogFilterTitle(updated.find((entry) => entry.filter?.sourceId === '!space:test')!.filter!.title))
+      .toMatchObject({ text: 'New title' })
+    expect(updated.find((entry) => entry.filter?.sourceId === '!other:test')?.filterId).toBe(4)
+    await store.syncPlatformFolders('matrix-session', [])
+    expect((await store.listFilters('matrix-session')).map((entry) => entry.filterId)).toEqual([0, 2])
+    expect((await store.listFilters('another-session')).map((entry) => entry.filterId)).toEqual([0])
+  })
+
   it('archives and unarchives peers atomically and reports only real changes', async () => {
     const { ctx, store } = await createStore()
     await expect(store.setPeerFolders('session', [
