@@ -45,6 +45,28 @@ describe('RuntimeMonitor', () => {
     }
   })
 
+  it('defaults expensive heap traversal to five minutes while sampling runtime metrics each call', () => {
+    let now = 1_000
+    const readHeapStatistics = vi.fn(getHeapStatistics)
+    const monitor = new RuntimeMonitor({ getHeapStatistics: readHeapStatistics, now: () => now })
+    try {
+      const first = monitor.sample()
+      now += 299_999
+      const second = monitor.sample()
+      expect(readHeapStatistics).toHaveBeenCalledOnce()
+      expect(second.cpuPercent).toBeGreaterThanOrEqual(0)
+      expect(second.eventLoopUtilization).toBeGreaterThanOrEqual(0)
+      expect(second.rssBytes).toBeGreaterThan(0)
+      expect(second.heapLimitBytes).toBe(first.heapLimitBytes)
+
+      now += 1
+      monitor.sample()
+      expect(readHeapStatistics).toHaveBeenCalledTimes(2)
+    } finally {
+      monitor.dispose()
+    }
+  })
+
   it('rejects invalid heap statistics sampling intervals', () => {
     expect(() => new RuntimeMonitor({ heapStatisticsSampleIntervalMs: 0 })).toThrow(
       'Heap statistics sample interval must be a positive finite number',

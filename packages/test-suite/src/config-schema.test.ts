@@ -30,7 +30,7 @@ const cases = [
     'maxConnections', 'maxConnectionsPerIp', 'connectionIdleTimeoutMs', 'keepAliveInitialDelayMs',
   ]],
   ['mtproto-statistics', statisticsConfig, [
-    'sampleIntervalMs', 'slowThresholdMs', 'historySeconds', 'topMethods', 'topIps',
+    'sampleIntervalMs', 'heapStatisticsSampleIntervalMs', 'slowThresholdMs', 'historySeconds', 'topMethods', 'topIps',
   ]],
   ['platform-admin-bot', adminBotConfig, [
     'allowedPlatformSessionIds', 'crossAccountAccess', 'showLoginCodes', 'webuiUrl', 'pageSize',
@@ -133,6 +133,7 @@ describe('plugin config schemas', () => {
     })
     expect(statisticsConfig({})).toEqual({
       sampleIntervalMs: 1_000,
+      heapStatisticsSampleIntervalMs: 300_000,
       slowThresholdMs: 1_000,
       historySeconds: 900,
       topMethods: 40,
@@ -195,6 +196,8 @@ describe('plugin config schemas', () => {
     expect(() => exporterConfig({ platformId: undefined as unknown as string })).toThrow(/platformId/)
     expect(() => exporterConfig({ platformId: 'qqnt', maxMediaBytes: 0 })).toThrow(/maxMediaBytes/)
     expect(() => statisticsConfig({ sampleIntervalMs: 499 })).toThrow(/sampleIntervalMs/)
+    expect(() => statisticsConfig({ heapStatisticsSampleIntervalMs: 9_999 }))
+      .toThrow(/heapStatisticsSampleIntervalMs/)
     expect(() => flashTransferConfig({ maxFiles: 101 })).toThrow(/maxFiles/)
     expect(() => stickerImporterConfig({ botToken: 'token', importCooldownMs: 60_001 })).toThrow(/importCooldownMs/)
     expect(() => databaseUpdateStoreConfig({ retention: 1_000_001 })).toThrow(/retention/)

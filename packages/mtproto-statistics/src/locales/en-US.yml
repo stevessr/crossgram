@@ -1,4 +1,5 @@
 sampleIntervalMs: Interval between runtime samples and Muon updates.
+heapStatisticsSampleIntervalMs: Interval between expensive heap-statistics refreshes. CPU, event-loop and process-memory fields continue sampling at the normal interval.
 slowThresholdMs: RPC latency threshold used to retain slow-spike samples.
 historySeconds: Number of one-second samples retained in memory.
 topMethods: Maximum RPC method rows published to the dashboard.

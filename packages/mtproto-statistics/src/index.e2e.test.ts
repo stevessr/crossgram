@@ -47,7 +47,11 @@ describe('MTProto statistics Muon entry e2e', () => {
       },
     }
 
-    apply(ctx as never, { sampleIntervalMs: 1_000, historySeconds: 60 })
+    apply(ctx as never, {
+      sampleIntervalMs: 1_000,
+      heapStatisticsSampleIntervalMs: 300_000,
+      historySeconds: 60,
+    })
     expect(files.routes).toEqual(['/mtproto-statistics'])
     expect(listeners.get('mtproto/rpc')?.options).toEqual({ prepend: true })
     expect(listeners.get('mtproto/packet')?.options).toEqual({ prepend: true })

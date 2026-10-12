@@ -48,6 +48,7 @@ export interface MtprotoStatisticsReadOptions {
 
 export interface Config {
   sampleIntervalMs?: number
+  heapStatisticsSampleIntervalMs?: number
   slowThresholdMs?: number
   historySeconds?: number
   topMethods?: number
@@ -56,6 +57,7 @@ export interface Config {
 
 export const Config = z.object({
   sampleIntervalMs: z.natural().min(500).max(60_000).default(1_000),
+  heapStatisticsSampleIntervalMs: z.natural().min(10_000).max(600_000).default(300_000),
   slowThresholdMs: z.natural().min(1).max(300_000).default(1_000),
   historySeconds: z.natural().min(60).max(3_600).default(900),
   topMethods: z.natural().min(5).max(200).default(40),
@@ -70,7 +72,9 @@ export function apply(ctx: Context, config: Config = {}): void {
     topIps: config.topIps ?? 100,
     secondRetention: config.historySeconds ?? 900,
   })
-  const runtime = new RuntimeMonitor()
+  const runtime = new RuntimeMonitor({
+    heapStatisticsSampleIntervalMs: config.heapStatisticsSampleIntervalMs ?? 300_000,
+  })
   let lastSampleAt = performance.now()
 
   const data: MtprotoStatisticsData = {
