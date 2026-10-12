@@ -122,6 +122,8 @@ const STORED_CONVERSATION_SELF_PERMISSIONS_KEY = '__mtprotoRelaySelfPermissions'
 export class MessageStore {
   /** Serialize writes across every store facade sharing the same database. */
   private static readonly _writeTails = new WeakMap<Database, Promise<void>>()
+  /** Independent per-event update-journal writes do not block unrelated accounts. */
+  private static readonly _deliveryTails = new WeakMap<UpdateStoreBackend, Map<string, Promise<void>>>()
   private _revision = 0
   private _peerRevision = 0
 
@@ -1413,7 +1415,7 @@ export class MessageStore {
     date: number,
     channelId?: number,
   ) {
-    return this._write(async () => {
+    return this._deliveryWrite(eventKey, async () => {
       const claimedAt = Math.floor(Date.now() / 1000)
       const existing = await this._updateStore.get(eventKey)
       if (existing) {
@@ -1423,7 +1425,7 @@ export class MessageStore {
         return { ...existing, claimedAt }
       }
 
-      const allocated = await this._database.withTransaction(async (database) => {
+      const allocate = () => this._database.withTransaction(async (database) => {
         const [current] = await database.get('mtproto_update_state', { platformSessionId })
         // updates.getDifference only receives the client's last server date for
         // discovering missed channel domains. Keep that cursor monotonic even
@@ -1450,6 +1452,12 @@ export class MessageStore {
         await database.upsert('mtproto_channel_update_state', [channel])
         return { state: channel, scope: channelUpdateScope(channelId), seq: account.seq, date: deliveryDate }
       })
+      // The account/PTS allocation still holds the main DB write lock, but
+      // the independent journal COMMIT is allowed to coalesce with other
+      // concurrently prepared deliveries instead of holding that lock idle.
+      const allocated = this._updateStore.concurrentPerEventWrites
+        ? await this._write(allocate, 'update-state-allocation')
+        : await allocate()
       return this._updateStore.create({
         eventKey, platformSessionId, scope: allocated.scope, pts: allocated.state.pts, ptsCount,
         seq: allocated.seq, date: allocated.date, published: false, claimedAt, payload: null,
@@ -1462,11 +1470,11 @@ export class MessageStore {
   }
 
   async markUpdatePublished(eventKey: string): Promise<void> {
-    await this._write(() => this._updateStore.markPublished(eventKey))
+    await this._deliveryWrite(eventKey, () => this._updateStore.markPublished(eventKey))
   }
 
   async setUpdatePayload(eventKey: string, payload: UpdateJson): Promise<void> {
-    await this._write(() => this._updateStore.setPayload(eventKey, payload))
+    await this._deliveryWrite(eventKey, () => this._updateStore.setPayload(eventKey, payload))
   }
 
   /** Release a reservation whose publisher failed before its payload was durable. */
@@ -1491,7 +1499,7 @@ export class MessageStore {
   }
 
   private async _discardUpdateDelivery(eventKey: string, onlyIfAbandoned: boolean): Promise<boolean> {
-    return this._write(async () => {
+    return this._deliveryWrite(eventKey, async () => {
       const delivery = await this._updateStore.get(eventKey)
       if (!delivery || delivery.payload) return false
       if (onlyIfAbandoned && delivery.claimedAt !== null
@@ -2195,6 +2203,31 @@ export class MessageStore {
 
   async pruneUpdateDeliveries(platformSessionId: string): Promise<void> {
     await this._write(() => this._updateStore.prune(platformSessionId, ACCOUNT_UPDATE_SCOPE))
+  }
+
+  /**
+   * Preserve ordering and deduplication for one delivery, while allowing
+   * unrelated account journals to batch writes together. Legacy backends keep
+   * the original database-wide write queue unchanged.
+   */
+  private async _deliveryWrite<T>(eventKey: string, callback: () => Promise<T>): Promise<T> {
+    if (!this._updateStore.concurrentPerEventWrites) return this._write(callback)
+    let tails = MessageStore._deliveryTails.get(this._updateStore)
+    if (!tails) {
+      tails = new Map()
+      MessageStore._deliveryTails.set(this._updateStore, tails)
+    }
+    const previous = tails.get(eventKey) ?? Promise.resolve()
+    let release!: () => void
+    const tail = new Promise<void>((resolve) => { release = resolve })
+    tails.set(eventKey, tail)
+    await previous.catch(() => {})
+    try {
+      return await callback()
+    } finally {
+      release()
+      if (tails.get(eventKey) === tail) tails.delete(eventKey)
+    }
   }
 
   private async _write<T>(
