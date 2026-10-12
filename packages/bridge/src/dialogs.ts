@@ -578,6 +578,19 @@ export class DialogRpc {
 
   async getDialogFilters(): Promise<tl.messages.RawDialogFilters> {
     await this._hydratePeers()
+    if (this._dialogFolders && this._platform.getChatFolders) {
+      const folders = await this._platform.getChatFolders(this._session)
+      for (const id of new Set(folders.flatMap((folder) => folder.conversationIds))) {
+        if (this._conversations.has(id)) continue
+        const conversation = await this._platform.getConversation?.(this._session, id)
+        if (!conversation) continue
+        this._conversations.set(id, conversation)
+        this._peerId(id)
+        await this._store?.upsertConversation(this._session, conversation)
+        if (conversation.kind === 'direct') await this._persistUsers([directConversationUser(conversation)])
+      }
+      await this._dialogFolders.syncPlatformFolders(this._session.platformSessionId, folders)
+    }
     const filters = await this._dialogFolders?.listFilters(this._session.platformSessionId)
       ?? [{ filterId: 0 }]
     return {
@@ -594,6 +607,11 @@ export class DialogRpc {
     if (!this._dialogFolders) throw new RpcError(500, 'FOLDER_STORE_UNAVAILABLE')
     await this._hydratePeers()
     validateCustomFilterId(req.id)
+    // Native platform folders are read-only here: Matrix membership is authoritative.
+    const existing = await this._dialogFolders.listFilters(this._session.platformSessionId)
+    if (existing.some((entry) => entry.filterId === req.id && entry.filter?.sourceId)) {
+      throw new RpcError(400, 'FILTER_ID_INVALID')
+    }
     if (!req.filter) {
       await this._dialogFolders.removeFilter(this._session.platformSessionId, req.id)
       return { _: 'updateDialogFilter', id: req.id }
