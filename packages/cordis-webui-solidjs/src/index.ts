@@ -292,8 +292,8 @@ export default class SolidWebUI extends Service {
       (client) => type !== 'entry:delta' || client.subscriptions.has(body.id),
     )
     if (!clients.length) return
-    const payload = JSON.stringify({ type, body })
-    // Encode and compress a broadcast only once, regardless of subscriber count.
+    // Encode and compress a broadcast once for all upgraded subscribers.
+    // Avoid serializing an additional JSON envelope if everybody uses protobuf.
     let proto: Uint8Array | undefined
     if (supportsProtoType(type) && clients.some(client => client.protobuf)) {
       try {
@@ -302,7 +302,11 @@ export default class SolidWebUI extends Service {
         this.ctx.logger.warn('WebUI protobuf broadcast failed: %s', error)
       }
     }
-    for (const client of clients) client.sendRaw(payload, proto)
+    let legacy: string | undefined
+    for (const client of clients) {
+      if (client.protobuf && proto) client.sendRaw('', proto)
+      else client.sendRaw(legacy ??= JSON.stringify({ type, body }))
+    }
   }
 }
 export function normalizePath(value: string, allowRoot = false): string {
