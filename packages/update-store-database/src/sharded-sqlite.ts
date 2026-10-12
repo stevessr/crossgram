@@ -157,11 +157,22 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
         try {
           const statement = shard.db.prepare(INSERT)
           for (const row of rows) {
-            statement.run(
+            const inserted = statement.run(
               row.messageId, row.eventKey, row.platformSessionId, row.scope,
               row.pts, row.ptsCount, row.seq, row.date, Number(row.published),
               row.claimedAt, row.payload === null ? null : new Uint8Array(row.payload),
             )
+            if (!inserted.changes) {
+              const existing = shard.db.prepare(
+                'SELECT event_key AS eventKey, message_id AS messageId FROM delivery'
+                  + ' WHERE event_key=? OR message_id=?',
+              ).all(row.eventKey, row.messageId) as Array<{ eventKey: string, messageId: number }>
+              if (existing.length !== 1
+                || existing[0].eventKey !== row.eventKey
+                || existing[0].messageId !== row.messageId) {
+                throw new Error('SQLite shard migration conflict for ' + row.eventKey)
+              }
+            }
           }
           shard.db.exec('COMMIT')
         } catch (error) {
