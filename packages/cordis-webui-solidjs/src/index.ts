@@ -193,7 +193,7 @@ export default class SolidWebUI extends Service {
   }
 
   private serveRoutes() {
-    if (this.config.enableSse) this.ctx.server.get(this.config.apiPath + '/events', (req, res) => {
+    if (this.config.enableSse) this.ctx.server.get(this.config.apiPath + '/events', async (req, res) => {
       // Same-origin read-only SSE fallback. Login/ACL middleware still applies.
       const origin = req.headers.get('origin')
       try {
