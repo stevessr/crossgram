@@ -652,7 +652,7 @@ describe('MatrixPlatform', () => {
     expect(await platform.getChatFolders(session)).toEqual([])
   })
 
-  it('keeps pin events and Space hierarchy updates together in one incremental sync', async () => {
+  it('keeps room pin updates when Space membership changes in the same sync', async () => {
     const space = '!space:example.org'
     const child = '!child:example.org'
     let sync = 0
@@ -663,13 +663,17 @@ describe('MatrixPlatform', () => {
         [space]: { state: { events: [
           event('m.room.create', { type: 'm.space' }, { stateKey: '' }),
           event('m.space.child', { via: ['example.org'] }, { stateKey: child }),
+        ] } },
+        [child]: { state: { events: [
+          event('m.room.create', {}, { stateKey: '' }),
           event('m.room.pinned_events', { pinned: ['$first'] }, { stateKey: '', id: '$original' }),
         ] } },
-        [child]: { state: { events: [event('m.room.create', {}, { stateKey: '' })] } },
       } } })
       if (sync === 2) return json({ next_batch: 'after', rooms: { join: {
         [space]: { state: { events: [
           event('m.space.child', {}, { stateKey: child }),
+        ] } },
+        [child]: { state: { events: [
           event('m.room.pinned_events', { pinned: ['$first', '$second'] }, { stateKey: '', id: '$updated' }),
         ] } },
       } } })
@@ -680,26 +684,16 @@ describe('MatrixPlatform', () => {
     const unsubscribe = await platform.subscribe(session, (value) => { observed.push(value) })
     await vi.waitFor(() => {
       expect(observed.some((value) => value.type === 'message-pins')).toBe(true)
-      expect(observed.some((value) =>
-        value.type === 'conversation' && value.conversation.id === child)).toBe(true)
+      expect((platform as any).spaceFolders).toEqual([{
+        id: space, title: space, conversationIds: [],
+      }])
     })
     await unsubscribe()
-    expect(observed).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        type: 'message-pins', eventId: '$updated',
-        pinnedMessageIds: ['$first', '$second'], removedMessageIds: [],
-      }),
-      expect.objectContaining({
-        type: 'conversation', conversation: expect.objectContaining({
-          id: space, metadata: expect.objectContaining({ hasSubchannels: false }),
-        }),
-      }),
-      expect.objectContaining({
-        type: 'conversation', conversation: expect.objectContaining({
-          id: child, kind: 'group', parentId: undefined,
-        }),
-      }),
-    ]))
+    expect(observed).toEqual([expect.objectContaining({
+      type: 'message-pins', eventId: '$updated',
+      conversation: expect.objectContaining({ id: child, kind: 'group' }),
+      pinnedMessageIds: ['$first', '$second'], removedMessageIds: [],
+    })])
   })
 
   it('updates child metadata after a Space relationship is removed in incremental sync', async () => {
