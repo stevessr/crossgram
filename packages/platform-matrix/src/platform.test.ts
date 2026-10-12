@@ -489,18 +489,18 @@ describe('MatrixPlatform', () => {
     internal.refreshJoinedRoomState({ [room]: { state: { events: [
       event('m.room.create', { type: 'm.space' }, { stateKey: '' }),
     ] } }, [child]: { state: { events: [] } } }, true)
-    const existingParents = internal.spaceParents
-    const existingChildren = internal.spaceChildren
+    const existingFolders = internal.spaceFolders
     internal.refreshJoinedRoomState({ [room]: { timeline: { events: [
       event('m.room.message', { body: 'hello' }),
     ] } } }, false)
-    expect(internal.spaceParents).toBe(existingParents)
-    expect(internal.spaceChildren).toBe(existingChildren)
+    expect(internal.spaceFolders).toBe(existingFolders)
     internal.refreshJoinedRoomState({ [room]: { state: { events: [
       event('m.space.child', { via: ['example.org'] }, { stateKey: child }),
     ] } } }, false)
-    expect(internal.spaceParents).not.toBe(existingParents)
-    expect(internal.spaceParents.get(child)).toBe(room)
+    expect(internal.spaceFolders).not.toBe(existingFolders)
+    expect(internal.spaceFolders).toEqual([{
+      id: room, title: room, conversationIds: [child],
+    }])
   })
 
   it('shares one full-state request across concurrent Space and dialog reads', async () => {
@@ -522,13 +522,13 @@ describe('MatrixPlatform', () => {
       })
     })
     const platform = createPlatform(fetch, { userId: '@me:example.org' })
-    const [roots, children] = await Promise.all([
-      platform.getDialogs(session), platform.getSubdialogs(session, { id: space }),
+    const [roots, folders] = await Promise.all([
+      platform.getDialogs(session), platform.getChatFolders(session),
     ])
-    expect(roots.dialogs.map((dialog) => dialog.conversation.id)).toEqual([space])
-    expect(children.dialogs.map((dialog) => dialog.conversation.id)).toEqual([child])
+    expect(roots.dialogs.map((dialog) => dialog.conversation.id)).toEqual([child])
+    expect(folders).toEqual([{ id: space, title: space, conversationIds: [child] }])
     expect(reads).toBe(1)
-    await platform.getSubdialogs(session, { id: space }, { cursor: '0', limit: 1 })
+    await platform.getChatFolders(session)
     expect(reads).toBe(1)
   })
 
