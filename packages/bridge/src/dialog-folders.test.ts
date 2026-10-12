@@ -92,6 +92,44 @@ describe('DialogFolderStore', () => {
     expect((await store.listFilters('another-session')).map((entry) => entry.filterId)).toEqual([0])
   })
 
+  it('keeps Discord source order, stable filter IDs, and reuses removed folder IDs', async () => {
+    const { store } = await createStore()
+    await store.putFilter('discord-folders', 2, filter('Personal', 'mine'))
+    await store.syncPlatformFolders('discord-folders', [
+      { id: 'discord:guild-folder:z', title: 'Z', conversationIds: ['discord:guild:9'] },
+      { id: 'discord:guild-folder:a', title: 'A', conversationIds: ['discord:guild:8'] },
+    ])
+    const initial = await store.listFilters('discord-folders')
+    expect(initial.map((entry) => entry.filter?.sourceId).filter(Boolean))
+      .toEqual(['discord:guild-folder:z', 'discord:guild-folder:a'])
+    const originalIds = new Map(initial.filter((entry) => entry.filter?.sourceId)
+      .map((entry) => [entry.filter!.sourceId!, entry.filterId]))
+    await store.syncPlatformFolders('discord-folders', [
+      { id: 'discord:guild-folder:a', title: 'Renamed', conversationIds: ['discord:guild:8'] },
+      { id: 'discord:guild-folder:z', title: 'Z', conversationIds: ['discord:guild:7'] },
+    ])
+    const reordered = await store.listFilters('discord-folders')
+    expect(reordered.map((entry) => entry.filter?.sourceId).filter(Boolean))
+      .toEqual(['discord:guild-folder:a', 'discord:guild-folder:z'])
+    for (const entry of reordered) if (entry.filter?.sourceId) {
+      expect(entry.filterId).toBe(originalIds.get(entry.filter.sourceId))
+    }
+    expect(reordered.find((entry) => entry.filter?.sourceId === 'discord:guild-folder:a')?.filter)
+      .toMatchObject({ includePeerIds: ['discord:guild:8'] })
+    await store.syncPlatformFolders('discord-folders', [
+      { id: 'discord:guild-folder:z', title: 'Z', conversationIds: [] },
+      { id: 'discord:guild-folder:new', title: 'New', conversationIds: ['discord:guild:3'] },
+    ])
+    const final = await store.listFilters('discord-folders')
+    expect(final.map((entry) => entry.filter?.sourceId).filter(Boolean))
+      .toEqual(['discord:guild-folder:z', 'discord:guild-folder:new'])
+    expect(final.find((entry) => entry.filter?.sourceId === 'discord:guild-folder:new')?.filterId)
+      .toBe(originalIds.get('discord:guild-folder:a'))
+    expect(final.find((entry) => entry.filter?.sourceId === 'discord:guild-folder:z')?.filter?.includePeerIds)
+      .toEqual([])
+    expect(final.find((entry) => entry.filterId === 2)?.filter?.sourceId).toBeUndefined()
+  })
+
   it('serializes simultaneous native folder refreshes without allocating duplicate IDs', async () => {
     const { ctx, store } = await createStore()
     const folders = [
