@@ -246,7 +246,7 @@ export class ComWeChatPlatform implements IMPlatform {
   ): Promise<IMConversationMemberPage> {
     if (!isGroupId(conversation.id)) return { members: [], total: 0 }
     const contacts = (await this.client.getGroupMembers(conversation.id)).filter(contactId)
-    const start = pageStart(contacts.map((contact) => ({ conversation: { id: contactId(contact)! } })), query)
+    const start = pageStartById(contacts, query, (contact) => contactId(contact)!)
     const limit = clampLimit(query.limit)
     const pageContacts = contacts.slice(start, start + limit)
     const members = (await mapWithConcurrency(
@@ -420,8 +420,12 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
 }
 
 function pageStart(items: Array<{ conversation: { id: string } }>, query: IMPageQuery): number {
+  return pageStartById(items, query, (item) => item.conversation.id)
+}
+
+function pageStartById<T>(items: readonly T[], query: IMPageQuery, idOf: (item: T) => string): number {
   if (query.afterId) {
-    const index = items.findIndex((item) => item.conversation.id === query.afterId)
+    const index = items.findIndex((item) => idOf(item) === query.afterId)
     return index < 0 ? 0 : index + 1
   }
   if (!query.cursor) return 0

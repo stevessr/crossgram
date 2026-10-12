@@ -902,16 +902,18 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       this.ingestState(conversation.id, await this.client.getRoomState(conversation.id))
     }
     const response = await this.client.getMembers(conversation.id)
-    const members = response.chunk
+    // Sorting the compact upstream state events preserves stable pagination.
+    // Mapping members creates users, roles, permissions and avatar media;
+    // only build those objects for the requested page, not the whole room.
+    const joined = response.chunk
       .filter((event) => event.state_key && event.content.membership === 'join')
-      .map((event) => this.mapMember(event.state_key!, event.content, conversation.id))
-      .sort((left, right) => left.user.id.localeCompare(right.user.id))
-    const start = pageStart(members.map((member) => ({ conversation: { id: member.user.id } })), query)
-    const page = members.slice(start, start + clampLimit(query.limit))
+      .sort((left, right) => left.state_key!.localeCompare(right.state_key!))
+    const start = pageStartById(joined, query, (event) => event.state_key!)
+    const page = joined.slice(start, start + clampLimit(query.limit))
     return {
-      members: page,
-      total: members.length,
-      nextCursor: start + page.length < members.length ? String(start + page.length) : undefined,
+      members: page.map((event) => this.mapMember(event.state_key!, event.content, conversation.id)),
+      total: joined.length,
+      nextCursor: start + page.length < joined.length ? String(start + page.length) : undefined,
     }
   }
 
@@ -1733,8 +1735,12 @@ function requestPageStart(cursor?: string): number {
 }
 
 function pageStart(items: Array<{ conversation: { id: string } }>, query: IMPageQuery): number {
+  return pageStartById(items, query, (item) => item.conversation.id)
+}
+
+function pageStartById<T>(items: readonly T[], query: IMPageQuery, idOf: (item: T) => string): number {
   if (query.afterId) {
-    const index = items.findIndex((item) => item.conversation.id === query.afterId)
+    const index = items.findIndex((item) => idOf(item) === query.afterId)
     return index < 0 ? 0 : index + 1
   }
   if (!query.cursor) return 0

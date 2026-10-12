@@ -346,6 +346,44 @@ describe('MatrixPlatform', () => {
     })
   })
 
+  it('maps only the selected member page in a large Matrix room, preserving ordering and cursors', async () => {
+    const room = '!bulk:example.org'
+    const members = Array.from({ length: 2_400 }, (_, index) => event(
+      'm.room.member',
+      { membership: 'join', displayname: `Member ${index}` },
+      { stateKey: `@member-${String(index).padStart(4, '0')}:example.org` },
+    ))
+    const fetch = routeFetch((url) => {
+      if (url.pathname.endsWith('/members')) return json({ chunk: members })
+      throw new Error(`unexpected request: ${url}`)
+    })
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+    const internal = platform as any
+    // A populated room cache avoids an unrelated /state fetch.
+    internal.ingestState(room, [])
+    const mapper = vi.spyOn(internal, 'mapMember')
+    const first = await platform.getConversationMembers(session, { id: room }, {
+      afterId: '@member-0100:example.org', limit: 17,
+    })
+    expect(first.total).toBe(2_400)
+    expect(first.nextCursor).toBe('118')
+    expect(first.members.map((member) => member.user.id)).toEqual(
+      Array.from({ length: 17 }, (_, index) =>
+        `@member-${String(index + 101).padStart(4, '0')}:example.org`),
+    )
+    expect(mapper).toHaveBeenCalledTimes(17)
+    const second = await platform.getConversationMembers(session, { id: room }, {
+      cursor: first.nextCursor, limit: 5,
+    })
+    expect(second.members.map((member) => member.user.id)).toEqual(
+      Array.from({ length: 5 }, (_, index) =>
+        `@member-${String(index + 118).padStart(4, '0')}:example.org`),
+    )
+    expect(mapper).toHaveBeenCalledTimes(22)
+    await expect(platform.getConversationMembers(session, { id: room }, { cursor: '-1' }))
+      .rejects.toThrow('invalid Matrix cursor')
+  })
+
   it('keeps joined-member totals incrementally without scanning all room state on message projection', () => {
     const platform = createPlatform(routeFetch(() => { throw new Error('unexpected request') }), {
       userId: '@me:example.org',

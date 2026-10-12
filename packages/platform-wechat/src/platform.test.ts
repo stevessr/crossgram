@@ -143,6 +143,32 @@ describe('ComWeChatPlatform account and directory operations', () => {
     expect(maxActiveLookups).toBeLessThanOrEqual(8)
   })
 
+  it('keeps deep member cursors stable without allocating per-member pagination objects', async () => {
+    const lookups: string[] = []
+    const fetch = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const type = new URL(String(input)).searchParams.get('type')
+      if (type === '25') return response({
+        members: `${Array.from({ length: 3_000 }, (_, index) => `member-${index}`).join('^G')}^G`,
+      })
+      if (type === '26') {
+        const { wxid } = JSON.parse(String(init?.body)) as { wxid: string }
+        lookups.push(wxid)
+        return response({ data: { wxNickName: wxid } })
+      }
+      return response({})
+    })
+    const platform = new ComWeChatPlatform({ endpoint: 'http://127.0.0.1:18888/api/', fetch })
+    const page = await platform.getConversationMembers({} as never, { id: 'room@chatroom' }, {
+      afterId: 'member-2500', limit: 4,
+    })
+    expect(page.total).toBe(3_000)
+    expect(page.nextCursor).toBe('2505')
+    expect(page.members.map((member) => member.user.id)).toEqual([
+      'member-2501', 'member-2502', 'member-2503', 'member-2504',
+    ])
+    expect(lookups).toEqual(['member-2501', 'member-2502', 'member-2503', 'member-2504'])
+  })
+
   it('falls back to wxid when a type-26 member nickname lookup fails', async () => {
     const platform = platformWithResponses({ '25': { members: 'member^G', result: 'OK' }, '26': null })
 

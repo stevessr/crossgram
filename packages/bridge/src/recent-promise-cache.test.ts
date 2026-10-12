@@ -40,6 +40,44 @@ describe('RecentPromiseCache', () => {
     expect(cache.size).toBe(1)
   })
 
+  it('trims thousands of overlapping pending operations without evicting an in-flight key', async () => {
+    const cache = new RecentPromiseCache<number>(4)
+    const resolve: Array<(value: number) => void> = []
+    const pending = Array.from({ length: 2_000 }, (_, index) => new Promise<number>((done) => {
+      resolve[index] = done
+    }))
+    for (let index = 0; index < pending.length; index++) {
+      cache.set(`pending-${index}`, pending[index]!)
+    }
+    expect(cache.size).toBe(2_000)
+    // Settled entries are the only ones eligible for immediate eviction.
+    cache.set('short-lived', Promise.resolve(-1))
+    await Promise.resolve()
+    expect(cache.get('short-lived')).toBeUndefined()
+    expect(cache.get('pending-0')).toBe(pending[0])
+
+    // A full completion burst leaves only the newest four settled promises.
+    for (let index = 0; index < pending.length; index++) resolve[index]!(index)
+    await Promise.all(pending)
+    expect(cache.size).toBe(4)
+    expect(cache.get('pending-0')).toBeUndefined()
+    await expect(cache.get('pending-1999')).resolves.toBe(1_999)
+  })
+
+  it('does not let completion of a replaced promise delete or evict its replacement', async () => {
+    const cache = new RecentPromiseCache<number>(1)
+    let failOld!: (reason: Error) => void
+    const old = new Promise<number>((_resolve, reject) => { failOld = reject })
+    cache.set('same', old)
+    const current = Promise.resolve(42)
+    cache.set('same', current)
+    await current
+    failOld(new Error('obsolete'))
+    await expect(old).rejects.toThrow('obsolete')
+    expect(cache.get('same')).toBe(current)
+    await expect(cache.get('same')).resolves.toBe(42)
+  })
+
   it('refreshes recency when a duplicate request reads an existing result', async () => {
     const cache = new RecentPromiseCache<number>(2)
     cache.set('first', Promise.resolve(1))
