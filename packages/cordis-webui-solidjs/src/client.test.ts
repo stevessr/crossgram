@@ -20,6 +20,9 @@ class FakeSocket implements Socket {
     for (const fn of this.listeners.get('close') ?? []) fn({ code })
   })
   terminate = vi.fn(() => this.close(1013))
+  ping?: () => void
+  on?: (event: string, listener: () => void) => void
+  off?: (event: string, listener: () => void) => void
   addEventListener(type: string, fn: Function) {
     if (!this.listeners.has(type)) this.listeners.set(type, new Set())
     this.listeners.get(type)!.add(fn)
@@ -28,7 +31,7 @@ class FakeSocket implements Socket {
     this.listeners.get(type)?.delete(fn)
   }
 }
-function setup(data: Record<string, any> = { count: 0, increment: () => 42 }) {
+function setup(data: Record<string, any> = { count: 0, increment: () => 42 }, keepAlive = false) {
   const entry = {
     id: 'entry',
     data,
@@ -48,6 +51,11 @@ function setup(data: Record<string, any> = { count: 0, increment: () => 42 }) {
     ctx: {},
   } as unknown as WebUI
   const socket = new FakeSocket()
+  if (keepAlive) {
+    socket.ping = vi.fn()
+    socket.on = (event, listener) => socket.addEventListener(event, listener)
+    socket.off = (event, listener) => socket.removeEventListener(event, listener)
+  }
   const client = new Client(webui, socket)
   webui.clients[client.id] = client
   const request = (type: string, body?: unknown) =>
@@ -167,6 +175,25 @@ describe('bounded subscription/RPC transport', () => {
     })
     expect(socket.frames.at(-1).body.message).toBe('Too many pending requests')
     client.dispose()
+  })
+  it('uses native WS control pings and releases the timer/listener on timeout', async () => {
+    vi.useFakeTimers()
+    try {
+      const { socket, client } = setup(undefined, true)
+      await vi.advanceTimersByTimeAsync(25_000)
+      expect(socket.ping).toHaveBeenCalledTimes(1)
+      for (const listener of socket.listeners.get('pong') ?? []) listener()
+      await vi.advanceTimersByTimeAsync(25_000)
+      expect(socket.ping).toHaveBeenCalledTimes(2)
+      await vi.advanceTimersByTimeAsync(100_000)
+      expect(socket.terminate).toHaveBeenCalledTimes(1)
+      expect(socket.listeners.get('pong')?.size).toBe(0)
+      expect(client.subscriptions.size).toBe(0)
+      await vi.advanceTimersByTimeAsync(100_000)
+      expect(socket.ping).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
   it('terminates a slow socket once, releases listeners and stops future sends', () => {
     const { client, socket, webui } = setup()

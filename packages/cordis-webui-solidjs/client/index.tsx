@@ -30,3 +30,7 @@ render(
 connection.start()
 window.addEventListener('pagehide', () => connection.stop())
 window.addEventListener('pageshow', () => connection.start())
+window.addEventListener('online', () => connection.wake())
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') connection.wake()
+})
