@@ -41,6 +41,7 @@ async function start(mainPath: string, shards?: SQLiteShardOptions) {
   await Promise.all([database, sqlite])
   await provider.await()
   await childFiber.await()
+  await expect.poll(() => updates).toBeDefined()
   const stop = async () => {
     await childFiber.dispose()
     await provider.dispose()
@@ -164,6 +165,7 @@ describe('account-sharded SQLite delivery store', () => {
     await Promise.all([database, sqlite])
     await provider.await()
     await consumer.await()
+    await expect.poll(() => updates).toBeDefined()
     cleanups.push(async () => {
       await consumer.dispose()
       await provider.dispose()
