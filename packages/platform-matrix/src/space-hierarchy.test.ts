@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { buildSpaceHierarchy } from './space-hierarchy.js'
+import { buildSpaceFolders, buildSpaceHierarchy } from './space-hierarchy.js'
 import type { MatrixEvent } from './types.js'
 
 function state(...events: MatrixEvent[]): Map<string, MatrixEvent> {
@@ -49,5 +49,34 @@ describe('Matrix Space hierarchy projection', () => {
     expect(buildSpaceHierarchy(states, joined).parents.get('!room:test')).toBe('!space:test')
     states.get('!space:test')!.set('m.space.child\0!room:test', child('!room:test', undefined))
     expect(buildSpaceHierarchy(states, joined).parents.has('!room:test')).toBe(false)
+  })
+})
+
+
+describe('Matrix Space folder projection', () => {
+  it('flattens nesting and retains overlapping rooms in every applicable Space', () => {
+    const states = new Map([
+      ['!a:test', state(room('m.space'), { type: 'm.room.name', state_key: '', content: { name: 'Team' } },
+        child('!b:test', ['test']), child('!shared:test', ['test']), child('!a:test', ['test']))],
+      ['!b:test', state(room('m.space'), child('!a:test', ['test']), child('!room:test', ['test']))],
+      ['!c:test', state(room('m.space'), child('!shared:test', ['test']), child('!absent:test', ['test']))],
+      ['!shared:test', state(room())], ['!room:test', state(room())],
+    ])
+    const joined = new Set(states.keys())
+    expect(buildSpaceFolders(states, joined)).toEqual([
+      { id: '!a:test', title: 'Team', conversationIds: ['!room:test', '!shared:test'] },
+      { id: '!b:test', title: '!b:test', conversationIds: ['!room:test', '!shared:test'] },
+      { id: '!c:test', title: '!c:test', conversationIds: ['!shared:test'] },
+    ])
+  })
+
+  it('removes redacted links and preserves empty Spaces without inventing chats', () => {
+    const states = new Map([
+      ['!space:test', state(room('m.space'), child('!room:test', ['test']))],
+      ['!room:test', state(room())],
+    ])
+    expect(buildSpaceFolders(states, new Set(states.keys()))[0]!.conversationIds).toEqual(['!room:test'])
+    states.get('!space:test')!.set('m.space.child\\0!room:test', child('!room:test', []))
+    expect(buildSpaceFolders(states, new Set(states.keys()))[0]!.conversationIds).toEqual([])
   })
 })
