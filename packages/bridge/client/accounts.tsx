@@ -1,5 +1,4 @@
 /** @jsxImportSource solid-js */
-import { t } from 'cordis-webui-solidjs/i18n'
 import {
   createEffect,
   createMemo,
@@ -23,6 +22,7 @@ import {
   useAction,
 } from 'cordis-webui-solidjs/components'
 import { sessionToken } from 'cordis-webui-solidjs/session'
+import AddAccount from './add-account.js'
 import {
   copyText,
   formatPhone,
@@ -36,6 +36,7 @@ export default function AccountsPage(props: PageProps) {
     action = useAction()
   const [now, setNow] = createSignal(Date.now()),
     [qr, setQr] = createSignal(false),
+    [adding, setAdding] = createSignal(false),
     [copied, setCopied] = createSignal(false)
   const tick = () => {
       if (!document.hidden) setNow(Date.now())
@@ -72,20 +73,31 @@ export default function AccountsPage(props: PageProps) {
   return (
     <>
       <PageHeader
-        title={t("Platform accounts")}
-        description={t("Your connected identities. Ready for Telegram.")}
+        title="Platform accounts"
+        description="Your connected identities. Ready for Telegram."
         actions={
           <>
+            <button
+              class="button filled"
+              disabled={!rpc.ready}
+              onClick={() => setAdding(true)}
+            >
+              添加账号
+            </button>
             <button
               class="button outlined"
               disabled={action.busy() || !rpc.ready}
               onClick={() => void action.run(() => rpc.data.refresh())}
-            >{t("Refresh accounts")}</button>
+            >
+              Refresh accounts
+            </button>
             <button
               class="button filled"
               disabled={!rpc.ready}
               onClick={() => setQr(true)}
-            >{t("Approve QR login")}</button>
+            >
+              Approve QR login
+            </button>
           </>
         }
       />
@@ -93,9 +105,11 @@ export default function AccountsPage(props: PageProps) {
       <LiveContent ready={rpc.ready}>
         <section class="panel connection-config">
           <div>
-            <span class="eyebrow">{t("CONNECT YOUR CLIENT")}</span>
-            <h2>{t("One configuration. Your whole workspace.")}</h2>
-            <p>{t("Import this server configuration into a patched Crossgram client.")}</p>
+            <span class="eyebrow">CONNECT YOUR CLIENT</span>
+            <h2>One configuration. Your whole workspace.</h2>
+            <p>
+              Import this server configuration into a patched Crossgram client.
+            </p>
           </div>
           <button
             class="button tonal"
@@ -107,22 +121,22 @@ export default function AccountsPage(props: PageProps) {
               })
             }
           >
-            {copied() ? t("Configuration copied") : t("Copy server configuration")}
+            {copied() ? 'Configuration copied' : 'Copy server configuration'}
           </button>
           <details>
-            <summary>{t("View server configuration")}</summary>
+            <summary>View server configuration</summary>
             <pre aria-label="Server configuration">{configuration()}</pre>
           </details>
         </section>
         <div class="section-heading">
-          <h2>{t("Your identities")}</h2>
+          <h2>Your identities</h2>
           <span class="muted">{ids().length} accounts</span>
         </div>
         <label class="field account-search">
-          <span class="sr-only">{t("Find an account")}</span>
+          <span class="sr-only">Find an account</span>
           <input
             type="search"
-            placeholder={t("Find an account…")}
+            placeholder="Find an account…"
             value={search()}
             onInput={(event) => {
               setSearch(event.currentTarget.value)
@@ -149,16 +163,29 @@ export default function AccountsPage(props: PageProps) {
                 ? 'No matching accounts'
                 : 'No platform accounts yet'}
             </h2>
-            <p>{t("Enable a platform plugin that provides account information to get started.")}</p>
+            <p>
+              点击右上角「添加账号」，配置 QQ、Discord、Matrix、微信或 Telegram 适配器。
+            </p>
           </section>
         </Show>
         <Show when={filtered().length > limit()}>
           <button
             class="button outlined"
             onClick={() => setLimit(limit() + 24)}
-          >{t("Show more accounts")}</button>
+          >
+            Show more accounts
+          </button>
         </Show>
       </LiveContent>
+      <Show when={adding()}>
+        <AddAccount
+          onClose={() => setAdding(false)}
+          onCreated={async () => {
+            setAdding(false)
+            await action.run(() => rpc.data.refresh())
+          }}
+        />
+      </Show>
       <Show when={qr()}>
         <QrLogin
           data={rpc.data}
@@ -230,11 +257,11 @@ export function AccountCard(props: {
       </header>
       <dl class="identity-meta">
         <div>
-          <dt>{t("Platform")}</dt>
+          <dt>Platform</dt>
           <dd>{props.account.platformId}</dd>
         </div>
         <div>
-          <dt>{t("User ID")}</dt>
+          <dt>User ID</dt>
           <dd>{props.account.userId ?? '—'}</dd>
         </div>
       </dl>
@@ -258,7 +285,7 @@ export function AccountCard(props: {
       >
         <div class="phone-row">
           <div>
-            <span class="eyebrow">{t("VIRTUAL PHONE")}</span>
+            <span class="eyebrow">VIRTUAL PHONE</span>
             <code>{formatPhone(props.account.virtualPhone)}</code>
           </div>
           <button
@@ -267,12 +294,12 @@ export function AccountCard(props: {
             disabled={!props.account.virtualPhone}
             onClick={() => copy('phone', props.account.virtualPhone!)}
           >
-            {copied() === 'phone' ? t("Copied") : t("Copy")}
+            {copied() === 'phone' ? 'Copied' : 'Copy'}
           </button>
         </div>
         <div class="otp-panel">
           <div class="toolbar">
-            <span class="eyebrow">{t("TELEGRAM LOGIN CODE")}</span>
+            <span class="eyebrow">TELEGRAM LOGIN CODE</span>
             <span class="otp-expiry">
               {code()
                 ? remaining() + 's remaining'
@@ -294,7 +321,7 @@ export function AccountCard(props: {
           <div
             class="otp-progress"
             role="progressbar"
-            aria-label={t("Login code validity")}
+            aria-label="Login code validity"
             aria-valuenow={remaining()}
             aria-valuemin={0}
             aria-valuemax={30}
@@ -311,7 +338,7 @@ export function AccountCard(props: {
         </div>
         <div class="phone-row">
           <div>
-            <span class="eyebrow">{t("TWO-STEP VERIFICATION")}</span>
+            <span class="eyebrow">TWO-STEP VERIFICATION</span>
             <code>
               {props.account.hasPassword
                 ? 'Password enabled (all-zero code)'
@@ -323,7 +350,7 @@ export function AccountCard(props: {
             disabled={!props.connected}
             onClick={() => setPasswordOpen(true)}
           >
-            {props.account.hasPassword ? t("Change") : t("Set password")}
+            {props.account.hasPassword ? 'Change' : 'Set password'}
           </button>
         </div>
         <Show when={props.account.hasPassword}>
@@ -336,7 +363,9 @@ export function AccountCard(props: {
                 setPasswordOpen(false)
               })
             }
-          >{t("Remove password")}</button>
+          >
+            Remove password
+          </button>
         </Show>
       </Show>
       <Show when={passwordOpen()}>
@@ -369,7 +398,7 @@ function PasswordModal(props: {
   const problem = () => mismatch() ?? weak()
   return (
     <Modal
-      title={props.hasPassword ? t("Change login password") : t("Set login password")}
+      title={props.hasPassword ? 'Change login password' : 'Set login password'}
       onClose={props.onClose}
     >
       <p>
@@ -378,7 +407,7 @@ function PasswordModal(props: {
         password login; any other valid login code signs in directly.
       </p>
       <label class="field">
-        <span>{t("Password")}</span>
+        <span>Password</span>
         <input
           type="password"
           autocomplete="new-password"
@@ -388,7 +417,7 @@ function PasswordModal(props: {
         />
       </label>
       <label class="field">
-        <span>{t("Confirm password")}</span>
+        <span>Confirm password</span>
         <input
           type="password"
           autocomplete="new-password"
@@ -406,7 +435,7 @@ function PasswordModal(props: {
         disabled={action.busy() || Boolean(problem())}
         onClick={() => void action.run(() => props.onSubmit(password()))}
       >
-        {action.busy() ? t("Saving…") : t("Save password")}
+        {action.busy() ? 'Saving…' : 'Save password'}
       </button>
     </Modal>
   )
@@ -455,13 +484,13 @@ function QrLogin(props: {
     window.removeEventListener('paste', paste)
   })
   return (
-    <Modal title={t("Approve Telegram QR login")} onClose={props.onClose}>
+    <Modal title="Approve Telegram QR login" onClose={props.onClose}>
       <p>
         Upload or paste a QR image from your Telegram login screen, or paste its
         login link. Nothing is approved until you confirm below.
       </p>
       <label class="field">
-        <span>{t("QR image")}</span>
+        <span>QR image</span>
         <input
           type="file"
           accept="image/*"
@@ -470,10 +499,10 @@ function QrLogin(props: {
         />
       </label>
       <Show when={scan.busy()}>
-        <p role="status">{t("Scanning the QR code…")}</p>
+        <p role="status">Scanning the QR code…</p>
       </Show>
       <label class="field">
-        <span>{t("Telegram login link")}</span>
+        <span>Telegram login link</span>
         <textarea
           value={input()}
           placeholder="tg://login?token=…"
@@ -485,9 +514,9 @@ function QrLogin(props: {
         />
       </label>
       <label class="field">
-        <span>{t("Sign in as")}</span>
+        <span>Sign in as</span>
         <select
-          aria-label={t("Sign in as")}
+          aria-label="Sign in as"
           value={account()}
           disabled={approve.busy()}
           onChange={(event) => setAccount(event.currentTarget.value)}
@@ -502,11 +531,15 @@ function QrLogin(props: {
         </select>
       </label>
       <Show when={input() && !token()}>
-        <p class="notice error" role="alert">{t("Enter a valid Telegram login link containing a 32-byte token.")}</p>
+        <p class="notice error" role="alert">
+          Enter a valid Telegram login link containing a 32-byte token.
+        </p>
       </Show>
       <ActionError error={scan.error() || approve.error()} />
       <Show when={approved()}>
-        <p class="notice" role="status">{t("Login approved. Continue in your Telegram client.")}</p>
+        <p class="notice" role="status">
+          Login approved. Continue in your Telegram client.
+        </p>
       </Show>
       <button
         class="button filled"
