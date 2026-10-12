@@ -574,7 +574,7 @@ describe('MatrixPlatform', () => {
     expect(fullReads).toBeGreaterThanOrEqual(3)
   })
 
-  it('emits child parent changes even when the child has a timeline in the same sync batch', async () => {
+  it('updates folders without changing a room peer when a Space link and message arrive together', async () => {
     const space = '!space:example.org'
     const child = '!child:example.org'
     let sync = 0
@@ -604,22 +604,18 @@ describe('MatrixPlatform', () => {
     const platform = createPlatform(fetch, { userId: '@me:example.org', syncTimeoutMs: 50 })
     const events: IMEvent[] = []
     const unsubscribe = await platform.subscribe(session, (value) => { events.push(value) })
-    await vi.waitFor(() => expect(events.filter((value) =>
-      value.type === 'conversation' && value.conversation.id === child)).toHaveLength(1))
+    await vi.waitFor(() => expect(events.some((value) => value.type === 'message')).toBe(true))
     await unsubscribe()
 
-    expect(events.map((value) => value.type)).toEqual([
-      'conversation', 'conversation', 'message',
-    ])
-    expect(events[1]).toMatchObject({
-      type: 'conversation', conversation: {
-        id: child, kind: 'channel', parentId: space, spaceId: space,
-      },
-    })
-    expect(events[2]).toMatchObject({
-      type: 'message', conversation: { id: child, parentId: space },
+    // Space membership changes the folder only, not the room's chat identity.
+    expect(events.map((value) => value.type)).toEqual(['message'])
+    expect(events[0]).toMatchObject({
+      type: 'message', conversation: { id: child, kind: 'group' },
       message: { id: '$child-message' },
     })
+    expect((platform as any).spaceFolders).toEqual([{
+      id: space, title: space, conversationIds: [child],
+    }])
   })
 
   it('promotes a joined child back to a root when its parent Space is left', async () => {
