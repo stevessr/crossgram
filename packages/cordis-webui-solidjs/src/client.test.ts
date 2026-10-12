@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import { gunzipSync } from 'node:zlib'
 import { Client, type Socket } from './client.js'
 import {
   MAX_PENDING_RPC,
@@ -6,14 +7,22 @@ import {
   MAX_SOCKET_BUFFER,
 } from './protocol.js'
 import type WebUI from './index.js'
+import { decodeFrame, encodeFrame, unpackFrame } from './wire.js'
 
 class FakeSocket implements Socket {
   bufferedAmount = 0
   readyState = 1
   frames: any[] = []
+  binaryFrames: Uint8Array[] = []
   listeners = new Map<string, Set<Function>>()
-  send = vi.fn((value: string) => {
-    this.frames.push(JSON.parse(value))
+  send = vi.fn((value: string | Uint8Array) => {
+    if (typeof value === 'string') {
+      this.frames.push(JSON.parse(value))
+    } else {
+      this.binaryFrames.push(value)
+      const frame = decodeFrame(value)
+      this.frames.push(unpackFrame(frame, frame.gzip ? gunzipSync(frame.payload) : frame.payload))
+    }
   })
   close = vi.fn((code?: number) => {
     this.readyState = 3
@@ -71,6 +80,29 @@ describe('bounded subscription/RPC transport', () => {
     expect(socket.frames).toHaveLength(1)
     expect(JSON.stringify(socket.frames)).not.toContain('secret')
     expect(socket.terminate).not.toHaveBeenCalled()
+  })
+  it('negotiates protobuf without breaking the JSON bootstrap and receives binary commands', async () => {
+    const { socket, request, client } = setup()
+    expect(socket.frames[0].body.transport).toBe('protobuf-gzip-v1')
+    await request('transport:upgrade', { version: 1 })
+    expect(socket.frames.at(-1)).toEqual({ type: 'transport:ready', body: { version: 1 } })
+    expect(client.protobuf).toBe(true)
+    await client.receive({ data: encodeFrame('entry:subscribe', { id: 'entry' }) })
+    expect(socket.binaryFrames.length).toBeGreaterThan(0)
+    expect(socket.frames.at(-1).type).toBe('entry:snapshot')
+    await client.receive({ data: encodeFrame('ping') })
+    expect(socket.frames.at(-1).type).toBe('pong')
+  })
+  it('compresses large snapshots after upgrade and preserves the original payload', async () => {
+    const data = { large: 'a'.repeat(100_000) }
+    const { socket, request, client } = setup(data)
+    await request('transport:upgrade', { version: 1 })
+    await request('entry:subscribe', { id: 'entry' })
+    const frame = decodeFrame(socket.binaryFrames.at(-1)!)
+    expect(frame.gzip).toBe(true)
+    expect(socket.binaryFrames.at(-1)!.length).toBeLessThan(1000)
+    expect(unpackFrame(frame, gunzipSync(frame.payload)).body.data.large).toHaveLength(100_000)
+    client.dispose()
   })
   it('subscribes with a complete snapshot, unsubscribes, and answers heartbeat', async () => {
     const { request, client, socket } = setup()

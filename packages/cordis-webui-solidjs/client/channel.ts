@@ -1,6 +1,7 @@
 import { batch } from 'solid-js'
 import { createStore, produce, reconcile } from 'solid-js/store'
 import { apply, DeltaState } from '@cordisjs/muon'
+import { decodeFrame, decompressBrowser, encodeFrame, PROTO_TRANSPORT, supportsProtoType, unpackFrame } from '../src/wire.js'
 import type {
   EntryMeta,
   EntryDelta,
@@ -73,6 +74,10 @@ export class Connection {
   private channels = new Map<string, Channel>()
   private pending = new Map<number, Pending>()
   private socket?: WebSocket
+  private protobuf = false
+  private upgradeRequested = false
+  private incoming: unknown[] = []
+  private draining = false
   private serial = 0
   private retry = 0
   private stopped = true
@@ -112,6 +117,7 @@ export class Connection {
       return
     }
     this.socket = socket
+    socket.binaryType = 'arraybuffer'
     // A TCP/WS upgrade can remain pending indefinitely after a proxy or network failure.
     // Require the server's initial snapshot metadata, not merely a successful upgrade.
     this.handshakeTimer = setTimeout(
@@ -120,12 +126,8 @@ export class Connection {
     )
     socket.onmessage = (event) => {
       if (socket !== this.socket) return
-      try {
-        this.receive(JSON.parse(String(event.data)))
-      } catch (error) {
-        this.setState('error', 'State synchronization failed. Reconnecting…')
-        this.dropSocket(socket, 'State synchronization failed')
-      }
+      this.incoming.push(event.data)
+      if (!this.draining) void this.drain(socket)
     }
     socket.onclose = () => {
       if (socket === this.socket) this.disconnected('Connection lost')
@@ -133,6 +135,35 @@ export class Connection {
     socket.onerror = () => {
       if (socket === this.socket)
         this.dropSocket(socket, 'WebSocket connection failed')
+    }
+  }
+  private async drain(socket: WebSocket) {
+    this.draining = true
+    try {
+      while (socket === this.socket && this.incoming.length) {
+        const raw = this.incoming.shift()
+        let message: { type: string; body?: any }
+        if (typeof raw === 'string') {
+          message = JSON.parse(raw)
+        } else {
+          const frame = decodeFrame(raw as ArrayBuffer | Uint8Array)
+          // Await compressed frames in order: deltas must not overtake snapshots.
+          const bytes = frame.gzip ? await decompressBrowser(frame) : frame.payload
+          message = unpackFrame(frame, bytes)
+        }
+        if (socket !== this.socket) return
+        this.receive(message)
+      }
+    } catch {
+      if (socket === this.socket) {
+        this.setState('error', 'State synchronization failed. Reconnecting…')
+        this.dropSocket(socket, 'State synchronization failed')
+      }
+    } finally {
+      if (socket === this.socket) {
+        this.draining = false
+        if (this.incoming.length) void this.drain(socket)
+      }
     }
   }
   private dropSocket(socket: WebSocket, reason: string) {
@@ -146,6 +177,10 @@ export class Connection {
     }
   }
   private receive({ type, body }: { type: string; body: any }) {
+    if (type === 'transport:ready') {
+      if (this.upgradeRequested && body?.version === 1) this.protobuf = true
+      return
+    }
     if (type === 'pong') {
       clearTimeout(this.pongTimer)
       this.pongTimer = undefined
@@ -174,6 +209,10 @@ export class Connection {
         )
         this.stop()
         return
+      }
+      if (body.transport === PROTO_TRANSPORT && !this.upgradeRequested) {
+        this.upgradeRequested = true
+        this.send('transport:upgrade', { version: 1 })
       }
       batch(() => {
         if (body.reset) {
@@ -287,7 +326,11 @@ export class Connection {
   }
   private send(type: string, body?: unknown) {
     if (this.socket?.readyState !== 1) throw new Error('Connection is not open')
-    this.socket.send(JSON.stringify({ type, body }))
+    this.socket.send(
+      this.protobuf && supportsProtoType(type)
+        ? encodeFrame(type, body)
+        : JSON.stringify({ type, body }),
+    )
   }
   private startHeartbeat() {
     clearInterval(this.pingTimer)
@@ -333,6 +376,10 @@ export class Connection {
   }
   private disconnected(reason: string) {
     this.socket = undefined
+    this.protobuf = false
+    this.upgradeRequested = false
+    this.incoming = []
+    this.draining = false
     clearTimeout(this.handshakeTimer)
     this.handshakeTimer = undefined
     clearTimeout(this.reconnectTimer)

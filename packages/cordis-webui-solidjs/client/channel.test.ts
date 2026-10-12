@@ -2,15 +2,23 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createRoot, createComputed } from 'solid-js'
 import { DeltaState, observe } from '@cordisjs/muon'
 import { Channel, Connection } from './channel.js'
+import { decodeFrame, encodeFrame, unpackFrame } from '../src/wire.js'
+import { gzipSync } from 'node:zlib'
 
 class Socket {
   readyState = 1
-  onmessage?: (event: { data: string }) => void
+  onmessage?: (event: { data: string | ArrayBuffer }) => void
   onclose?: () => void
   onerror?: () => void
   frames: any[] = []
-  send(data: string) {
-    this.frames.push(JSON.parse(data))
+  binaryFrames: Uint8Array[] = []
+  send(data: string | Uint8Array) {
+    if (typeof data === 'string') {
+      this.frames.push(JSON.parse(data))
+    } else {
+      this.binaryFrames.push(data)
+      this.frames.push(unpackFrame(decodeFrame(data)))
+    }
   }
   close() {
     this.readyState = 3
@@ -18,6 +26,9 @@ class Socket {
   }
   receive(type: string, body?: unknown) {
     this.onmessage?.({ data: JSON.stringify({ type, body }) })
+  }
+  receiveBinary(frame: Uint8Array) {
+    this.onmessage?.({ data: frame.buffer as ArrayBuffer })
   }
 }
 const meta = {
@@ -125,6 +136,33 @@ describe('fine-grained Muon channel', () => {
   })
 })
 describe('Connection lifecycle', () => {
+  it('upgrades after JSON init and applies binary snapshots and ordered gzip deltas', async () => {
+    const { connection, socket } = setup()
+    const { channel, release } = connection.acquire<any>('test')
+    socket.receive('entry:init', {
+      version: 'solid-1', reset: true, transport: 'protobuf-gzip-v1',
+      entries: { test: meta },
+    })
+    expect(socket.frames.at(-1)).toEqual({ type: 'entry:subscribe', body: { id: 'test' } })
+    expect(socket.frames.some(frame => frame.type === 'transport:upgrade')).toBe(true)
+    socket.receive('transport:ready', { version: 1 })
+    const large = { count: 1, large: 'repeat'.repeat(2000) }
+    socket.receiveBinary(encodeFrame('entry:snapshot', {
+      id: 'test', data: large, cursor: { p: ['count'], o: 'SET' },
+    }, (data) => gzipSync(data)))
+    socket.receiveBinary(encodeFrame('entry:delta', { id: 'test', v: 2 }))
+    await vi.waitFor(() => expect(channel.state.value.count).toBe(2))
+    expect(channel.state.value.large).toBe(large.large)
+    const result = connection.rpc('test', 'save', [true])
+    expect(socket.binaryFrames.at(-1)).toBeDefined()
+    expect(socket.frames.at(-1).type).toBe('rpc:request')
+    socket.receiveBinary(encodeFrame('rpc:response', {
+      sn: socket.frames.at(-1).body.sn, ok: true, value: 'ok',
+    }))
+    await expect(result).resolves.toBe('ok')
+    release()
+    connection.stop()
+  })
   it('detects a changed server build without clearing metadata or replaying RPCs', () => {
     const { connection, socket } = setup()
     connection.config.buildId = 'old-build'
