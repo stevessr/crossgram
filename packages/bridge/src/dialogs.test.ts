@@ -225,6 +225,39 @@ describe('DialogRpc', () => {
     }).forum).toBeUndefined()
   })
 
+  it('reuses a cold TL message projection instead of performing two store reads', async () => {
+    const source = {
+      id: 'persisted-1', conversationId: 'alice', senderId: 'alice',
+      timestamp: 1_800_000_000,
+      content: { parts: [{ type: 'text' as const, text: 'persisted' }] },
+    }
+    const findProjectedByTlId = vi.fn(async () => ({
+      source, parts: [{ tlMessageId: 2_357, ordinal: 0, messageId: 91 }], media: [],
+    }))
+    const rpc = new DialogRpc(new DialogTestPlatform(), session, {
+      findProjectedByTlId,
+    } as unknown as MessageStore)
+    const internal = rpc as any
+    internal._cacheConversation('alice', { id: 'alice', kind: 'direct', title: 'Alice' })
+    internal._hydrateMessageConversation = vi.fn(async () => {})
+    internal._messageHidden = vi.fn(async () => false)
+    internal._messageUsers = vi.fn(async () => [])
+    internal._makeMessage = vi.fn(async (item: { tlId: number }) => ({
+      message: { _: 'messageEmpty', id: item.tlId }, chats: [],
+    }))
+    internal._makeSelfUser = vi.fn(() => ({ _: 'user', id: 1 }))
+    const input = [{ _: 'inputMessageID', id: 2_357 }]
+    const first = await internal._getMessages(input)
+    expect(first.messages).toMatchObject([{ id: 2_357 }])
+    expect(findProjectedByTlId).toHaveBeenCalledTimes(1)
+    expect(findProjectedByTlId).toHaveBeenNthCalledWith(1, session.platformSessionId, 2_357, undefined)
+    await internal._getMessages(input)
+    // Subsequent hot-index reads still verify the durable message once,
+    // but the cold miss no longer does this twice.
+    expect(findProjectedByTlId).toHaveBeenCalledTimes(2)
+    expect(internal._makeMessage).toHaveBeenCalledTimes(2)
+  })
+
   it('loads senders from projected dialog sources before materializing', async () => {
     const conversation = { id: 'room', kind: 'group' as const, title: 'Room' }
     const upstream = {
