@@ -31,7 +31,11 @@ describe('bounded Crossgram components', () => {
         validUntil: 3000,
       })
     const root = mount(() => (
-      <AccountCard account={account()} now={now()} connected setPassword={async () => {}} />
+      <AccountCard
+        account={account()} now={now()} connected
+        onDemandLoginCodes={false} loginCodeTtlSeconds={30}
+        requestCode={async () => {}} setPassword={async () => {}}
+      />
     ))
     const card = root.querySelector('article')!,
       copy = root.querySelector(
@@ -47,6 +51,26 @@ describe('bounded Crossgram components', () => {
     expect(copy.disabled).toBe(true)
     expect(copy.textContent).toBe('------')
   })
+  it('allows an operator to request a code when on-demand login is enabled', async () => {
+    const requestCode = vi.fn(async () => {})
+    const root = mount(() => (
+      <AccountCard
+        account={{
+          platformId: 'qq', platformKind: 'qq', status: 'ready',
+          displayName: 'Test', virtualPhone: '+888111222333',
+        }}
+        now={1000} connected onDemandLoginCodes loginCodeTtlSeconds={300}
+        requestCode={requestCode} setPassword={async () => {}}
+      />
+    ))
+    const generate = root.querySelector<HTMLButtonElement>('[aria-label="Generate login code for qq"]')!
+    expect(generate).not.toBeNull()
+    expect(root.textContent).toContain('Waiting for login request')
+    expect(root.querySelector('[aria-label="Copy login code for qq"]')?.hasAttribute('disabled')).toBe(true)
+    generate.click()
+    await vi.waitFor(() => expect(requestCode).toHaveBeenCalledOnce())
+  })
+
   it('renders only one page of large statistics tables and reuses table rows across live snapshots', () => {
     const [rows, setRows] = createSignal(
       Array.from({ length: 5000 }, (_, index) => ({
