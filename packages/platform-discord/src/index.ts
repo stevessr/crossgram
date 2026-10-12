@@ -11,7 +11,7 @@ import {
 } from 'discord.js-selfbot-v13'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationPermissions,
-  IMConversationRef, IMDialog, IMDialogPage, IMDownloadOptions, IMEvent, IMHistoryPage,
+  IMChatFolder, IMConversationRef, IMDialog, IMDialogPage, IMDownloadOptions, IMEvent, IMHistoryPage,
   IMHistoryQuery, IMMedia, IMMessage, IMMessageInput, IMPageQuery, IMPlatform, IMReactionContext,
   IMReactionDefinition, IMReactionResource, IMReactionTarget, IMReadTarget, IMTransferOptions,
   IMUser, IMUserPage, JsonObject, PlatformCapabilities, PlatformSession, Unsubscribe,
@@ -19,6 +19,7 @@ import type {
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import enUS from './locales/en-US.yml'
 import zhCN from './locales/zh-CN.yml'
+import { decodeLegacyGuildFolders, decodeProtoGuildFolders, type DiscordGuildFolder } from './guild-folders.js'
 
 export interface DiscordMediaLocator extends JsonObject {
   url: string
@@ -129,6 +130,8 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
   private readonly proxyDispatcher?: UndiciProxyAgent
   private readonly includeBots: boolean
   private readonly downloadChunkSize: number
+  private guildFolderState?: DiscordGuildFolder[]
+  private guildFolderLoad?: Promise<void>
   private readonly readStates = new Map<string, ReadState>()
   private readonly handlers = new Map<string, (event: IMEvent<DiscordMediaLocator>) => void | Promise<void>>()
   private readonly originNonces = new Set<string>()
@@ -354,6 +357,65 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
       dialogs,
       total: roots.length,
       nextCursor: start + selected.length < roots.length ? String(start + selected.length) : undefined,
+    }
+  }
+
+  /**
+   * Discord's user-created *server* folders become Telegram chat-list folders.
+   * Guild channel categories remain topics inside their guild conversation.
+   */
+  async getChatFolders(_session: PlatformSession): Promise<IMChatFolder[]> {
+    await this.ensureReady()
+    await this.loadGuildFolders()
+    if (!this.guildFolderState) throw new Error('Discord guild folder settings are unavailable')
+    return this.guildFolderState.map((folder) => ({
+      id: 'discord:guild-folder:' + folder.id,
+      title: folder.title,
+      conversationIds: folder.guildIds.flatMap((guildId) => {
+        const guild = this.client.guilds.cache.get(guildId)
+        return guild && this.guildProjection(guild).root ? [guildConversationId(guildId)] : []
+      }),
+    }))
+  }
+
+  async getConversation(
+    _session: PlatformSession,
+    conversationId: string,
+  ): Promise<IMConversation<DiscordMediaLocator> | null> {
+    await this.ensureReady()
+    const channel = this.resolveChannel(conversationId)
+    return channel && this.isVisible(channel) ? this.mapConversation(channel) : null
+  }
+
+  private async loadGuildFolders(): Promise<void> {
+    if (this.guildFolderState) return
+    const settings = this.client.settings as { raw?: { guild_folders?: unknown } } | undefined
+    const legacy = decodeLegacyGuildFolders(settings?.raw?.guild_folders)
+    if (legacy) {
+      this.guildFolderState = legacy
+      return
+    }
+    if (this.guildFolderLoad) return this.guildFolderLoad
+
+    // Old discord.js-selfbot-v13 ignores the modern READY user_settings_proto.
+    // Fetch it only when the Gateway provided neither a proto nor legacy folders.
+    const pending = (async () => {
+      const api = (this.client as unknown as {
+        api?: { users: (id: string) => {
+          'settings-proto': (type: number) => { get: () => Promise<{ settings?: string }> }
+        } }
+      }).api
+      if (!api) throw new Error('Discord settings API is unavailable')
+      const response = await api.users('@me')['settings-proto'](1).get()
+      const folders = decodeProtoGuildFolders(response?.settings)
+      if (!folders) throw new Error('Discord returned invalid guild folder settings')
+      this.guildFolderState = folders
+    })()
+    this.guildFolderLoad = pending
+    try {
+      await pending
+    } finally {
+      if (this.guildFolderLoad === pending) this.guildFolderLoad = undefined
     }
   }
 
@@ -673,6 +735,22 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
   }
 
   private handleRaw(packet: { t?: string, d?: any }): void {
+    if (packet.t === 'READY') {
+      const proto = packet.d?.user_settings_proto
+      const folders = decodeProtoGuildFolders(typeof proto === 'string' ? proto : proto?.proto)
+      if (folders) {
+        this.guildFolderState = folders
+      } else {
+        const legacy = decodeLegacyGuildFolders(packet.d?.user_settings?.guild_folders)
+        if (legacy) this.guildFolderState = legacy
+      }
+    } else if (packet.t === 'USER_SETTINGS_PROTO_UPDATE' && packet.d?.settings?.type === 1) {
+      const folders = decodeProtoGuildFolders(packet.d.settings.proto, packet.d.partial === true)
+      if (folders) this.guildFolderState = folders
+    } else if (packet.t === 'USER_SETTINGS_UPDATE') {
+      const legacy = decodeLegacyGuildFolders((packet.d?.settings ?? packet.d)?.guild_folders)
+      if (legacy) this.guildFolderState = legacy
+    }
     if (packet.t === 'READY') {
       const entries = Array.isArray(packet.d?.read_state?.entries)
         ? packet.d.read_state.entries
