@@ -78,6 +78,18 @@ const REACTION_RESOURCE_SIZE_TIMEOUT_MS = 5_000
 /** How long a resolved reaction asset size/version stays authoritative. */
 const REACTION_RESOURCE_META_TTL_MS = 10 * 60_000
 const STICKER_ASSET_META_TTL_MS = 10 * 60_000
+const ASSET_METADATA_CACHE_LIMIT = 1_024
+
+function cacheAssetMetadata<T>(cache: Map<string, T>, key: string, value: T): void {
+  // Metadata is reconstructible and time limited; avoid retaining every face
+  // ever observed in a long-running account. Rewrites refresh recency.
+  cache.delete(key)
+  cache.set(key, value)
+  if (cache.size > ASSET_METADATA_CACHE_LIMIT) {
+    const oldest = cache.keys().next().value
+    if (oldest !== undefined) cache.delete(oldest)
+  }
+}
 // qlogo avatar URLs are unsigned, so the TTL only bounds how long a consumer
 // keeps a picture the user may since have changed.
 const AVATAR_DIRECT_URL_TTL_MS = 10 * 60_000
@@ -1831,7 +1843,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     resource: IMReactionResource,
   ): Promise<ResolvedReactionResourceMeta | undefined> {
     const cached = this.reactionResourceMeta.get(reactionKey)
-    if (cached && Date.now() - cached.resolvedAt <= REACTION_RESOURCE_META_TTL_MS) return cached
+    if (cached && Date.now() - cached.resolvedAt <= REACTION_RESOURCE_META_TTL_MS) {
+      cacheAssetMetadata(this.reactionResourceMeta, reactionKey, cached)
+      return cached
+    }
     // Message hydration and the catalog warmup may ask for the same face at the
     // same time; share one lookup instead of querying the bridge twice.
     const pending = this.reactionResourceMetaPending.get(reactionKey)
@@ -1862,7 +1877,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           source: meta.source === 'path' ? 'path' : 'bundle',
           resolvedAt: Date.now(),
         }
-        this.reactionResourceMeta.set(reactionKey, entry)
+        cacheAssetMetadata(this.reactionResourceMeta, reactionKey, entry)
         return entry
       }
     } catch {
@@ -1872,7 +1887,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     const measured = await this.measureReactionResourceSize(session, resource)
     if (!measured) return undefined
     const entry: ResolvedReactionResourceMeta = { size: measured, resolvedAt: Date.now() }
-    this.reactionResourceMeta.set(reactionKey, entry)
+    cacheAssetMetadata(this.reactionResourceMeta, reactionKey, entry)
     return entry
   }
 
@@ -1955,7 +1970,10 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
     sticker: IMSticker,
   ): Promise<ResolvedStickerAssetMeta | undefined> {
     const cached = this.stickerAssetMeta.get(stickerId)
-    if (cached && Date.now() - cached.resolvedAt <= STICKER_ASSET_META_TTL_MS) return cached
+    if (cached && Date.now() - cached.resolvedAt <= STICKER_ASSET_META_TTL_MS) {
+      cacheAssetMetadata(this.stickerAssetMeta, stickerId, cached)
+      return cached
+    }
     // One message can repeat the same face; share a single lookup per sticker.
     const pending = this.stickerAssetMetaPending.get(stickerId)
     if (pending) return pending
@@ -1988,7 +2006,7 @@ export class QQNTPlatform implements IMPlatform<QQMediaLocator> {
           source: meta.source === 'path' ? 'path' : 'bundle',
           resolvedAt: Date.now(),
         }
-        this.stickerAssetMeta.set(sticker.stickerId, entry)
+        cacheAssetMetadata(this.stickerAssetMeta, sticker.stickerId, entry)
         return entry
       }
     } catch {

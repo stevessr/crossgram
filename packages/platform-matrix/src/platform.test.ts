@@ -346,6 +346,83 @@ describe('MatrixPlatform', () => {
     })
   })
 
+  it('keeps joined-member totals incrementally without scanning all room state on message projection', () => {
+    const platform = createPlatform(routeFetch(() => { throw new Error('unexpected request') }), {
+      userId: '@me:example.org',
+    })
+    const room = '!large:example.org'
+    const internal = platform as any
+    const memberEvents = Array.from({ length: 1_205 }, (_, index) =>
+      event('m.room.member', { membership: 'join', displayname: `User ${index}` }, {
+        stateKey: `@user-${index}:example.org`,
+      }))
+    internal.refreshJoinedRoomState({ [room]: { state: { events: memberEvents } } }, true)
+    expect(internal.updateConversation(room).metadata.participantsCount).toBe(1_205)
+    // A repeated state event must not inflate counts.
+    internal.ingestState(room, [
+      memberEvents[12],
+      event('m.room.member', { membership: 'leave' }, { stateKey: '@user-13:example.org' }),
+      event('m.room.member', { membership: 'join' }, { stateKey: '@extra:example.org' }),
+    ])
+    const original = internal.roomState.get(room)
+    const values = original.values.bind(original)
+    original.values = () => { throw new Error('unnecessary full member scan') }
+    expect(internal.updateConversation(room).metadata.participantsCount).toBe(1_205)
+    original.values = values
+    internal.directRoomIds.add(room)
+    expect(internal.updateConversation(room).kind).toBe('direct')
+    expect(internal.updateConversation(room).title).toBe('User 0')
+  })
+
+  it('avoids rewriting every other joined room on message-only syncs and updates direct room mappings', async () => {
+    const platform = createPlatform(routeFetch(() => { throw new Error('unexpected request') }), {
+      userId: '@me:example.org',
+    })
+    const internal = platform as any
+    const rooms = Object.fromEntries(Array.from({ length: 120 }, (_, index) =>
+      [`!room-${index}:example.org`, { state: { events: [
+        event('m.room.create', {}, { stateKey: '' }),
+      ] } }]))
+    internal.refreshJoinedRoomState(rooms, true)
+    for (const roomId of Object.keys(rooms)) internal.updateConversation(roomId)
+    const untouched = internal.conversations.get('!room-119:example.org')
+    await internal.dispatchSync({
+      next_batch: 'next',
+      rooms: { join: { '!room-0:example.org': { timeline: { events: [] } } } },
+    }, '@me:example.org', vi.fn())
+    expect(internal.conversations.get('!room-119:example.org')).toBe(untouched)
+    await internal.dispatchSync({
+      next_batch: 'next-2',
+      account_data: { events: [{ type: 'm.direct', content: {
+        '@friend:example.org': ['!room-119:example.org'],
+      } }] },
+    }, '@me:example.org', vi.fn())
+    expect(internal.conversations.get('!room-119:example.org')).not.toBe(untouched)
+    expect(internal.conversations.get('!room-119:example.org').kind).toBe('direct')
+  })
+
+  it('finds a single member beyond the first 1,000 without mapping/sorting every member', async () => {
+    const room = '!large:example.org'
+    const members = Array.from({ length: 1_205 }, (_, index) =>
+      event('m.room.member', { membership: 'join', displayname: `Member ${index}` }, {
+        stateKey: `@user-${index}:example.org`,
+      }))
+    const fetch = vi.fn(routeFetch((url) => {
+      if (url.pathname.endsWith('/members')) return json({ chunk: members })
+      throw new Error(`unexpected request: ${url}`)
+    }))
+    const platform = createPlatform(fetch, { userId: '@me:example.org' })
+    const member = await platform.getConversationMember(session, { id: room }, '@user-1204:example.org')
+    expect(member).toMatchObject({ user: { id: '@user-1204:example.org', firstName: 'Member 1204' } })
+    expect(await platform.getConversationMember(session, { id: room }, '@not-present:example.org')).toBeNull()
+    const internal = platform as any
+    internal.ingestState(room, [members[1]])
+    const requests = fetch.mock.calls.length
+    expect(await platform.getConversationMember(session, { id: room }, '@user-1:example.org'))
+      .toMatchObject({ user: { id: '@user-1:example.org' } })
+    expect(fetch.mock.calls.length).toBe(requests)
+  })
+
   it('maps joined rooms beneath nested Matrix Spaces with stable pagination', async () => {
     const space = '!space:example.org'
     const nested = '!nested:example.org'
