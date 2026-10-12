@@ -461,34 +461,22 @@ describe('MatrixPlatform', () => {
     })
     const platform = createPlatform(fetch, { userId: '@me:example.org' })
 
-    expect(platform.capabilities.conversations.subchannels).toBe(true)
+    expect(platform.capabilities.conversations.subchannels).toBe(false)
     const roots = await platform.getDialogs(session)
-    expect(roots.total).toBe(2)
-    expect(roots.dialogs.map((dialog) => dialog.conversation.id)).toEqual([space, standalone])
-    expect(roots.dialogs[0]?.conversation).toMatchObject({
-      kind: 'channel', spaceId: space,
-      metadata: { matrixSpace: true, hasSubchannels: true },
+    expect(roots.total).toBe(3)
+    expect(roots.dialogs.map((dialog) => dialog.conversation.id))
+      .toEqual([general, leaf, standalone])
+    expect(roots.dialogs[0]).toMatchObject({
+      unreadCount: 2, conversation: { id: general, kind: 'group', title: 'General' },
     })
-
-    const first = await platform.getSubdialogs(session, { id: space }, { limit: 1 })
-    expect(first).toMatchObject({ total: 2, nextCursor: '1' })
-    expect(first.dialogs[0]).toMatchObject({
-      unreadCount: 2, conversation: {
-        id: general, kind: 'channel', parentId: space, spaceId: space,
-      },
-    })
-    const second = await platform.getSubdialogs(session, { id: space }, { afterId: general, limit: 10 })
-    expect(second.dialogs.map((dialog) => dialog.conversation.id)).toEqual([nested])
-    expect(second.dialogs[0]?.conversation.metadata).toMatchObject({
-      matrixSpace: true, hasSubchannels: true,
-    })
-    const nestedPage = await platform.getSubdialogs(session, { id: nested })
-    expect(nestedPage.dialogs[0]?.conversation).toMatchObject({
-      id: leaf, kind: 'channel', parentId: nested, spaceId: space,
-    })
-    expect((await platform.getSubdialogs(session, { id: general })).total).toBe(0)
+    expect(roots.dialogs[0]!.conversation.parentId).toBeUndefined()
+    expect(await platform.getChatFolders(session)).toEqual([
+      { id: nested, title: 'Nested', conversationIds: [leaf] },
+      { id: space, title: 'Workspace', conversationIds: [general, leaf] },
+    ])
+    await expect(platform.getConversation(session, space)).resolves.toBeNull()
     await expect(platform.getConversation(session, leaf)).resolves.toMatchObject({
-      id: leaf, kind: 'channel', parentId: nested, spaceId: space,
+      id: leaf, kind: 'group', parentId: undefined,
     })
     await expect(platform.getConversation(session, '!not-joined:example.org')).resolves.toBeNull()
   })
