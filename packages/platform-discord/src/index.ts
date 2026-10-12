@@ -71,6 +71,16 @@ interface DiscordDialogRoot {
 const COMMON_REACTIONS = ['👍', '👎', '❤️', '😂', '😮', '😢', '😡', '🔥', '🎉', '👏', '🤔'] as const
 const MAX_PAGE_SIZE = 100
 const DIALOG_MAPPING_CONCURRENCY = 8
+const GUILD_PROJECTION_TTL_MS = 2_000
+
+interface GuildProjection {
+  root?: DiscordGuildChannel
+  hasSubchannels: boolean
+  expiresAt: number
+  channelCount: number
+  systemChannelId: string | null
+  viewerId: string
+}
 
 export interface DiscordPlatformDependencies {
   client?: Client
@@ -117,6 +127,8 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
   private readonly handlers = new Map<string, (event: IMEvent<DiscordMediaLocator>) => void | Promise<void>>()
   private readonly originNonces = new Set<string>()
   private readonly dialogLoads = new Map<string, Promise<IMDialogPage<DiscordMediaLocator>>>()
+  // Weak keys avoid retaining a Discord guild after discord.js evicts it.
+  private readonly guildProjections = new WeakMap<Guild, GuildProjection>()
   private loginPromise?: Promise<void>
   private lastKnownUser?: User
   private stopped = false
@@ -219,10 +231,18 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
         context, timestamp: Math.trunc(Date.now() / 1_000),
       })
     }
+    const invalidateGuild = (channel: AnyChannel) => {
+      if (isSupportedChannel(channel) && isGuildChannel(channel)) {
+        this.guildProjections.delete(channel.guild)
+      }
+    }
     const onConversation = (channel: AnyChannel) => {
+      invalidateGuild(channel)
       if (!isSupportedChannel(channel) || !this.isVisible(channel)) return
       this.dispatch(handler, { type: 'conversation', conversation: this.mapConversation(channel) })
     }
+    const onChannelDelete = (channel: AnyChannel) => invalidateGuild(channel)
+    const onThreadDelete = (channel: ThreadChannel) => invalidateGuild(channel)
     const onReactionAdd = onReaction('add')
     const onReactionRemove = onReaction('remove')
     const onChannelUpdate = (_old: AnyChannel, updated: AnyChannel) => onConversation(updated)
@@ -238,6 +258,8 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     this.client.on('channelUpdate', onChannelUpdate)
     this.client.on('threadCreate', onConversation)
     this.client.on('threadUpdate', onThreadUpdate)
+    this.client.on('channelDelete', onChannelDelete)
+    this.client.on('threadDelete', onThreadDelete)
 
     return () => {
       this.handlers.delete(session.platformSessionId)
@@ -251,6 +273,8 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
       this.client.off('channelUpdate', onChannelUpdate)
       this.client.off('threadCreate', onConversation)
       this.client.off('threadUpdate', onThreadUpdate)
+      this.client.off('channelDelete', onChannelDelete)
+      this.client.off('threadDelete', onThreadDelete)
     }
   }
 
@@ -576,6 +600,9 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     if (this.stopped) return
     this.stopped = true
     this.handlers.clear()
+    this.dialogLoads.clear()
+    this.readStates.clear()
+    this.originNonces.clear()
     this.client.destroy()
     void this.proxyDispatcher?.close()
   }
@@ -649,7 +676,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     const guildId = parseGuildConversationId(id)
     if (!guildId) return
     const guild = this.client.guilds.cache.get(guildId)
-    return guild ? selectGuildRoot(visibleGuildChannels(guild, this.selfUser())) : undefined
+    return guild ? this.guildProjection(guild).root : undefined
   }
 
   private async requireChannel(id: string): Promise<DiscordChannel> {
@@ -717,6 +744,30 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     }
   }
 
+  private guildProjection(guild: Guild): GuildProjection {
+    const now = Date.now()
+    const viewer = this.selfUser()
+    const cached = this.guildProjections.get(guild)
+    if (cached && now < cached.expiresAt
+      && cached.channelCount === guild.channels.cache.size
+      && cached.systemChannelId === guild.systemChannelId
+      && cached.viewerId === viewer.id
+      && (!cached.root || isVisibleChannel(cached.root, viewer))) return cached
+    const channels = visibleGuildChannels(guild, viewer)
+    const root = selectGuildRoot(channels)
+    const projection: GuildProjection = {
+      root,
+      hasSubchannels: channels.some((candidate) =>
+        !candidate.isThread() && candidate.id !== root?.id),
+      channelCount: guild.channels.cache.size,
+      systemChannelId: guild.systemChannelId,
+      viewerId: viewer.id,
+      expiresAt: now + GUILD_PROJECTION_TTL_MS,
+    }
+    this.guildProjections.set(guild, projection)
+    return projection
+  }
+
   private mapConversation(channel: DiscordChannel): IMConversation<DiscordMediaLocator> {
     if (channel.type === 'DM') {
       return {
@@ -734,7 +785,8 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
       }
     }
     const guild = channel.guild
-    const root = selectGuildRoot(visibleGuildChannels(guild, this.selfUser()))
+    const projection = this.guildProjection(guild)
+    const root = projection.root
     const rootConversation = root?.id === channel.id
     const icon = guild.iconURL({ format: 'png', size: 256 })
     return {
@@ -748,7 +800,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
         ...(rootConversation ? {
           discordGuildRoot: true, discordRootChannelId: channel.id,
           discordRootChannelName: channel.name, participantsCount: guild.memberCount,
-          hasSubchannels: visibleGuildDirectoryChannels(guild, this.selfUser()).some((item) => item.id !== channel.id),
+          hasSubchannels: projection.hasSubchannels,
         } : {}),
         ...(channel.isThread() && channel.memberCount !== null
           ? { participantsCount: channel.memberCount }

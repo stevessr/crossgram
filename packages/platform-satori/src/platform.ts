@@ -11,6 +11,8 @@ import {
   toSatoriElements, type SatoriMediaLocator,
 } from './convert.js'
 
+const MAX_REMEMBERED_CONVERSATIONS = 4_096
+
 interface DialogCursor {
   guilds: Universal.Guild[]
   guildNext?: string
@@ -80,11 +82,40 @@ export class SatoriPlatform implements IMPlatform<SatoriMediaLocator> {
     handler: (event: IMEvent<SatoriMediaLocator>) => void | Promise<void>,
   ): Promise<Unsubscribe> {
     const sid = this.requireBot().sid
-    let queue = Promise.resolve()
-    const deliver = (event: IMEvent<SatoriMediaLocator>) => {
-      queue = queue.then(() => handler(event)).catch((error) => {
-        this.ctx.logger('platform-satori').warn('event delivery failed for %s: %o', sid, error)
+    // One drain promise for the subscription, not a growing promise chain.
+    const pending: Array<IMEvent<SatoriMediaLocator> | undefined> = []
+    let head = 0
+    let draining: Promise<void> | undefined
+    let closed = false
+    const drain = async () => {
+      while (head < pending.length) {
+        const event = pending[head]!
+        try {
+          await handler(event)
+        } catch (error) {
+          this.ctx.logger('platform-satori').warn('event delivery failed for %s: %o', sid, error)
+        }
+        pending[head++] = undefined
+        if (head === pending.length) {
+          pending.length = 0
+          head = 0
+        } else if (head >= 256 && head * 2 >= pending.length) {
+          pending.splice(0, head)
+          head = 0
+        }
+      }
+    }
+    const schedule = () => {
+      if (draining) return
+      draining = Promise.resolve().then(drain).finally(() => {
+        draining = undefined
+        if (pending.length > head) schedule()
       })
+    }
+    const deliver = (event: IMEvent<SatoriMediaLocator>) => {
+      if (closed) return
+      pending.push(event)
+      schedule()
     }
     const onMessage = (session: Session) => {
       if (session.bot.sid !== sid || !session.event.message || !session.event.channel) return
@@ -125,8 +156,11 @@ export class SatoriPlatform implements IMPlatform<SatoriMediaLocator> {
       this.ctx.on('message-deleted', onDeleted),
     ]
     return async () => {
+      closed = true
       for (const dispose of disposers.reverse()) dispose()
-      await queue
+      // Satori retains its previous behavior: drain every event accepted
+      // before unsubscription, including any in-flight handler.
+      await draining
     }
   }
 
@@ -328,7 +362,14 @@ export class SatoriPlatform implements IMPlatform<SatoriMediaLocator> {
   }
 
   private remember(conversation: IMConversation<SatoriMediaLocator>): IMConversation<SatoriMediaLocator> {
+    // A busy gateway may encounter millions of channels over its lifetime.
+    // Only recently used conversation metadata needs to be retained locally.
+    this.conversations.delete(conversation.id)
     this.conversations.set(conversation.id, conversation)
+    if (this.conversations.size > MAX_REMEMBERED_CONVERSATIONS) {
+      const oldest = this.conversations.keys().next().value
+      if (oldest !== undefined) this.conversations.delete(oldest)
+    }
     return conversation
   }
 }

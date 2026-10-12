@@ -125,29 +125,57 @@ export class TelegramPlatform implements IMPlatform {
 
   async subscribe(_session: PlatformSession, handler: (event: IMEvent) => void | Promise<void>) {
     let closed = false
-    let queue = Promise.resolve()
+    // Keep one consumer promise rather than one promise/closure per queued
+    // update. A burst of updates holds only event references until delivered.
+    type QueuedUpdate = { message: Message, edit: boolean }
+    const pending: Array<QueuedUpdate | undefined> = []
+    let head = 0
+    let draining: Promise<void> | undefined
     let cancelDelay: (() => void) | undefined
-    const enqueue = (message: Message, edit: boolean) => {
-      if (closed) return
-      queue = queue.then(async () => {
+    const drain = async () => {
+      while (!closed && head < pending.length) {
+        const update = pending[head]!
         while (!closed) {
           try {
-            const mapped = mapMessage(message)
-            const conversation = mapConversation(message.chat)
-            await handler(edit ? {
+            const mapped = mapMessage(update.message)
+            const conversation = mapConversation(update.message.chat)
+            await handler(update.edit ? {
               type: 'message-edit', conversation, message: mapped,
-              eventId: `${conversation.id}:${message.id}:${message.editDate?.getTime() ?? message.date.getTime()}:${createHash('sha256').update(JSON.stringify(mapped.content)).digest('hex')}`,
+              eventId: `${conversation.id}:${update.message.id}:${update.message.editDate?.getTime() ?? update.message.date.getTime()}:${createHash('sha256').update(JSON.stringify(mapped.content)).digest('hex')}`,
             } : { type: 'message', conversation, message: mapped })
-            return
+            break
           } catch (error) {
             this.warn(error)
             await new Promise<void>((resolve) => {
               const timer = setTimeout(resolve, 1000)
               cancelDelay = () => { clearTimeout(timer); resolve() }
             })
+            cancelDelay = undefined
           }
         }
+        if (closed) return
+        // Release large upstream Message objects as soon as they are handled.
+        pending[head++] = undefined
+        if (head === pending.length) {
+          pending.length = 0
+          head = 0
+        } else if (head >= 256 && head * 2 >= pending.length) {
+          pending.splice(0, head)
+          head = 0
+        }
+      }
+    }
+    const schedule = () => {
+      if (draining) return
+      draining = Promise.resolve().then(drain).finally(() => {
+        draining = undefined
+        if (!closed && head < pending.length) schedule()
       })
+    }
+    const enqueue = (message: Message, edit: boolean) => {
+      if (closed) return
+      pending.push({ message, edit })
+      schedule()
     }
     const onNew = (message: Message) => enqueue(message, false)
     const onEdit = (message: Message) => enqueue(message, true)
@@ -159,7 +187,10 @@ export class TelegramPlatform implements IMPlatform {
       this.client.onNewMessage.remove(onNew)
       this.client.onEditMessage.remove(onEdit)
       this.subscriptions.delete(unsubscribe)
-      await queue
+      // Pending events were not delivered before unsubscribe in the old
+      // promise chain either; discard them without retaining every closure.
+      pending.length = 0
+      await draining
     }
     this.subscriptions.add(unsubscribe)
     try { await this.client.startUpdatesLoop() } catch (error) { await unsubscribe(); throw error }
