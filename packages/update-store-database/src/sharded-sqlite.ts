@@ -213,6 +213,16 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
     mkdirSync(dirname(path), { recursive: true })
     const db = new DatabaseSync(path)
     try {
+      // Never attach account journal tables to a Cordis/main database or to
+      // someone else's SQLite file. That would defeat isolation and may cause
+      // an accidental schema change when an account path is misconfigured.
+      const metadata = db.prepare(
+        "SELECT name FROM sqlite_master WHERE type='table'"
+          + " AND name NOT LIKE 'sqlite_%' ORDER BY name",
+      ).all() as Array<{ name: string }>
+      if (metadata.length && !metadata.some((table) => table.name === 'shard_metadata')) {
+        throw new Error('SQLite account shard path is already used by a non-shard database: ' + path)
+      }
       const timeout = Math.max(0, Math.min(60_000, this._config.busyTimeoutMs ?? 5_000))
       db.exec('PRAGMA busy_timeout = ' + timeout)
       db.exec('PRAGMA journal_mode = WAL')
