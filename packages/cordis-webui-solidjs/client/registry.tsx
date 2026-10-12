@@ -1,4 +1,5 @@
 /** @jsxImportSource solid-js */
+import { t } from './i18n.js'
 import {
   createMemo,
   ErrorBoundary,
@@ -26,10 +27,10 @@ export interface RegisteredPage extends PageMeta {
 }
 const known: Record<string, PageMeta[]> = {
   loader: [
-    { path: '/plugins', title: 'Plugins', icon: 'plugins', group: 'Manage' },
+    { path: '/plugins', title: t("Plugins"), icon: 'plugins', group: t("Manage") },
   ],
   database: [
-    { path: '/database', title: 'Database', icon: 'database', group: 'Manage' },
+    { path: '/database', title: t("Database"), icon: 'database', group: t("Manage") },
   ],
   market: [
     {
@@ -45,7 +46,7 @@ const known: Record<string, PageMeta[]> = {
       group: 'Manage',
     },
   ],
-  logs: [{ path: '/logs', title: 'Logs', icon: 'logs', group: 'Observe' }],
+  logs: [{ path: '/logs', title: t("Logs"), icon: 'logs', group: t("Observe") }],
   notifications: [
     {
       path: '/notifications',
@@ -83,10 +84,10 @@ const known: Record<string, PageMeta[]> = {
     },
   ],
   insight: [
-    { path: '/graph', title: 'Service map', icon: 'network', group: 'Observe' },
+    { path: '/graph', title: t("Service map"), icon: 'network', group: t("Observe") },
   ],
   sso: [
-    { path: '/sso', title: 'Your account', icon: 'account', group: 'Accounts' },
+    { path: '/sso', title: t("Your account"), icon: 'account', group: t("Accounts") },
   ],
 }
 const builtins: Record<string, Component<PageProps>> = {
@@ -244,27 +245,23 @@ export function PageOutlet(props: { path: string }) {
         <ErrorBoundary
           fallback={(error, reset) => (
             <div class="panel empty-state" role="alert">
-              <h2>This page could not load</h2>
+              <h2>{t("This page could not load")}</h2>
               <p>{String(error)}</p>
-              <button class="button tonal" onClick={reset}>
-                Try again
-              </button>
+              <button class="button tonal" onClick={reset}>{t("Try again")}</button>
             </div>
           )}
         >
           <Suspense
             fallback={
-              <div class="loading" role="status">
-                Opening your workspace…
-              </div>
+              <div class="loading" role="status">{t("Opening your workspace…")}</div>
             }
           >
             <Show
               when={component()}
               fallback={
                 <section class="panel empty-state">
-                  <h1>Page not available</h1>
-                  <p>This extension has not registered a Solid page.</p>
+                  <h1>{t("Page not available")}</h1>
+                  <p>{t("This extension has not registered a Solid page.")}</p>
                 </section>
               }
             >

@@ -5,6 +5,7 @@ import { ConnectionContext } from './sdk.js'
 import { applyAppearance, readAppearance } from './appearance.js'
 import { consumeOAuthResult } from './session.js'
 import { App } from './shell.js'
+import { language, setLanguage } from './i18n.js'
 import './theme.css'
 
 declare global {
@@ -15,6 +16,7 @@ declare global {
 const oauthError = consumeOAuthResult(window.SOLID_WEBUI_CONFIG.uiPath)
 const appearance = readAppearance()
 applyAppearance(appearance.appearance, appearance.palette)
+setLanguage(language())
 const connection = new Connection(window.SOLID_WEBUI_CONFIG)
 
 render(

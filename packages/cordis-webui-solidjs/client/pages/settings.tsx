@@ -1,4 +1,5 @@
 /** @jsxImportSource solid-js */
+import { t } from '../i18n.js'
 import { createSignal, For } from 'solid-js'
 import {
   applyAppearance,
@@ -7,6 +8,7 @@ import {
   type Palette,
 } from '../appearance.js'
 import { PageHeader } from '../components.js'
+import { language, setLanguage, type Language } from '../i18n.js'
 export default function SettingsPage() {
   const initial = readAppearance()
   const [appearance, setAppearance] = createSignal(initial.appearance),
@@ -19,27 +21,38 @@ export default function SettingsPage() {
   return (
     <>
       <PageHeader
-        title="Make yourself at home"
-        description="A little more you. A little less noise."
+        title={t("Make yourself at home")}
+        description={t("A little more you. A little less noise.")}
       />
       <section class="panel stack settings-panel">
-        <h2>Appearance</h2>
+        <h2>{t("Appearance")}</h2>
         <label class="field">
-          <span>Color mode</span>
+          <span>{t("Color mode")}</span>
           <select
-            aria-label="Color mode"
+            aria-label={t("Color mode")}
             value={appearance()}
             onChange={(event) =>
               update(event.currentTarget.value as Appearance, palette())
             }
           >
-            <option value="system">Follow your device</option>
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
+            <option value="system">{t("Follow your device")}</option>
+            <option value="light">{t("Light")}</option>
+            <option value="dark">{t("Dark")}</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>{t('Interface language')}</span>
+          <select
+            aria-label={t('Interface language')}
+            value={language()}
+            onChange={(event) => setLanguage(event.currentTarget.value as Language)}
+          >
+            <option value="en-US">English</option>
+            <option value="zh-CN">简体中文</option>
           </select>
         </label>
         <fieldset class="palette-options">
-          <legend>Workspace color</legend>
+          <legend>{t("Workspace color")}</legend>
           <For each={['sage', 'ocean', 'rose'] as const}>
             {(color) => (
               <label>
@@ -51,15 +64,12 @@ export default function SettingsPage() {
                   onChange={() => update(appearance(), color)}
                 />
                 <span class={'color-sample ' + color} />
-                <span>{color}</span>
+                <span>{t(color)}</span>
               </label>
             )}
           </For>
         </fieldset>
-        <p class="muted">
-          Saved only on this device. Reduced-motion settings are respected
-          automatically; no external fonts or analytics are loaded.
-        </p>
+        <p class="muted">{t("Saved only on this device. Reduced-motion settings are respected automatically; no external fonts or analytics are loaded.")}</p>
       </section>
     </>
   )
