@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import { gzipSync, gunzipSync } from 'node:zlib'
+import { decodeFrame, encodeFrame, PROTO_TRANSPORT, supportsProtoType, unpackFrame } from './wire.js'
 import type WebUI from './index.js'
 
 const SERVER_PING_INTERVAL = 25_000
@@ -12,7 +14,7 @@ import {
 export interface Socket {
   readonly bufferedAmount: number
   readonly readyState: number
-  send(data: string): void
+  send(data: string | Uint8Array): void
   close(code?: number, reason?: string): void
   terminate?(): void
   /** Native ws control frames keep reverse proxies alive even for suspended tabs. */
@@ -22,9 +24,15 @@ export interface Socket {
   addEventListener(type: string, listener: (event: any) => void): void
   removeEventListener(type: string, listener: (event: any) => void): void
 }
+// Low-CPU compression for state snapshots and large deltas. Small frames do
+// not pay a gzip penalty, and compression is skipped unless it saves >= 12.5%.
+export function fastGzip(data: Uint8Array): Uint8Array {
+  return gzipSync(data, { level: 1 })
+}
 export class Client {
   readonly id = randomUUID()
   readonly subscriptions = new Set<string>()
+  protobuf = false
   private active = true
   private inFlight = new Set<number>()
   private pingTimer?: ReturnType<typeof setInterval>
@@ -41,6 +49,7 @@ export class Client {
       body: {
         version: webui.version,
         buildId: webui.buildId,
+        transport: PROTO_TRANSPORT,
         reset: true,
         entries: Object.fromEntries(
           Object.values(webui.entries).map((entry) => [
@@ -85,11 +94,36 @@ export class Client {
   get ctx() {
     return this.webui.ctx
   }
-  send(payload: unknown): boolean {
+  send(payload: { type: string; body?: unknown }): boolean {
     if (!this.active || this.socket.readyState !== 1) return false
-    return this.sendRaw(JSON.stringify(payload))
+    if (this.protobuf && supportsProtoType(payload.type)) {
+      try {
+        return this.sendData(encodeFrame(payload.type, payload.body, fastGzip))
+      } catch {
+        this.dispose()
+        this.socket.close(1011, 'WebUI serialization failed')
+        return false
+      }
+    }
+    return this.sendData(JSON.stringify(payload))
   }
-  sendRaw(payload: string): boolean {
+  sendRaw(payload: string, preparedProto?: Uint8Array): boolean {
+    if (!this.active || this.socket.readyState !== 1) return false
+    if (this.protobuf) {
+      try {
+        if (preparedProto) return this.sendData(preparedProto)
+        const message = JSON.parse(payload)
+        if (supportsProtoType(message.type))
+          return this.sendData(encodeFrame(message.type, message.body, fastGzip))
+      } catch {
+        this.dispose()
+        this.socket.close(1011, 'WebUI serialization failed')
+        return false
+      }
+    }
+    return this.sendData(payload)
+  }
+  private sendData(payload: string | Uint8Array): boolean {
     if (!this.active || this.socket.readyState !== 1) return false
     if (
       !Number.isFinite(this.socket.bufferedAmount) ||
@@ -122,18 +156,40 @@ export class Client {
     delete this.webui.clients[this.id]
     this.webui.connectionChanged(this)
   }
-  receive = async (event: { data: { toString(): string } }) => {
+  receive = async (event: { data: string | Uint8Array | ArrayBuffer }) => {
     if (!this.active) return
     try {
-      const text = event.data.toString()
-      if (Buffer.byteLength(text) > MAX_REQUEST_BYTES) {
+      const raw = event.data
+      if ((typeof raw === 'string' ? Buffer.byteLength(raw) : raw.byteLength) > MAX_REQUEST_BYTES) {
         this.socket.close(1009, 'Request too large')
         return
       }
-      const message = JSON.parse(text)
+      let message: { type: string; body?: any }
+      if (typeof raw === 'string') {
+        message = JSON.parse(raw)
+      } else {
+        const frame = decodeFrame(raw)
+        const payload = frame.gzip
+          ? gunzipSync(frame.payload, { maxOutputLength: MAX_REQUEST_BYTES })
+          : frame.payload
+        if (payload.byteLength > MAX_REQUEST_BYTES) {
+          this.socket.close(1009, 'Request too large')
+          return
+        }
+        message = unpackFrame(frame, payload)
+      }
       if (!message || typeof message !== 'object')
         throw new Error('Expected message')
       const { type, body } = message
+      if (type === 'transport:upgrade') {
+        // Send JSON acknowledgement before changing the encoding to make the
+        // transition safe for old browsers and messages already in flight.
+        if (!this.protobuf && body?.version === 1) {
+          this.send({ type: 'transport:ready', body: { version: 1 } })
+          this.protobuf = true
+        }
+        return
+      }
       if (type === 'ping') {
         this.send({ type: 'pong' })
         return

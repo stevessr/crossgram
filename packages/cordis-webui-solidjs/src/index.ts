@@ -11,6 +11,8 @@ import { sharedModules } from './imports.js'
 import { Client, type Socket } from './client.js'
 import { Entry, safeAsset } from './entry.js'
 import { PROTOCOL_VERSION, type EntryFiles } from './protocol.js'
+import { encodeFrame, supportsProtoType } from './wire.js'
+import { fastGzip } from './client.js'
 
 declare module 'cordis' {
   interface Context {
@@ -291,7 +293,16 @@ export default class SolidWebUI extends Service {
     )
     if (!clients.length) return
     const payload = JSON.stringify({ type, body })
-    for (const client of clients) client.sendRaw(payload)
+    // Encode and compress a broadcast only once, regardless of subscriber count.
+    let proto: Uint8Array | undefined
+    if (supportsProtoType(type) && clients.some(client => client.protobuf)) {
+      try {
+        proto = encodeFrame(type, body, fastGzip)
+      } catch (error) {
+        this.ctx.logger.warn('WebUI protobuf broadcast failed: %s', error)
+      }
+    }
+    for (const client of clients) client.sendRaw(payload, proto)
   }
 }
 export function normalizePath(value: string, allowRoot = false): string {
