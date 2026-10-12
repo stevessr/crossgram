@@ -1735,13 +1735,13 @@ describe('QQNTPlatform mapping', () => {
     }))
     for (let index = 0; index < 1_024; index++) {
       await internal.resolveReactionResourceMeta(session, `reaction-${index}`, {})
-      await internal.resolveStickerAssetMeta(`sticker-${index}`, {})
+      await internal.resolveStickerAssetMeta(`sticker-${index}`, { stickerId: `sticker-${index}` })
     }
     // A cache hit moves the entry to the newest end rather than evicting it.
     await internal.resolveReactionResourceMeta(session, 'reaction-0', {})
-    await internal.resolveStickerAssetMeta('sticker-0', {})
+    await internal.resolveStickerAssetMeta('sticker-0', { stickerId: 'sticker-0' })
     await internal.resolveReactionResourceMeta(session, 'reaction-new', {})
-    await internal.resolveStickerAssetMeta('sticker-new', {})
+    await internal.resolveStickerAssetMeta('sticker-new', { stickerId: 'sticker-new' })
     expect(internal.reactionResourceMeta.size).toBe(1_024)
     expect(internal.stickerAssetMeta.size).toBe(1_024)
     expect(internal.reactionResourceMeta.has('reaction-0')).toBe(true)
