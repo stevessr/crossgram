@@ -73,6 +73,7 @@ const COMMON_REACTIONS = ['👍', '👎', '❤️', '😂', '😮', '😢', '�
 const MAX_PAGE_SIZE = 100
 const DIALOG_MAPPING_CONCURRENCY = 8
 const GUILD_PROJECTION_TTL_MS = 2_000
+const CHANNEL_ACCESS_PERMISSIONS = Permissions.FLAGS.VIEW_CHANNEL | Permissions.FLAGS.READ_MESSAGE_HISTORY
 
 interface GuildProjection {
   root?: DiscordGuildChannel
@@ -1279,21 +1280,33 @@ function hasChannelPermissions(
     roles: Array<{ deny: Permissions, allow: Permissions }>
     member?: { deny: Permissions, allow: Permissions }
   }
-  const permissions = new Permissions(base)
-    .remove(overwrites.everyone?.deny ?? 0n)
-    .add(overwrites.everyone?.allow ?? 0n)
-    .remove(overwrites.roles.length ? overwrites.roles.map((role) => role.deny) : 0n)
-    .add(overwrites.roles.length ? overwrites.roles.map((role) => role.allow) : 0n)
-    .remove(overwrites.member?.deny ?? 0n)
-    .add(overwrites.member?.allow ?? 0n)
-  return permissions.has(Permissions.FLAGS.VIEW_CHANNEL)
-    && permissions.has(Permissions.FLAGS.READ_MESSAGE_HISTORY)
+  // Apply Discord's overwrite precedence directly to the bigint bitset. This
+  // avoids allocating temporary Permissions/arrays and resolving two flags
+  // through BitField.has for every channel in a guild projection.
+  let bitfield = base.bitfield
+  bitfield = (bitfield & ~(overwrites.everyone?.deny.bitfield ?? 0n))
+    | (overwrites.everyone?.allow.bitfield ?? 0n)
+  let roleDeny = 0n
+  let roleAllow = 0n
+  for (const role of overwrites.roles) {
+    roleDeny |= role.deny.bitfield
+    roleAllow |= role.allow.bitfield
+  }
+  bitfield = (bitfield & ~roleDeny) | roleAllow
+  bitfield = (bitfield & ~(overwrites.member?.deny.bitfield ?? 0n))
+    | (overwrites.member?.allow.bitfield ?? 0n)
+  return (bitfield & CHANNEL_ACCESS_PERMISSIONS) === CHANNEL_ACCESS_PERMISSIONS
 }
 
 function isVisibleChannel(channel: DiscordChannel, self: User): boolean {
   if (!isGuildChannel(channel)) return true
   const permissions = channel.permissionsFor(self)
-  return Boolean(permissions?.has('VIEW_CHANNEL') && permissions.has('READ_MESSAGE_HISTORY'))
+  if (!permissions) return false
+  const bitfield = (permissions as Permissions).bitfield
+  if (typeof bitfield === 'bigint') {
+    return (bitfield & CHANNEL_ACCESS_PERMISSIONS) === CHANNEL_ACCESS_PERMISSIONS
+  }
+  return permissions.has('VIEW_CHANNEL') && permissions.has('READ_MESSAGE_HISTORY')
 }
 
 function visibleGuildChannels(
