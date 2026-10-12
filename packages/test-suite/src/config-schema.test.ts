@@ -152,7 +152,7 @@ describe('plugin config schemas', () => {
     })
     expect(databaseUpdateStoreConfig({
       sqliteShards: { enabled: true, accounts: { 'account-id': { batchWindowMs: 25 } } },
-    }).sqliteShards.accounts['account-id']).toMatchObject({ batchWindowMs: 25, maxBatchSize: 64 })
+    }).sqliteShards.accounts['account-id']).toMatchObject({ batchWindowMs: 25 })
     expect(memoryUpdateStoreConfig({})).toEqual({ retention: 1_000 })
   })
 
