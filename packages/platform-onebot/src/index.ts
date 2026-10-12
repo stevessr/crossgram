@@ -126,7 +126,7 @@ export class OneBotPlatform implements IMPlatform<OneBotMediaLocator> {
       const key = conversationId(kind, id)
       const title = String(sender.card || sender.nickname || id)
       const conversation = this.conversations.get(key)
-        ?? mapOneBotConversation(kind === 'group' ? { group_id: id } : { user_id: id }, kind, title)
+        ?? mapOneBotConversation(kind === 'group' ? { group_id: id } : { user_id: id }, kind, kind === 'private' ? title : undefined)
       this.remember(conversation)
       const message = mapOneBotMessage(event, conversation, this.selfId)
       if (!message.id || !message.senderId) return
