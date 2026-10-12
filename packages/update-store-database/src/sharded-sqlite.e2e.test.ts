@@ -146,6 +146,31 @@ describe('account-sharded SQLite delivery store', () => {
     expect((await updates.getPending('alpha')).map((row) => row.eventKey)).toEqual(['alpha:1'])
   })
 
+  it('applies page-cache budgets individually to hot and cold adapter accounts', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'crossgram-shards-cache-'))
+    cleanups.push(() => rm(dir, { recursive: true, force: true }))
+    const { updates, source } = await start(join(dir, 'main.db'), {
+      enabled: true, directory: join(dir, 'shards'),
+      cacheSizeKiB: 512, mmapSizeMiB: 0,
+      accounts: {
+        hot: { cacheSizeKiB: 4096, mmapSizeMiB: 8 },
+      },
+    })
+    await Promise.all([
+      updates.create(record('hot:1', 'hot', 1)),
+      updates.create(record('cold:1', 'cold', 1)),
+    ])
+    const backend = (source as unknown as {
+      _backend: { _shards: Map<string, { db: DatabaseSync }> }
+    })._backend
+    expect(backend._shards.get('hot')?.db.prepare('PRAGMA cache_size').get())
+      .toEqual({ cache_size: -4096 })
+    expect(backend._shards.get('cold')?.db.prepare('PRAGMA cache_size').get())
+      .toEqual({ cache_size: -512 })
+    expect(backend._shards.get('cold')?.db.prepare('PRAGMA mmap_size').get())
+      .toEqual({ mmap_size: 0 })
+  })
+
   it('refuses to use the Cordis main database as an account shard', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'crossgram-shards-no-main-'))
     cleanups.push(() => rm(dir, { recursive: true, force: true }))
