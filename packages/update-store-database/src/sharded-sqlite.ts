@@ -267,6 +267,15 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
     }
   }
 
+  /** Avoid creating empty DB files and allocating page caches for read-only accounts. */
+  private readShard(sessionId: string): Shard | undefined {
+    const existing = this._shards.get(sessionId)
+    if (existing) return existing
+    const path = this.pathFor(sessionId)
+    if (!existsSync(path)) return undefined
+    return this.open(sessionId)
+  }
+
   private fromRow(value: unknown): UpdateDelivery {
     const row = value as RawRow
     return {
@@ -431,7 +440,8 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
 
   async getPending(sessionId: string): Promise<UpdateDelivery[]> {
     await this.ready()
-    const shard = this.open(sessionId)
+    const shard = this.readShard(sessionId)
+    if (!shard) return []
     this.flush(shard)
     return shard.db.prepare(
       'SELECT ' + COLUMNS + ' FROM delivery WHERE platform_session_id=? AND published=0'
@@ -442,7 +452,8 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
   async getAfter(sessionId: string, scope: string, pts: number, limit: number): Promise<UpdateDelivery[]> {
     if (limit <= 0) return []
     await this.ready()
-    const shard = this.open(sessionId)
+    const shard = this.readShard(sessionId)
+    if (!shard) return []
     this.flush(shard)
     return shard.db.prepare(
       'SELECT ' + COLUMNS + ' FROM delivery WHERE platform_session_id=? AND scope=? AND pts>?'
@@ -453,7 +464,8 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
   async getSince(sessionId: string, date: number, limit: number): Promise<UpdateDelivery[]> {
     if (limit <= 0) return []
     await this.ready()
-    const shard = this.open(sessionId)
+    const shard = this.readShard(sessionId)
+    if (!shard) return []
     this.flush(shard)
     return shard.db.prepare(
       'SELECT ' + COLUMNS + ' FROM delivery WHERE platform_session_id=? AND date>=?'
@@ -463,7 +475,8 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
 
   async getChangedChannelScopes(sessionId: string, date: number): Promise<ChannelScopeUpdate[]> {
     await this.ready()
-    const shard = this.open(sessionId)
+    const shard = this.readShard(sessionId)
+    if (!shard) return []
     this.flush(shard)
     const rows = shard.db.prepare(
       "SELECT scope, MAX(pts) AS pts, MIN(message_id) AS firstDeliveryId FROM delivery"
@@ -475,7 +488,8 @@ export class ShardedSQLiteUpdateStoreBackend implements UpdateStoreBackend {
 
   async prune(sessionId: string, scope: string): Promise<void> {
     await this.ready()
-    const shard = this.open(sessionId)
+    const shard = this.readShard(sessionId)
+    if (!shard) return
     await this.enqueue(shard, () => {
       if (this._retention <= 0) {
         shard.db.prepare('DELETE FROM delivery WHERE platform_session_id=? AND scope=?').run(sessionId, scope)
