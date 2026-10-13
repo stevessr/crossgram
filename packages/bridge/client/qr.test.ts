@@ -23,6 +23,12 @@ describe('bounded QR decoding lifecycle', () => {
         new AbortController().signal,
       ),
     ).rejects.toThrow('8 MiB')
+    await expect(
+      decodeQrImage(
+        new File(['<svg/>'], 'code.svg', { type: 'image/svg+xml' }),
+        new AbortController().signal,
+      ),
+    ).rejects.toThrow('PNG')
     expect(decode).not.toHaveBeenCalled()
   })
   it('releases rejected bitmaps and aborts before scanning', async () => {
