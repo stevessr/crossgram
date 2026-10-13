@@ -115,6 +115,21 @@ describe('Matrix avatars and room/global stickers over real HTTP and bridge RPC'
     expect(calls).toHaveLength(before)
     expect(await rpc.deleteProfilePhotos({ _: 'photos.deletePhotos', id: [{ _: 'inputPhoto', id: Long.fromNumber(9999), accessHash: Long.ZERO, fileReference: new Uint8Array() }] })).toEqual([])
   })
+  it('preserves unknown avatars but clears explicit tombstones in batch reconciliation', async () => {
+    const avatar = { id: 'mxc://test/batch', kind: 'image' as const, locator: { mxc: 'mxc://test/batch' } }
+    const conversation = { id: '!batch:test', kind: 'group' as const, title: 'Batch' }
+    await store.ingestDialogs(session, [{ conversation: { ...conversation, avatar }, unreadCount: 0 }])
+    await store.ingestDialogs(session, [{ conversation, unreadCount: 0 }])
+    expect((await store.getConversation(session.platformSessionId, conversation.id))?.avatar).toEqual(avatar)
+    await store.ingestDialogs(session, [{ conversation: { ...conversation, avatarRemoved: true }, unreadCount: 0 }])
+    expect((await store.getConversation(session.platformSessionId, conversation.id))?.avatar).toBeUndefined()
+    const user = { id: '@batch:test', firstName: 'Batch' }
+    await store.upsertUsers(session, [{ ...user, avatar }])
+    await store.upsertUsers(session, [user])
+    expect((await store.getUser(session.platformId, user.id))?.avatar).toEqual(avatar)
+    await store.upsertUsers(session, [{ ...user, avatarRemoved: true }])
+    expect((await store.getUser(session.platformId, user.id))?.avatar).toBeNull()
+  })
   it('keeps local packs room-scoped, merges global and personal packs, maps native sticker events and sends without uploading', async () => {
     const provider = new MatrixStickerProvider(platform.client, 'matrix:stickers', 'matrix', id => platform.getStickerSources(id))
     const context = { session, platformKind: 'matrix' }

@@ -152,6 +152,7 @@ function directConversationUser(conversation: IMConversation): IMUser {
     id: conversation.id,
     firstName: conversation.title,
     avatar: conversation.avatar,
+    avatarRemoved: conversation.avatarRemoved,
     username: typeof conversation.metadata?.username === 'string' ? conversation.metadata.username : undefined,
     metadata: conversation.metadata,
   }

@@ -321,7 +321,7 @@ export class MessageStore {
         title: dialog.conversation.title,
         parentPlatformConversationId: dialog.conversation.parentId ?? null,
         spacePlatformId: dialog.conversation.spaceId ?? null,
-        avatar: (dialog.conversation.avatar
+        avatar: (dialog.conversation.avatarRemoved ? null : dialog.conversation.avatar
           ?? existingConversations.get(dialog.conversation.id)?.avatar
           ?? null) as JsonValue | null,
         metadata: conversationMetadata(
