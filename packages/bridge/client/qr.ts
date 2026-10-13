@@ -2,8 +2,9 @@ export async function decodeQrImage(
   file: File,
   signal: AbortSignal,
 ): Promise<string> {
-  if (!file.type.startsWith('image/'))
-    throw new Error('Choose an image containing a Telegram login QR code')
+  // Never render arbitrary SVG/XML or unsupported media supplied by the clipboard.
+  if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp', 'image/avif'].includes(file.type))
+    throw new Error('Choose a PNG, JPEG, WebP, GIF, BMP or AVIF image containing a Telegram login QR code')
   if (file.size > 8 * 1024 * 1024)
     throw new Error('QR images must be smaller than 8 MiB')
   signal.throwIfAborted()
@@ -67,6 +68,7 @@ export async function decodeQrImage(
         context.getImageData(0, 0, canvas.width, canvas.height).data,
         canvas.width,
         canvas.height,
+        { inversionAttempts: 'attemptBoth' },
       )?.data
     }
     signal.throwIfAborted()
