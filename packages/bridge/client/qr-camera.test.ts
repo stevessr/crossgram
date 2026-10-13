@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import jsQR from 'jsqr'
-import { cameraErrorMessage, startQrCamera } from './qr-camera.js'
+import { cameraErrorMessage, screenErrorMessage, startQrCamera, startQrScreen } from './qr-camera.js'
 
 vi.mock('jsqr', () => ({ default: vi.fn() }))
 
@@ -120,6 +120,75 @@ describe('local Telegram camera QR scanning', () => {
     expect(cameraErrorMessage(new DOMException('denied', 'NotAllowedError'))).toContain('权限')
     expect(cameraErrorMessage(new DOMException('missing', 'NotFoundError'))).toContain('未检测')
     expect(cameraErrorMessage(new DOMException('busy', 'NotReadableError'))).toContain('占用')
+  })
+
+  it('shares a selected Telegram window without capturing audio and scans while the page is backgrounded', async () => {
+    let timer: (() => void) | undefined
+    const clear = vi.fn()
+    const open = vi.fn(async () => stream)
+    vi.stubGlobal('navigator', { mediaDevices: { getDisplayMedia: open } })
+    vi.stubGlobal('setInterval', vi.fn((fn: () => void) => { timer = fn; return 5 }))
+    vi.stubGlobal('clearInterval', clear)
+    vi.spyOn(performance, 'now').mockReturnValue(1000)
+    vi.mocked(jsQR).mockReturnValue({ data: 'tg://login?token=sample' } as ReturnType<typeof jsQR>)
+    const onScan = vi.fn(() => true)
+    const video = makeVideo()
+    const stop = await startQrScreen(video, new AbortController().signal, onScan, vi.fn())
+    expect(open).toHaveBeenCalledWith({ video: true, audio: false })
+    expect(video.srcObject).toBe(stream)
+    timer?.()
+    expect(onScan).toHaveBeenCalledWith('tg://login?token=sample')
+    expect(context.drawImage).toHaveBeenCalledWith(video, 0, 0, 1280, 720)
+    expect(track.stop).toHaveBeenCalledOnce()
+    expect(clear).toHaveBeenCalledWith(5)
+    stop()
+    expect(track.stop).toHaveBeenCalledOnce()
+  })
+
+  it('stops when the user ends screen sharing through browser UI', async () => {
+    let ended: (() => void) | undefined
+    const screenTrack = {
+      stop: vi.fn(),
+      addEventListener: vi.fn((_event: string, fn: () => void) => { ended = fn }),
+      removeEventListener: vi.fn(),
+    }
+    const shared = {
+      getVideoTracks: () => [screenTrack],
+      getTracks: () => [screenTrack],
+    } as unknown as MediaStream
+    vi.stubGlobal('navigator', { mediaDevices: { getDisplayMedia: vi.fn(async () => shared) } })
+    vi.stubGlobal('setInterval', vi.fn(() => 5))
+    vi.stubGlobal('clearInterval', vi.fn())
+    const onError = vi.fn()
+    const video = makeVideo()
+    const stop = await startQrScreen(video, new AbortController().signal, vi.fn(() => false), onError)
+    ended?.()
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ message: '屏幕共享已结束。' }))
+    expect(screenTrack.stop).toHaveBeenCalledOnce()
+    expect(video.srcObject).toBeNull()
+    stop()
+    expect(screenTrack.stop).toHaveBeenCalledOnce()
+  })
+
+  it('releases a shared stream if permission resolves after cancellation', async () => {
+    let resolve!: (stream: MediaStream) => void
+    vi.stubGlobal('navigator', {
+      mediaDevices: { getDisplayMedia: () => new Promise<MediaStream>((r) => { resolve = r }) },
+    })
+    const controller = new AbortController()
+    const pending = startQrScreen(makeVideo(), controller.signal, vi.fn(), vi.fn())
+    controller.abort()
+    resolve(stream)
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' })
+    expect(track.stop).toHaveBeenCalledOnce()
+  })
+
+  it('explains screen sharing permissions and unsupported browsers', async () => {
+    vi.stubGlobal('navigator', {})
+    await expect(startQrScreen(makeVideo(), new AbortController().signal, vi.fn(), vi.fn()))
+      .rejects.toThrow('HTTPS')
+    expect(screenErrorMessage(new DOMException('denied', 'NotAllowedError'))).toContain('权限')
+    expect(screenErrorMessage(new DOMException('unavailable', 'NotReadableError'))).toContain('无法捕获')
   })
 
   it('keeps upload and paste available when the camera API is missing', async () => {
