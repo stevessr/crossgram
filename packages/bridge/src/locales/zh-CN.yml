@@ -16,3 +16,9 @@ voiceTurnHost: 向 Telegram 和原生语音工作进程公布的 TURN 主机；�
 voiceTurnPort: 向 Telegram 和原生语音工作进程公布的 TURN 端口。
 voiceTurnSharedSecret: Coturn REST 认证共享密钥，仅用于派生单次通话凭据。
 voiceTurnTtlSeconds: 派生的单次通话 TURN 凭据有效期（秒）。
+
+lazySync: 没有 Telegram 客户端活跃时懒暂停平台订阅。空闲账号每隔一个懒同步周期重新打开一段有界同步窗口。
+lazySync.enabled: 是否启用空闲回收器。
+lazySync.activeWindowMs: 会话在该窗口内有客户端 RPC 时保持订阅运行。
+lazySync.idleSyncIntervalMs: 空闲账号执行一次有界懒同步的周期。
+lazySync.idleSyncDurationMs: 一次懒同步保持订阅打开的时长。

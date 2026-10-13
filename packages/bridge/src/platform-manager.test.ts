@@ -1796,3 +1796,99 @@ describe('PlatformRegistry', () => {
       .toMatchObject([{ platformId: 'static' }])
   })
 })
+
+describe('PlatformSubscriptionManager lazy sync', () => {
+  const idleSession: PlatformSession = {
+    platformSessionId: 'lazy-session', platformId: 'push', userId: 'self', credentials: {}, metadata: {},
+  }
+
+  function createLazyManager(
+    platform: PushPlatform,
+    database: Awaited<ReturnType<typeof createDatabase>>,
+    clock: { value: number },
+  ) {
+    return new PlatformSubscriptionManager(
+      database, new PlatformRegistry([['push', platform]]), new MessageStore(database),
+      undefined, undefined, undefined, new Context(), 'show',
+      () => clock.value,
+      { activeWindowMs: 600_000, idleSyncIntervalMs: 3_600_000, idleSyncDurationMs: 120_000, reapIntervalMs: 60_000 },
+    )
+  }
+
+  it('drops the subscription after the client goes idle and lazy-syncs hourly', async () => {
+    const clock = { value: 1_000_000 }
+    const platform = new PushPlatform()
+    const database = await createDatabase()
+    const manager = createLazyManager(platform, database, clock)
+    await manager.ensure(idleSession)
+    expect(platform.subscribeCalls).toBe(1)
+
+    await manager.noteClientActivity(idleSession, clock.value)
+    clock.value += 5 * 60_000
+    await manager.reapLazySync()
+    expect(platform.unsubscribeCalls).toBe(0)
+
+    clock.value += 6 * 60_000
+    await manager.reapLazySync()
+    expect(platform.unsubscribeCalls).toBe(1)
+
+    clock.value += 60_000
+    await manager.reapLazySync()
+    expect(platform.subscribeCalls).toBe(1)
+
+    clock.value += 3_600_000
+    await manager.reapLazySync()
+    expect(platform.subscribeCalls).toBe(2)
+
+    clock.value += 120_000
+    await manager.reapLazySync()
+    expect(platform.unsubscribeCalls).toBe(2)
+
+    await manager.noteClientActivity(idleSession, clock.value)
+    expect(platform.subscribeCalls).toBe(3)
+    await manager.stop()
+  })
+
+  it('ends a lazy sync window early when a client returns', async () => {
+    const clock = { value: 2_000_000 }
+    const platform = new PushPlatform()
+    const database = await createDatabase()
+    const manager = createLazyManager(platform, database, clock)
+    await manager.ensure(idleSession)
+
+    clock.value += 11 * 60_000
+    await manager.reapLazySync()
+    expect(platform.unsubscribeCalls).toBe(1)
+
+    clock.value += 3_600_000
+    await manager.reapLazySync()
+    expect(platform.subscribeCalls).toBe(2)
+
+    await manager.noteClientActivity(idleSession, clock.value)
+    clock.value += 60_000
+    await manager.reapLazySync()
+    expect(platform.unsubscribeCalls).toBe(1)
+
+    clock.value += 11 * 60_000
+    await manager.reapLazySync()
+    expect(platform.unsubscribeCalls).toBe(2)
+    await manager.stop()
+  })
+
+  it('never restarts subscriptions for platforms that were explicitly stopped', async () => {
+    const clock = { value: 3_000_000 }
+    const platform = new PushPlatform()
+    const database = await createDatabase()
+    const manager = createLazyManager(platform, database, clock)
+    await manager.ensure(idleSession)
+    await manager.noteClientActivity(idleSession, clock.value)
+    manager.startLazySyncReaper()
+
+    await manager.stopPlatform('push')
+    clock.value += 3_600_000
+    await manager.reapLazySync()
+
+    expect(platform.subscribeCalls).toBe(1)
+    await manager.stop()
+  })
+})

@@ -103,6 +103,33 @@ describe('ActiveSessionStore', () => {
       .resolves.toMatchObject({ authorizations: [{ current: true }, { deviceModel: 'Pixel 10' }] })
   })
 
+  it('throttles durable dateActive writes for repeated client RPCs', async () => {
+    const database = await createDatabase()
+    const upsert = vi.spyOn(database, 'upsert')
+    const now = { value: 1_700_000_000_000 }
+    const store = new ActiveSessionStore(
+      database, vi.fn(async (_authKeyId: Uint8Array) => true), () => now.value,
+      undefined, undefined, undefined, 30_000,
+    )
+    const current = authKey(1)
+    await database.upsert('mtproto_auth_binding', [
+      { authKeyId: Buffer.from(current).toString('hex'), platformId: 'test', platformSessionId: 'account' },
+    ])
+    const identity = { platformSessionId: 'account' }
+
+    await store.touch(rpcContext(current, desktop, { lastActiveAt: now.value }), identity)
+    expect(upsert).toHaveBeenCalledWith('mtproto_client_authorization', expect.anything())
+
+    upsert.mockClear()
+    now.value += 1_000
+    await store.touch(rpcContext(current, desktop, { lastActiveAt: now.value }), identity)
+    expect(upsert).not.toHaveBeenCalled()
+
+    now.value += 60_000
+    await store.touch(rpcContext(current, desktop, { lastActiveAt: now.value }), identity)
+    expect(upsert).toHaveBeenCalledTimes(1)
+  })
+
   it('revokes only another authorization belonging to the same bridged account', async () => {
     const database = await createDatabase()
     const revoke = vi.fn(async (_authKeyId: Uint8Array) => true)

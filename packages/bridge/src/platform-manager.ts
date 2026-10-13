@@ -210,6 +210,25 @@ async function platformEventFiber(ctx: Context, config: PlatformEventFiberConfig
   config.result = await config.run(eventCtx)
 }
 
+/** Client-activity-gated subscription lifecycle for idle platform accounts. */
+export interface LazySyncOptions {
+  /** A session with a client RPC inside this window keeps its subscription. */
+  activeWindowMs?: number
+  /** How often an idle session performs one bounded lazy sync. */
+  idleSyncIntervalMs?: number
+  /** How long one lazy sync keeps the subscription open. */
+  idleSyncDurationMs?: number
+  /** Reaper scan interval. */
+  reapIntervalMs?: number
+}
+
+export const DEFAULT_LAZY_SYNC: Required<LazySyncOptions> = {
+  activeWindowMs: 10 * 60_000,
+  idleSyncIntervalMs: 3_600_000,
+  idleSyncDurationMs: 2 * 60_000,
+  reapIntervalMs: 60_000,
+}
+
 /** Owns one durable event subscription per active platform session. */
 export class PlatformSubscriptionManager {
   private readonly _subscriptions = new Map<string, {
@@ -217,6 +236,15 @@ export class PlatformSubscriptionManager {
     fiber: Fiber
     state: PlatformSessionFiberState
   }>()
+  private readonly _lazy: Required<LazySyncOptions>
+  /** Last Telegram-client RPC time per platform session. */
+  private readonly _clientActivityAt = new Map<string, number>()
+  private readonly _subscriptionStartedAt = new Map<string, number>()
+  private readonly _lastLazySyncAt = new Map<string, number>()
+  private readonly _lazySyncDeadlineAt = new Map<string, number>()
+  /** Sessions kept for lazy restarts after their subscription is disposed. */
+  private readonly _retainedSessions = new Map<string, PlatformSession>()
+  private _reaper?: { unref?(): unknown }
 
   constructor(
     private readonly _database: Database,
@@ -231,7 +259,11 @@ export class PlatformSubscriptionManager {
     private readonly _onTrace?: (format: string, ...args: unknown[]) => void,
     private readonly _ctx: Context = new Context(),
     private readonly _recalledMessageMode: RecalledMessageMode = 'show',
-  ) {}
+    private readonly _now: () => number = () => Date.now(),
+    lazySync: LazySyncOptions = {},
+  ) {
+    this._lazy = { ...DEFAULT_LAZY_SYNC, ...lazySync }
+  }
 
   async startActiveSessions(platformId?: string): Promise<void> {
     const rows = await this._database.get('mtproto_platform_session', {
@@ -260,6 +292,15 @@ export class PlatformSubscriptionManager {
     }
     const platform = this._registry.require(session.platformId)
     const state: PlatformSessionFiberState = { tail: Promise.resolve(), pending: 0 }
+    const startedAt = this._now()
+    // The first start anchors the idle baseline; lazy reopens must not look
+    // like fresh client activity, or their own bounded window never closes.
+    if (!this._subscriptionStartedAt.has(session.platformSessionId)) {
+      this._subscriptionStartedAt.set(session.platformSessionId, startedAt)
+    }
+    this._lastLazySyncAt.set(session.platformSessionId, startedAt)
+    this._retainedSessions.set(session.platformSessionId, session)
+    this._lazySyncDeadlineAt.delete(session.platformSessionId)
     this._onTrace?.(
       'platform subscription start platform=%s session=%s', session.platformId, session.platformSessionId,
     )
@@ -390,17 +431,123 @@ export class PlatformSubscriptionManager {
     return this._enqueue(session, event, options)
   }
 
+  /**
+   * Notes a live Telegram-client RPC for the account's platform session and
+   * resumes the subscription immediately when it was lazily paused.
+   */
+  noteClientActivity(session: PlatformSession, at: number = this._now()): Promise<void> {
+    this._clientActivityAt.set(session.platformSessionId, at)
+    this._retainedSessions.set(session.platformSessionId, session)
+    if (this._subscriptions.has(session.platformSessionId)) return Promise.resolve()
+    this._onTrace?.(
+      'lazy sync resume platform=%s session=%s', session.platformId, session.platformSessionId,
+    )
+    return this.ensure(session).catch((error) => this._onError(error, session))
+  }
+
+  /** Starts the idle reaper; paused sessions lazy-sync on the configured cadence. */
+  startLazySyncReaper(): void {
+    if (this._reaper) return
+    this._reaper = setInterval(() => {
+      void this.reapLazySync().catch((error) => this._onError(error))
+    }, this._lazy.reapIntervalMs)
+    this._reaper.unref?.()
+  }
+
+  /**
+   * Applies the lazy lifecycle: sessions with recent client RPCs keep their
+   * subscription; idle sessions drop it and reopen it for one bounded sync
+   * window every idle interval.
+   */
+  async reapLazySync(): Promise<void> {
+    const now = this._now()
+    for (const [platformSessionId, session] of this._retainedSessions) {
+      if (!this._registry.get(session.platformId)) continue
+      const subscription = this._subscriptions.get(platformSessionId)
+      const startedAt = this._subscriptionStartedAt.get(platformSessionId) ?? now
+      const lastActivity = Math.max(this._clientActivityAt.get(platformSessionId) ?? 0, startedAt)
+      if (now - lastActivity < this._lazy.activeWindowMs) {
+        if (this._lazySyncDeadlineAt.delete(platformSessionId) && subscription) {
+          this._onTrace?.(
+            'lazy sync window closed early platform=%s session=%s', session.platformId, platformSessionId,
+          )
+        }
+        continue
+      }
+      if (subscription) {
+        const deadline = this._lazySyncDeadlineAt.get(platformSessionId)
+        if (deadline !== undefined && now < deadline) continue
+        if (deadline !== undefined) {
+          this._onTrace?.(
+            'lazy sync window closed platform=%s session=%s', session.platformId, platformSessionId,
+          )
+        }
+        this._lazySyncDeadlineAt.delete(platformSessionId)
+        await this._disposeSubscription(platformSessionId, 'client idle')
+        continue
+      }
+      const lastSyncAt = this._lastLazySyncAt.get(platformSessionId) ?? 0
+      if (now - lastSyncAt < this._lazy.idleSyncIntervalMs) continue
+      this._lastLazySyncAt.set(platformSessionId, now)
+      this._onTrace?.(
+        'lazy sync window open platform=%s session=%s duration=%d',
+        session.platformId, platformSessionId, this._lazy.idleSyncDurationMs,
+      )
+      // Set the deadline after ensure(): ensure clears stale deadlines for
+      // login-time resumes, and the lazy window must survive its own open.
+      await this.ensure(session).catch((error) => this._onError(error, session))
+      this._lazySyncDeadlineAt.set(platformSessionId, now + this._lazy.idleSyncDurationMs)
+    }
+  }
+
+  private async _disposeSubscription(platformSessionId: string, reason: string): Promise<void> {
+    const subscription = this._subscriptions.get(platformSessionId)
+    if (!subscription) return
+    this._subscriptions.delete(platformSessionId)
+    this._onTrace?.(
+      'platform subscription disposed platform=%s session=%s reason=%s',
+      subscription.platformId, platformSessionId, reason,
+    )
+    const session = this._retainedSessions.get(platformSessionId)
+    await subscription.fiber.dispose().catch((error) => this._onError(error, session))
+  }
+
   async stopPlatform(platformId: string): Promise<void> {
     const selected = [...this._subscriptions.entries()]
       .filter(([, subscription]) => subscription.platformId === platformId)
-    for (const [sessionId] of selected) this._subscriptions.delete(sessionId)
+    for (const [sessionId] of selected) {
+      this._subscriptions.delete(sessionId)
+      this._forgetSession(sessionId)
+    }
     await Promise.allSettled(selected.map(([, subscription]) => subscription.fiber.dispose()))
   }
 
   async stop(): Promise<void> {
+    if (this._reaper) {
+      clearInterval(this._reaper)
+      this._reaper = undefined
+    }
     const subscriptions = [...this._subscriptions.values()].map((subscription) => subscription.fiber)
     this._subscriptions.clear()
+    this._forgetAllSessions()
     await Promise.allSettled(subscriptions.map((fiber) => fiber.dispose()))
+  }
+
+  /** Drops lazy bookkeeping so the reaper never restarts these sessions. */
+  private _forgetSession(platformSessionId: string): void {
+    this._retainedSessions.delete(platformSessionId)
+    this._clientActivityAt.delete(platformSessionId)
+    this._subscriptionStartedAt.delete(platformSessionId)
+    this._lastLazySyncAt.delete(platformSessionId)
+    this._lazySyncDeadlineAt.delete(platformSessionId)
+  }
+
+  private _forgetAllSessions(): void {
+    this._retainedSessions.clear()
+    this._clientActivityAt.clear()
+    this._subscriptionStartedAt.clear()
+    this._lastLazySyncAt.clear()
+    this._lazySyncDeadlineAt.clear()
   }
 
   private _enqueue(

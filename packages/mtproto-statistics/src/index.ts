@@ -48,6 +48,8 @@ export interface MtprotoStatisticsReadOptions {
 
 export interface Config {
   sampleIntervalMs?: number
+  /** Minimum interval between dashboard entry mutations (Muon delta walks). */
+  webuiUpdateIntervalMs?: number
   heapStatisticsSampleIntervalMs?: number
   slowThresholdMs?: number
   historySeconds?: number
@@ -57,6 +59,7 @@ export interface Config {
 
 export const Config = z.object({
   sampleIntervalMs: z.natural().min(500).max(60_000).default(1_000),
+  webuiUpdateIntervalMs: z.natural().min(1_000).max(600_000).default(10_000),
   heapStatisticsSampleIntervalMs: z.natural().min(10_000).max(600_000).default(300_000),
   slowThresholdMs: z.natural().min(1).max(300_000).default(1_000),
   historySeconds: z.natural().min(60).max(3_600).default(900),
@@ -75,7 +78,9 @@ export function apply(ctx: Context, config: Config = {}): void {
   const runtime = new RuntimeMonitor({
     heapStatisticsSampleIntervalMs: config.heapStatisticsSampleIntervalMs ?? 300_000,
   })
+  const webuiUpdateIntervalMs = config.webuiUpdateIntervalMs ?? 10_000
   let lastSampleAt = performance.now()
+  let lastEntryUpdateAt = 0
 
   const data: MtprotoStatisticsData = {
     snapshot: collector.snapshot(),
@@ -166,6 +171,12 @@ export function apply(ctx: Context, config: Config = {}): void {
     const intervalSeconds = (now - lastSampleAt) / 1_000
     lastSampleAt = now
     const snapshot = collector.sample(runtime.sample(), intervalSeconds)
+    // The Muon delta walk diffs the whole 15-minute series against the
+    // observable baseline; running it on every sample starved the event loop
+    // on small servers. Series still advance every sample, and the dashboard
+    // entry catches up with the full history at the publish cadence.
+    if (now - lastEntryUpdateAt < webuiUpdateIntervalMs) return
+    lastEntryUpdateAt = now
     entry.mutate((value) => {
       value.snapshot = snapshot
       syncSeries(value.series, collector.series)

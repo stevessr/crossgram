@@ -21,7 +21,7 @@ import { Config as memoryUpdateStoreConfig } from '../../update-store-memory/src
 const cases = [
   ['bridge', bridgeConfig, [
     'dcId', 'serverHost', 'serverPort', 'altEndpoints', 'apiPrefix', 'onDemandLoginCodes', 'groupFilesMiniApp', 'uploadPath', 'autoMuteGroupChats',
-    'blockedContentMode', 'recalledMessageMode', 'voiceWorkerSocketPath', 'voiceWorkerTimeoutMs', 'voiceDirectIce',
+    'blockedContentMode', 'recalledMessageMode', 'lazySync', 'voiceWorkerSocketPath', 'voiceWorkerTimeoutMs', 'voiceDirectIce',
     'voiceTurnHost', 'voiceTurnPort', 'voiceTurnSharedSecret', 'voiceTurnTtlSeconds',
   ]],
   ['debug', debugConfig, ['maxEvents', 'initiallyPaused', 'apiPath']],
@@ -30,7 +30,7 @@ const cases = [
     'maxConnections', 'maxConnectionsPerIp', 'connectionIdleTimeoutMs', 'keepAliveInitialDelayMs',
   ]],
   ['mtproto-statistics', statisticsConfig, [
-    'sampleIntervalMs', 'heapStatisticsSampleIntervalMs', 'slowThresholdMs', 'historySeconds', 'topMethods', 'topIps',
+    'sampleIntervalMs', 'webuiUpdateIntervalMs', 'heapStatisticsSampleIntervalMs', 'slowThresholdMs', 'historySeconds', 'topMethods', 'topIps',
   ]],
   ['platform-admin-bot', adminBotConfig, [
     'allowedPlatformSessionIds', 'crossAccountAccess', 'showLoginCodes', 'webuiUrl', 'pageSize',
@@ -97,6 +97,12 @@ describe('plugin config schemas', () => {
       autoMuteGroupChats: true,
       blockedContentMode: 'hide-user',
       recalledMessageMode: 'show',
+      lazySync: {
+        enabled: true,
+        activeWindowMs: 600_000,
+        idleSyncIntervalMs: 3_600_000,
+        idleSyncDurationMs: 120_000,
+      },
       voiceWorkerSocketPath: '',
       voiceWorkerTimeoutMs: 5_000,
       voiceDirectIce: true,
@@ -133,6 +139,7 @@ describe('plugin config schemas', () => {
     })
     expect(statisticsConfig({})).toEqual({
       sampleIntervalMs: 1_000,
+      webuiUpdateIntervalMs: 10_000,
       heapStatisticsSampleIntervalMs: 300_000,
       slowThresholdMs: 1_000,
       historySeconds: 900,

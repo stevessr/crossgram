@@ -4,3 +4,4 @@ slowThresholdMs: 保留慢请求突发样本的 RPC 耗时阈值。
 historySeconds: 内存中保留的一秒粒度样本数量。
 topMethods: 仪表盘展示的 RPC 方法最大行数。
 topIps: 仪表盘展示的来源 IP 最大行数。
+webuiUpdateIntervalMs: 仪表盘条目变更之间的最小间隔。采样仍按正常间隔进行。

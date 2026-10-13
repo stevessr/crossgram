@@ -121,6 +121,7 @@ export function registerActiveSessionRpc(
 /** Durable implementation of Telegram's Settings > Active Sessions RPCs. */
 export class ActiveSessionStore {
   private readonly _touchLocks = new Map<string, Promise<void>>()
+  private readonly _lastTouchWriteAt = new Map<string, number>()
   private readonly _finishAuthKeyRevocation: FinishAuthKeyRevocation
 
   constructor(
@@ -130,6 +131,8 @@ export class ActiveSessionStore {
     private readonly _isAuthKeyRegistered: IsAuthKeyRegistered = async () => true,
     private readonly _beginAuthKeyRevocation: BeginAuthKeyRevocation = async () => {},
     finishAuthKeyRevocation?: FinishAuthKeyRevocation,
+    /** Minimum interval between durable dateActive writes for one auth key. */
+    private readonly _touchWriteIntervalMs = 30_000,
   ) {
     this._finishAuthKeyRevocation = finishAuthKeyRevocation ?? (authKeyId => this._revokeAuthKey(authKeyId))
   }
@@ -159,7 +162,15 @@ export class ActiveSessionStore {
       })
       if (!binding) return
       const [stored] = await this._database.get('mtproto_client_authorization', { authKeyId })
-      const now = Math.floor((rpc.lastActiveAt ?? this._now()) / 1000)
+      const nowMs = this._now()
+      const lastWriteAt = this._lastTouchWriteAt.get(authKeyId)
+      // Clients retry hot RPCs many times per second; a durable dateActive
+      // upsert per attempt turned every retry storm into a write storm. The
+      // first touch always writes, and afterwards the row advances at most
+      // once per interval.
+      if (stored && lastWriteAt !== undefined && nowMs - lastWriteAt < this._touchWriteIntervalMs) return
+      this._lastTouchWriteAt.set(authKeyId, nowMs)
+      const now = Math.floor(nowMs / 1000)
       const created = Math.floor((rpc.connectedAt ?? rpc.lastActiveAt ?? this._now()) / 1000)
       const client = rpc.clientInfo
       const ip = normalizeAddress(rpc.connection.remoteAddress)

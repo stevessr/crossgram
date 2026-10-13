@@ -16,3 +16,9 @@ voiceTurnHost: Public TURN host advertised to Telegram and the native voice work
 voiceTurnPort: Public TURN port advertised to Telegram and the native voice worker.
 voiceTurnSharedSecret: Coturn REST-auth shared secret used only to derive call-scoped credentials.
 voiceTurnTtlSeconds: Lifetime in seconds for derived call-scoped TURN credentials.
+
+lazySync: Lazily pause platform subscriptions while no Telegram client is active. Idle accounts reopen one bounded sync window every idle interval.
+lazySync.enabled: Enable the idle reaper.
+lazySync.activeWindowMs: A session with a client RPC inside this window keeps its subscription running.
+lazySync.idleSyncIntervalMs: How often an idle account performs one bounded lazy sync.
+lazySync.idleSyncDurationMs: How long one lazy sync keeps the subscription open.

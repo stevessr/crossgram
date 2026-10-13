@@ -20,7 +20,7 @@ import { androidRpcHandlers } from './android-rpc.js'
 import { MessageStore } from './message-store.js'
 import {
   IMPlatformService, PlatformSubscriptionManager, migrateQualifiedPlatformIds,
-  sessionFromRow, type PlatformRegistry,
+  sessionFromRow, type LazySyncOptions, type PlatformRegistry,
 } from './platform-manager.js'
 import { UploadManager, UPLOAD_ABANDONED_TTL_MS } from './upload-manager.js'
 import { UpdateManager } from './update-manager.js'
@@ -140,6 +140,11 @@ export interface BridgeConfig {
   blockedContentMode?: BlockedContentMode
   /** Whether QQ recalled messages remain visible as marked messages or are hidden. */
   recalledMessageMode?: 'hide' | 'show'
+  /**
+   * Lazily pause platform subscriptions while no Telegram client is active.
+   * Idle accounts reopen one bounded sync window every idle interval.
+   */
+  lazySync?: LazySyncOptions & { enabled?: boolean }
   /** Optional native worker; it must expose public status/material only. */
   voiceWorker?: VoiceWorkerClient
   /** Local Rust voice-worker Unix socket; an empty path leaves calls unavailable. */
@@ -194,6 +199,17 @@ export const Config = z.object({
     z.const('show'), z.const('hide-user'), z.const('hide-related'),
   ]).default('hide-user'),
   recalledMessageMode: z.union([z.const('hide'), z.const('show')]).default('show'),
+  lazySync: z.object({
+    enabled: z.boolean().default(true),
+    activeWindowMs: z.natural().min(60_000).max(3_600_000).default(600_000),
+    idleSyncIntervalMs: z.natural().min(60_000).max(86_400_000).default(3_600_000),
+    idleSyncDurationMs: z.natural().min(30_000).max(1_800_000).default(120_000),
+  }).default({
+    enabled: true,
+    activeWindowMs: 600_000,
+    idleSyncIntervalMs: 3_600_000,
+    idleSyncDurationMs: 120_000,
+  }),
   voiceWorkerSocketPath: z.string().default(''),
   voiceWorkerTimeoutMs: z.natural().min(1).max(60_000).default(5_000),
   voiceDirectIce: z.boolean().default(true),
@@ -412,6 +428,8 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     eventTrace,
     ctx,
     config.recalledMessageMode ?? 'show',
+    undefined,
+    config.lazySync,
   )
   platforms.attachLocalMessageIngress(
     (session, conversation, message) => subscriptions.ingestLocalEvent(session, { type: 'message', conversation, message }),
@@ -454,6 +472,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     config.onTransferProgress, dcId, historyTrace,
     async (session, authKeyId, rpcContext) => {
       await activeSessions.touch(rpcContext, session)
+      void subscriptions.noteClientActivity(session)
       await calls.replay(session, authKeyId)
       updates.requestRecovery(rpcContext)
     },
@@ -874,6 +893,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     await Promise.all(registry.ids.map(platformId => provision(platformId)))
     await publishStickerPacks()
     await subscriptions.startActiveSessions()
+    if (config.lazySync?.enabled ?? true) subscriptions.startLazySyncReaper()
     return () => subscriptions.stop()
   })
 
