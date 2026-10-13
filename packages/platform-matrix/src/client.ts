@@ -313,10 +313,15 @@ export class MatrixClient {
 
   async download(mxc: string, options: { signal?: AbortSignal, timeoutMs?: number } = {}): Promise<Response> {
     const { serverName, mediaId } = parseMxc(mxc)
-    return this.rawRequest(`/_matrix/media/v3/download/${segment(serverName)}/${segment(mediaId)}`, {
-      signal: options.signal,
-      timeoutMs: options.timeoutMs,
-    })
+    const path = `${segment(serverName)}/${segment(mediaId)}`
+    try {
+      return await this.rawRequest(`/_matrix/client/v1/media/download/${path}`, options)
+    } catch (error) {
+      // Old homeservers may not implement authenticated media; authorization
+      // failures must not silently downgrade to the legacy endpoint.
+      if (!(error instanceof MatrixHttpError) || error.errcode !== 'M_UNRECOGNIZED') throw error
+      return this.rawRequest(`/_matrix/media/v3/download/${path}`, options)
+    }
   }
 
   markRead(roomId: string, eventId: string): Promise<unknown> {

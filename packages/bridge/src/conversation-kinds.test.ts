@@ -424,6 +424,21 @@ describe('conversation kinds', () => {
     }
   })
 
+  it('acknowledges a repeated delete without recalling upstream or reserving more PTS', async () => {
+    const { rpc } = await createRpc()
+    const channel = { _: 'inputChannel' as const, channelId: peerTlId('group'), accessHash: Long.ZERO }
+    const history = await rpc.getHistory(historyRequest({
+      _: 'inputPeerChannel', channelId: channel.channelId, accessHash: Long.ZERO,
+    })) as tl.messages.RawMessages
+    const request = { _: 'channels.deleteMessages' as const, channel, id: [history.messages[0].id] }
+    const first = await rpc.deleteMessages(request, channel)
+    expect(first.ptsCount).toBe(1)
+    const calls = actionCalls.length
+    expect(await rpc.deleteMessages(request, channel)).toEqual({ ...first, ptsCount: 0 })
+    expect(actionCalls).toHaveLength(calls)
+    await expect(rpc.deleteMessages({ ...request, id: [2_000_000_000] }, channel)).rejects.toMatchObject({ text: 'MSG_ID_INVALID' })
+  })
+
   it('acknowledges a deleted legacy projection whose platform alias is missing', async () => {
     const { ctx, rpc } = await createRpc()
     const channel = {

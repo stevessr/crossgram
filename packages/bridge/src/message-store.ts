@@ -943,6 +943,7 @@ export class MessageStore {
     tlMessageId: number,
     platformConversationId?: string,
     conversationKind?: IMConversation['kind'],
+    includeDeleted = false,
   ): Promise<ProjectedMessage | undefined> {
     let conversationId: number | undefined
     if (platformConversationId) {
@@ -970,7 +971,7 @@ export class MessageStore {
     }
     if (!part) return
     const [row] = await this._database.get('mtproto_im_message', { id: part.messageId })
-    if (!row || row.deleted) return
+    if (!row || (row.deleted && !includeDeleted)) return
     return {
       source: await this._hydrateMessage(row),
       parts: await this._database.select('mtproto_tl_message_part', { messageId: row.id })

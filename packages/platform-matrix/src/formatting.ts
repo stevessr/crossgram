@@ -146,3 +146,24 @@ function decodeHtml(text: string): string {
     return namedEntities[entity.toLowerCase()] ?? encoded
   })
 }
+
+/** Remove legacy rich-reply quotes only when the event has a real reply relation. */
+export function stripReplyFallback(content: MatrixRoomMessageContent): MatrixRoomMessageContent {
+  if (!content['m.relates_to']?.['m.in_reply_to']?.event_id) return content
+  return {
+    ...content,
+    ...(typeof content.body === 'string' ? {
+      body: content.body.replace(/^(?:> [^\n]*(?:\n|$))+(?:\r?\n)?/u, ''),
+    } : {}),
+    ...(typeof content.formatted_body === 'string' ? {
+      formatted_body: content.formatted_body.replace(/^\s*<mx-reply\b[^>]*>[\s\S]*?<\/mx-reply>/iu, ''),
+    } : {}),
+  }
+}
+
+/** A thread compatibility fallback is not an explicit user reply. */
+export function matrixReplyTarget(content: MatrixRoomMessageContent): string | undefined {
+  const relation = content['m.relates_to']
+  if (relation?.rel_type === 'm.thread' && relation.is_falling_back === true) return
+  return relation?.['m.in_reply_to']?.event_id
+}

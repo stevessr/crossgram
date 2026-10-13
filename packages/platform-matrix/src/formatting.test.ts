@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { matrixMentionUserIds, matrixTextEntities, textContent } from './formatting.js'
+import { matrixMentionUserIds, matrixTextEntities, textContent, stripReplyFallback, matrixReplyTarget } from './formatting.js'
 
 describe('Matrix mention formatting', () => {
   it('keeps ordinary text and reply relations unchanged without mentions', () => {
@@ -124,5 +124,33 @@ describe('Matrix mention formatting', () => {
       formatted_body: '<a href="https://evil.example/#/%40alice%3Aexample.org">@Alice</a>',
       'm.mentions': { user_ids: ['@alice:example.org'] },
     })).toBeUndefined()
+  })
+})
+
+
+describe('Matrix rich reply normalization', () => {
+  it.each([
+    ['> quote\r\n\r\nanswer', 'answer'],
+    ['> quote\nanswer', 'answer'],
+    ['>not a fallback\n\nanswer', '>not a fallback\n\nanswer'],
+    ['answer', 'answer'],
+  ])('strips only Matrix fallback lines: %j', (body, expected) => {
+    expect(stripReplyFallback({ body, 'm.relates_to': { 'm.in_reply_to': { event_id: '$parent' } } }).body).toBe(expected)
+  })
+  it('strips legacy plain and HTML quotes without losing relation or mention offsets', async () => {
+    const content = stripReplyFallback({ msgtype: 'm.text', body: '> <@alice:test> old\n> quote\n\nHi Bob',
+      format: 'org.matrix.custom.html', formatted_body: '<mx-reply><blockquote>old</blockquote></mx-reply>Hi <a href="https://matrix.to/#/@bob:test">Bob</a>',
+      'm.relates_to': { 'm.in_reply_to': { event_id: '$original' } }, 'm.mentions': { user_ids: ['@bob:test'] } })
+    expect(content.body).toBe('Hi Bob')
+    expect(matrixReplyTarget(content)).toBe('$original')
+    expect(matrixTextEntities(content)).toContainEqual({ type: 'mention', userId: '@bob:test', offset: 3, length: 3 })
+  })
+  it('preserves ordinary blockquotes and distinguishes thread fallbacks from explicit replies', async () => {
+    const quote = { msgtype: 'm.text', body: '> ordinary quote\n\ntext' }
+    expect(stripReplyFallback(quote)).toBe(quote)
+    const content = { 'm.relates_to': { rel_type: 'm.thread', event_id: '$root', is_falling_back: true, 'm.in_reply_to': { event_id: '$latest' } } }
+    expect(matrixReplyTarget(content)).toBeUndefined()
+    content['m.relates_to'].is_falling_back = false
+    expect(matrixReplyTarget(content)).toBe('$latest')
   })
 })

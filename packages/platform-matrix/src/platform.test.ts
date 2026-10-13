@@ -28,6 +28,55 @@ const roomState = [
 ]
 
 describe('MatrixPlatform', () => {
+  it('maps HTML rich replies without rendering fallback quotes as message text', async () => {
+    const fetch = routeFetch(() => json(event('m.room.message', {
+      msgtype: 'm.text', body: '> <@alice:example.org> quoted\n> old line\n\nanswer Bob',
+      format: 'org.matrix.custom.html',
+      formatted_body: '<mx-reply><blockquote><a href="https://matrix.to/#/!room:example.org/$original">In reply to</a> quoted</blockquote></mx-reply>answer <a href="https://matrix.to/#/@bob:example.org">Bob</a>',
+      'm.mentions': { user_ids: ['@bob:example.org'] },
+      'm.relates_to': { 'm.in_reply_to': { event_id: '$original' } },
+    }, { id: '$reply', sender: '@alice:example.org' })))
+    const platform = createPlatform(fetch)
+    expect(await platform.getMessage(session, { id: '!room:example.org' }, '$reply')).toMatchObject({
+      id: '$reply', replyToId: '$original', content: { parts: [{ type: 'text', text: 'answer Bob',
+        entities: [{ type: 'mention', userId: '@bob:example.org', offset: 7, length: 3 }],
+      }] },
+    })
+    await platform.stop()
+  })
+
+  it.each(['m.room.message', 'm.room.encrypted', 'm.sticker', 'm.poll.start'])('never renders redacted %s events', async type => {
+    const value = { ...event(type, { msgtype: 'm.text', body: 'stale content', url: 'mxc://test/old' }, { id: '$old', sender: '@alice:example.org' }),
+      unsigned: { redacted_because: event('m.room.redaction', { redacts: '$old' }, { id: '$redaction' }) } }
+    const platform = createPlatform(routeFetch(() => json(value)))
+    expect(await platform.getMessage(session, { id: '!room:example.org' }, '$old')).toBeNull()
+    await platform.stop()
+  })
+
+  it('emits deletion for modern redactions and redacted timeline tombstones', async () => {
+    let sync = 0
+    const fetch = routeFetch((url, init) => {
+      if (!url.pathname.endsWith('/sync')) throw new Error(`Unexpected request: ${url}`)
+      if (++sync === 1) return json({ next_batch: 'initial', rooms: { join: { '!room:example.org': { state: { events: [] } } } } })
+      if (sync === 2) return json({ next_batch: 'next', rooms: { join: { '!room:example.org': { timeline: { events: [
+        event('m.room.redaction', { redacts: '$original' }, { id: '$modern' }),
+        { ...event('m.room.encrypted', {}, { id: '$encrypted' }), unsigned: {
+          redacted_because: event('m.room.redaction', { redacts: '$encrypted' }, { id: '$tombstone' }),
+        } },
+      ] } } } } })
+      return pendingUntilAbort(init?.signal)
+    })
+    const platform = createPlatform(fetch, { userId: session.userId, syncTimeoutMs: 50 })
+    const events: IMEvent[] = []
+    const unsubscribe = await platform.subscribe(session, value => { events.push(value) })
+    await vi.waitFor(() => expect(events.filter(e => e.type === 'message-delete')).toHaveLength(2))
+    await unsubscribe()
+    expect(events.filter(e => e.type === 'message-delete')).toMatchObject([
+      { eventId: '$modern', messageIds: ['$original'] },
+      { eventId: '$tombstone', messageIds: ['$encrypted'] },
+    ])
+  })
+
   it('reads and synchronizes Matrix annotation reactions using the typed relations endpoint', async () => {
     const calls: string[] = []
     const fetch = routeFetch((url, init) => {

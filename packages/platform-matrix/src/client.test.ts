@@ -41,6 +41,25 @@ describe('MatrixClient', () => {
     expect(request?.searchParams.get('limit')).toBe('50')
   })
 
+  it.each([
+    ['M_UNRECOGNIZED', 404, true], ['M_FORBIDDEN', 403, false], ['M_NOT_FOUND', 404, false],
+  ] as const)('only downgrades authenticated media for unsupported endpoints: %s', async (errcode, status, fallback) => {
+    const paths: string[] = []
+    const client = new MatrixClient({ homeserver: 'https://matrix.example.org', accessToken: 'token',
+      fetch: async (input, init) => {
+        expect(new Headers(init?.headers).get('Authorization')).toBe('Bearer token')
+        paths.push(new URL(String(input)).pathname)
+        return paths.length === 1 ? Response.json({ errcode, error: errcode }, { status })
+          : new Response(new Uint8Array([1, 2]))
+      },
+    })
+    if (fallback) expect(await client.download('mxc://test/media')).toBeInstanceOf(Response)
+    else await expect(client.download('mxc://test/media')).rejects.toMatchObject({ status, errcode })
+    expect(paths).toEqual(fallback ? ['/_matrix/client/v1/media/download/test/media', '/_matrix/media/v3/download/test/media']
+      : ['/_matrix/client/v1/media/download/test/media'])
+    await client.close()
+  })
+
   it('surfaces structured Matrix errors', async () => {
     const client = new MatrixClient({
       homeserver: 'https://matrix.example.org',
@@ -104,7 +123,7 @@ describe('MatrixClient', () => {
     expect(progress).toEqual([2, 1])
     expect(requests[0]?.url.searchParams.get('filename')).toBe('a b.bin')
     expect(requests[0]?.body).toEqual(new Uint8Array([1, 2, 3]))
-    expect(requests[1]?.url.pathname).toBe('/_matrix/media/v3/download/cdn.example/id')
+    expect(requests[1]?.url.pathname).toBe('/_matrix/client/v1/media/download/cdn.example/id')
     expect(new Uint8Array(await download.arrayBuffer())).toEqual(new Uint8Array([4, 5, 6]))
   })
 

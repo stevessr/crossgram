@@ -85,6 +85,7 @@ export interface MatrixRoomMessageContent {
   }
   'm.relates_to'?: {
     rel_type?: string
+    is_falling_back?: boolean
     event_id?: string
     key?: string
     'm.in_reply_to'?: { event_id?: string }

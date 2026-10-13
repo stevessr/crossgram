@@ -2395,7 +2395,15 @@ export class DialogRpc {
         this._session.platformSessionId, tlId, expectedConversation,
         expectedConversation ? undefined : 'direct',
       )
-      if (!projected) throw new RpcError(400, 'MSG_ID_INVALID')
+      if (!projected) {
+        // A retry after a completed redaction is a no-op, but keep rejecting
+        // unknown IDs and IDs belonging to another channel/account.
+        if (await this._store.findProjectedByTlId(
+          this._session.platformSessionId, tlId, expectedConversation,
+          expectedConversation ? undefined : 'direct', true,
+        )) continue
+        throw new RpcError(400, 'MSG_ID_INVALID')
+      }
       const ordinal = projected.parts.find((part) => part.tlMessageId === tlId)?.ordinal ?? 0
       const targets = grouped.get(projected.source.conversationId) ?? []
       targets.push({
@@ -2406,6 +2414,7 @@ export class DialogRpc {
     }
 
     const affected = new Set<number>()
+    const publishedAffected = new Set<number>()
     for (const [conversationId, targets] of grouped) {
       this._assertWritableConversation(conversationId)
       const conversation = this._conversation(conversationId)
@@ -2441,10 +2450,23 @@ export class DialogRpc {
         } catch (error) {
           this._throwMessageAction(error, 'MESSAGE_DELETE_FORBIDDEN')
         }
-        const deleted = await this._store.deleteMessages(
-          this._session, conversation, [...new Set(messages.map((target) => target.source.id))],
-        )
-        deleted.tlMessageIds.forEach((id) => affected.add(id))
+        const messageIds = [...new Set(messages.map((target) => target.source.id))]
+        // Publish the deletion before marking it locally. Otherwise the Matrix
+        // sync echo sees changed=false and never notifies other Telegram sessions.
+        if (this._onLocalEvent) {
+          const published = await this._onLocalEvent(this._session, {
+            type: 'message-delete',
+            eventId: `local-delete:${conversationId}:${messageIds.join(',')}:${Date.now()}`,
+            conversation, messageIds, timestamp: now,
+          }, this._localDelivery())
+          for (const id of publishedDeletedTlMessageIds(published)) {
+            affected.add(id)
+            publishedAffected.add(id)
+          }
+        } else {
+          const deleted = await this._store.deleteMessages(this._session, conversation, messageIds)
+          if (deleted.changed) deleted.tlMessageIds.forEach((id) => affected.add(id))
+        }
       }
       if (notices.length) {
         const messageIds = [...new Set(notices.map((target) => target.source.id))]
@@ -2462,7 +2484,7 @@ export class DialogRpc {
           : undefined
         const publishedIds = publishedDeletedTlMessageIds(published)
         if (publishedIds.length) {
-          publishedIds.forEach((id) => affected.add(id))
+          publishedIds.forEach((id) => { affected.add(id); publishedAffected.add(id) })
         } else if (!this._onLocalEvent) {
           const deleted = await this._store.deleteMessages(this._session, conversation, messageIds)
           deleted.tlMessageIds.forEach((id) => affected.add(id))
@@ -2474,8 +2496,12 @@ export class DialogRpc {
     // changed, so keep the current PTS instead of attempting to reserve zero
     // entries (which is invalid and previously triggered a client retry storm).
     if (!ptsCount) return this._emptyDeleteResult(channel)
+    // The update publisher has already reserved PTS for durable deletions.
+    // Reserving them again produces a gap that clients can never reconcile.
+    const remaining = ptsCount - publishedAffected.size
+    if (!remaining) return { ...await this._emptyDeleteResult(channel), ptsCount }
     const pts = await this._reservePts(
-      ptsCount,
+      remaining,
       Math.floor(Date.now() / 1000),
       expectedConversation ? this._conversation(expectedConversation) : undefined,
     )

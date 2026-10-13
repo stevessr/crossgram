@@ -778,21 +778,33 @@ export class UpdateManager {
       ? await this._store.getOldestTlMessageId(session.platformSessionId, event.conversation.id)
       : undefined
     const platform = this._registry.require(session.platformId)
-    const selfProfile = await platform.getUser?.(session, session.userId)
-      ?? {
-        id: session.userId,
-        firstName: String(session.metadata.firstName ?? 'Bridge'),
-        lastName: session.metadata.lastName as string | undefined,
-        username: session.metadata.username as string | undefined,
-        metadata: session.metadata,
-      }
-    const senderProfile = event.message.sender
-      ?? await platform.getUser?.(session, event.message.senderId)
-      ?? { id: event.message.senderId, firstName: event.message.senderId }
-    const selfRow = await this._store.upsertUser(session, selfProfile)
-    const senderRow = event.message.senderId === session.userId
+    // A successful self-send must not wait on optional remote profile hydration.
+    // Keep incoming-message refresh behavior; use the durable cached self row
+    // (or session metadata) on the send-confirmation path.
+    const confirmingSelf = event.message.outgoing && event.message.senderId === session.userId
+    const selfProfile = event.message.senderId === session.userId ? event.message.sender : undefined
+    const selfRow = confirmingSelf
+      ? selfProfile
+        ? await this._store.upsertUser(session, selfProfile)
+        : await this._store.getUser(session.platformId, session.userId)
+          ?? await this._store.upsertUser(session, {
+            id: session.userId, firstName: String(session.metadata.firstName ?? session.userId),
+            lastName: session.metadata.lastName as string | undefined,
+            username: session.metadata.username as string | undefined,
+            metadata: session.metadata,
+          })
+      : await this._store.upsertUser(session,
+        await platform.getUser?.(session, session.userId) ?? {
+          id: session.userId, firstName: String(session.metadata.firstName ?? 'Bridge'),
+          lastName: session.metadata.lastName as string | undefined,
+          username: session.metadata.username as string | undefined,
+          metadata: session.metadata,
+        })
+    const senderRow = confirmingSelf
       ? selfRow
-      : await this._store.upsertUser(session, senderProfile)
+      : await this._store.upsertUser(session, event.message.sender
+        ?? await platform.getUser?.(session, event.message.senderId)
+        ?? { id: event.message.senderId, firstName: event.message.senderId })
     const directPeerRow = displayConversation.kind === 'direct'
       ? await this._store.getUser(session.platformId, displayConversation.id)
         ?? await this._store.upsertUser(session, displayConversation.metadata?.bridgeOwned === true

@@ -42,3 +42,31 @@ Local HTTP/bridge E2E covers opening the received sticker's set, canonical asset
 lookup, room-scoped picker contents, MXC reaction send/read, duplicate counts and
 ranged custom-reaction downloads. Actual Telegram picker rendering remains
 client-dependent and is not demonstrated by these API fixtures.
+
+## Replies, confirmation and deletion
+
+Rich replies map `m.in_reply_to.event_id` to Telegram's native reply header,
+including when the parent needs fetching outside the current history page.
+Legacy `> ` and `<mx-reply>` fallback quotations are removed before text/mention
+projection, so the quote is not duplicated in the message body. Thread fallback
+relations (`m.thread` with `is_falling_back: true`) do not invent explicit replies.
+See [Matrix rich replies](https://spec.matrix.org/v1.19/client-server-api/#rich-replies).
+
+After a successful self-send, confirmation reuses a sender snapshot or the cached
+self profile rather than waiting for optional remote profile requests. The durable
+message/update publication and `updateMessageID` correlation remain in place.
+Local upstream deletions now publish through the durable update pipeline, so
+other Telegram sessions receive deletion updates before the upstream echo is
+ignored as a duplicate. PTS is reserved once, not again by the RPC response.
+Redacted timeline tombstones also invalidate previously cached messages; redacted
+encrypted messages must not render as unsupported-encryption placeholders.
+
+Media downloads use authenticated `/_matrix/client/v1/media/download` first;
+only `M_UNRECOGNIZED` falls back to the legacy media endpoint. Permission failures
+and missing media do not trigger a downgrade.
+
+Regression coverage: unit tests for normalization, thread fallbacks, tombstones,
+media authorization/fallback and cached-profile confirmation; HTTP/SQLite/TL E2E
+for out-of-page reply targets, outgoing reply relations, random-ID confirmation,
+observer deletion updates, duplicate echoes/retries and failed upstream deletion.
+These fixtures do not establish real Telegram GUI rendering or production latency.

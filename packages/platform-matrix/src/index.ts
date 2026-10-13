@@ -13,7 +13,7 @@ import type {
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { MATRIX_EMOJI } from './emoji.js'
 import { MatrixClient, MatrixHttpError, type MatrixClientOptions } from './client.js'
-import { matrixMentionUserIds, matrixTextEntities, textContent } from './formatting.js'
+import { matrixMentionUserIds, matrixTextEntities, textContent, stripReplyFallback, matrixReplyTarget } from './formatting.js'
 import { buildSpaceFolders } from './space-hierarchy.js'
 import { countClosedMatrixPoll, type MatrixPollTally } from './poll-results.js'
 import type {
@@ -1225,6 +1225,16 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       }
       for (const event of room.timeline?.events ?? []) {
         if (!event.event_id || event.state_key !== undefined) continue
+        // A limited sync may contain only the redacted event, not its separate
+        // redaction event. Remove previously cached content in that case too.
+        if (event.unsigned?.redacted_because && isMessageEvent(event.type)) {
+          const redaction = event.unsigned.redacted_because
+          await handler({ type: 'message-delete',
+            eventId: redaction.event_id ?? `matrix-redacted:${event.event_id}`,
+            conversation, messageIds: [event.event_id], timestamp: matrixTimestamp(redaction),
+          })
+          continue
+        }
         const redacts = event.redacts ?? (event.content as { redacts?: string }).redacts
         if (event.type === 'm.room.redaction' && redacts) {
           const reactionTargetId = this.reactionEventTargets.get(redacts)
@@ -1517,7 +1527,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   }
 
   private mapTimelineMessage(roomId: string, event: MatrixEvent): IMMessage<MatrixMediaLocator> | undefined {
-    if (!event.event_id || !event.sender) return
+    if (!event.event_id || !event.sender || event.unsigned?.redacted_because) return
     if (event.type === 'm.room.encrypted') {
       return {
         id: event.event_id,
@@ -1532,7 +1542,6 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     }
     const pollStart = isMatrixPollStart(event.type)
     const pollEnd = isMatrixPollEnd(event.type)
-    if (event.unsigned?.redacted_because && (pollStart || pollEnd)) return
     const location = event.type === 'm.location' || event.type === 'org.matrix.msc3488.location'
     // Poll responses do not have a text fallback and must not appear as separate chat messages.
     if (!pollStart && !pollEnd && !location && event.type !== 'm.room.message' && event.type !== 'm.sticker') return
@@ -1543,7 +1552,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       && relation?.rel_type === 'm.reference' && relation.event_id) {
       this.rememberPollClosure(`${roomId}\0${relation.event_id}`)
     }
-    const content = relation?.rel_type === 'm.replace' && raw['m.new_content'] ? raw['m.new_content'] : raw
+    const content = stripReplyFallback(relation?.rel_type === 'm.replace' && raw['m.new_content'] ? raw['m.new_content'] : raw)
     const parts: IMMessage<MatrixMediaLocator>['content']['parts'] = pollStart ? matrixPollParts(content)
       : pollEnd ? [{ type: 'text' as const, text: matrixEventText(event.content) || '投票已结束' }]
         : event.type === 'm.sticker' && content.url ? [{ type: 'sticker', sticker: {
@@ -1585,7 +1594,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       outgoing: event.sender === this.accountUserId,
       replyToId: pollEnd && relation?.rel_type === 'm.reference'
         ? relation.event_id
-        : content['m.relates_to']?.['m.in_reply_to']?.event_id,
+        : matrixReplyTarget(content),
       content: {
         parts,
         ...(pollStart && parts[0]?.type === 'poll' && parts[0].poll.maxSelections === 1
@@ -1756,7 +1765,7 @@ function looksLikeFilename(value: string): boolean { return /^[^/\\\r\n]{1,200}\
 function relationFromValue(value: unknown): MatrixRoomMessageContent['m.relates_to'] | undefined {
   if (!isRecord(value)) return
   const reply = value['m.in_reply_to']
-  return { rel_type: typeof value.rel_type === 'string' ? value.rel_type : undefined, event_id: typeof value.event_id === 'string' ? value.event_id : undefined, key: typeof value.key === 'string' ? value.key : undefined,
+  return { rel_type: typeof value.rel_type === 'string' ? value.rel_type : undefined, event_id: typeof value.event_id === 'string' ? value.event_id : undefined, key: typeof value.key === 'string' ? value.key : undefined, is_falling_back: value.is_falling_back === true,
     'm.in_reply_to': isRecord(reply) && typeof reply.event_id === 'string' ? { event_id: reply.event_id } : undefined }
 }
 function matrixRoomMessageContent(value: unknown): MatrixRoomMessageContent {
@@ -1983,3 +1992,9 @@ interface MatrixLogger {
 
 export { MatrixClient, MatrixHttpError, parseMxc } from './client.js'
 export type { MatrixMediaLocator } from './types.js'
+
+function isMessageEvent(type: string): boolean {
+  return type === 'm.room.message' || type === 'm.room.encrypted' || type === 'm.sticker'
+    || type === 'm.location' || type === 'org.matrix.msc3488.location'
+    || isMatrixPollStart(type) || isMatrixPollEnd(type)
+}

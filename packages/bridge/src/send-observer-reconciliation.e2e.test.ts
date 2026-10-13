@@ -8,7 +8,7 @@ import { TlBinaryReader, TlBinaryWriter } from '@mtcute/tl-runtime'
 import Long from 'long'
 import type { RpcResult, ServerConnection, ServerRpcContext } from '@mtproto-relay/mtproto'
 import { getServerReaderMap } from '../../mtproto/src/rpc/server-reader-map.js'
-import { DialogRpc, stableId } from './dialogs.js'
+import { DialogRpc, peerTlSeed, stableId } from './dialogs.js'
 import { MessageStore } from './message-store.js'
 import { defineModels } from './models.js'
 import { PlatformRegistry } from './platform-manager.js'
@@ -78,6 +78,7 @@ describe('sent-message observer reconciliation e2e', () => {
       })
     }
 
+    let upstreamSent = false
     const platform: IMPlatform = {
       capabilities: {
         history: true,
@@ -90,10 +91,14 @@ describe('sent-message observer reconciliation e2e', () => {
         id: 'qq-reply-target', conversationId: conversation.id, senderId: 'friend', timestamp: 1_799_999_999,
         content: { parts: [{ type: 'text', text: 'reply target' }] },
       }] } },
-      async getUser(_session, id) { return { id, firstName: id === session.userId ? 'Current' : id } },
+      async getUser(_session, id) {
+        if (upstreamSent) throw new Error('Profile server unavailable after successful send')
+        return { id, firstName: id === session.userId ? 'Current' : id }
+      },
       async sendMessage(_session, target, input): Promise<IMMessage> {
         const text = input.parts.find((part) => part.type === 'text')
         if (!text || text.type !== 'text') throw new Error('expected sent text')
+        upstreamSent = true
         return {
           id: 'qq-sent-text', conversationId: target.id, senderId: session.userId,
           outgoing: true, timestamp: 1_800_000_000, replyToId: input.replyToId,
@@ -129,7 +134,7 @@ describe('sent-message observer reconciliation e2e', () => {
     const randomId = Long.fromNumber(80_001)
     const targetPeer = {
       _: 'inputPeerChannel' as const,
-      channelId: stableId(`peer:${conversation.id}`), accessHash: Long.ZERO,
+      channelId: stableId(peerTlSeed(session.platformSessionId, conversation.id)), accessHash: Long.ZERO,
     }
     const history = await dialogs.getHistory({
       _: 'messages.getHistory', peer: targetPeer, offsetId: 0, offsetDate: 0,

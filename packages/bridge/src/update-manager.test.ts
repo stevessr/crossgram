@@ -649,8 +649,10 @@ describe('UpdateManager', () => {
     expect(await manager.getState(session.platformSessionId)).toMatchObject({ pts: 1, seq: 1 })
   })
 
-  it('keeps the self and premium flags on outgoing live-update users', async () => {
-    const { store, manager, sent } = await createHarness()
+  it('confirms outgoing messages using cached self without remote profile lookups', async () => {
+    const getUser = vi.fn(async () => { throw new Error('profile service unavailable') })
+    const { store, manager, sent } = await createHarness(undefined, { ...platform, getUser })
+    await store.upsertUser(session, { id: session.userId, firstName: 'User self' })
     const conversation: IMConversation = { id: 'outgoing-group', kind: 'group', title: 'Outgoing Group' }
     const message: IMMessage = {
       id: 'outgoing', conversationId: conversation.id, senderId: session.userId,
@@ -663,6 +665,7 @@ describe('UpdateManager', () => {
 
     const payload = roundTrip(sent[0].update) as tl.RawUpdates
     expect(payload.users).toHaveLength(1)
+    expect(getUser).not.toHaveBeenCalled()
     expect(payload.users[0]).toMatchObject({
       _: 'user', self: true, premium: true, firstName: 'User self', phone: '888123456789012',
     })
