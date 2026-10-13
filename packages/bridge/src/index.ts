@@ -887,9 +887,6 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   ctx.effect(async () => {
     await ctx.database.prepared()
     await legacyPhoneMigration
-    // The reaper must run even while startup subscriptions are still opening;
-    // a saturated first sync must not keep every platform hot forever.
-    if (config.lazySync?.enabled ?? true) subscriptions.startLazySyncReaper()
     // Retained delivery rows are the durable difference journal. They must
     // survive a restart so reconnecting devices can still recover the updates
     // they missed; the store prunes them per scope on write instead.
@@ -898,6 +895,14 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     await subscriptions.startActiveSessions()
     return () => subscriptions.stop()
   })
+  // The reaper must live outside the provisioning effect above: a saturated
+  // first sync (Discord login, Matrix full state) stalls that await chain,
+  // and without the reaper the subscriptions it is supposed to pause stay
+  // hot forever. stop() is idempotent.
+  ctx.effect(() => {
+    if (config.lazySync?.enabled ?? true) subscriptions.startLazySyncReaper()
+    return () => subscriptions.stop()
+  }, 'mtproto-bridge.lazy-sync-reaper')
 
   // ── Synthetic / config ──
   ctx.mtproto.register('help.getConfig', async () => makeConfig(
