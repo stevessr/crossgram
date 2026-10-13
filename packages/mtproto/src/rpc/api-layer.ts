@@ -224,9 +224,45 @@ const responseDowngrades = new Map<string, ResponseDowngrade>([
   ['keyboardInlineButton', downgradeInlineKeyboardButton],
 ])
 
+/**
+ * Constructors that survive across layers while one field's representation
+ * changed. dialogFilter.title moved from a plain string to TextWithEntities,
+ * and a stored title can arrive in either shape depending on which client
+ * wrote it. Each entry is active only for layers that still declare the
+ * legacy string field, so clients on the newest schema keep the identity
+ * adapter and skip the response walk entirely.
+ */
+const responseFieldDowngrades: Record<string, { field: string, downgrade: ResponseDowngrade }> = {
+  dialogFilter: { field: 'title', downgrade: downgradeDialogFilterTitle },
+  dialogFilterChatlist: { field: 'title', downgrade: downgradeDialogFilterTitle },
+}
+
+function downgradeDialogFilterTitle(value: Record<string, unknown>): Record<string, unknown> {
+  const title = value.title
+  if (isPlainLayerObject(title) && typeof title.text === 'string') {
+    return { ...value, title: title.text }
+  }
+  return value
+}
+
 const responseAdapterCache = new Map<number, ApiLayerResponseAdapter>()
 const schemaConstructorNameCache = new Map<number, Set<string>>()
+const schemaLegacyStringFieldCache = new Map<number, Map<string, boolean>>()
 const identityResponseAdapter: ApiLayerResponseAdapter = { schemaLayer: null, adapt: value => value }
+
+/** Whether the mirrored schema for this layer declares the field as a plain string. */
+function schemaFieldIsString(schemaLayer: number, constructor: string, field: string): boolean {
+  let cache = schemaLegacyStringFieldCache.get(schemaLayer)
+  if (!cache) schemaLegacyStringFieldCache.set(schemaLayer, cache = new Map())
+  const key = `${constructor}.${field}`
+  let declared = cache.get(key)
+  if (declared === undefined) {
+    const entry = loadSchemaEntries(schemaLayer).find(candidate => candidate.name === constructor)
+    declared = entry?.arguments?.some(argument => argument.name === field && argument.type === 'string') ?? false
+    cache.set(key, declared)
+  }
+  return declared
+}
 
 export function getApiLayerResponseAdapter(layer: number | null): ApiLayerResponseAdapter {
   if (layer === null) return identityResponseAdapter
@@ -239,6 +275,11 @@ export function getApiLayerResponseAdapter(layer: number | null): ApiLayerRespon
   const active: Array<[string, ResponseDowngrade]> = []
   for (const entry of responseDowngrades) {
     if (!names.has(entry[0])) active.push(entry)
+  }
+  for (const [constructorName, { field, downgrade }] of Object.entries(responseFieldDowngrades)) {
+    if (names.has(constructorName) && schemaFieldIsString(schemaLayer, constructorName, field)) {
+      active.push([constructorName, downgrade])
+    }
   }
   const adapter: ApiLayerResponseAdapter = active.length === 0
     ? { schemaLayer, adapt: value => value }
@@ -284,7 +325,16 @@ function adaptResponseValue(
     const downgrade = downgrades.get(name)
     if (downgrade) {
       const converted = downgrade(object, names)
-      return converted === undefined ? undefined : adaptResponseValue(converted, downgrades, names)
+      if (converted === undefined) return undefined
+      if (isPlainLayerObject(converted) && converted._ === name) {
+        // A field-type downgrade keeps the constructor, so re-entering the
+        // full map would reapply it forever. Continue with the applied
+        // downgrade removed; nested values still adapt through the rest.
+        const rest = new Map(downgrades)
+        rest.delete(name)
+        return adaptResponseValue(converted, rest, names)
+      }
+      return adaptResponseValue(converted, downgrades, names)
     }
   }
   let changed = false

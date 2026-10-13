@@ -42,6 +42,15 @@ function filter(title: string, peerId: string): StoredDialogFilter {
 }
 
 describe('DialogFolderStore', () => {
+  it('wraps legacy plain-string titles into the newest wire form', () => {
+    expect(decodeDialogFilterTitle('Legacy')).toEqual({
+      _: 'textWithEntities', text: 'Legacy', entities: [],
+    })
+    expect(decodeDialogFilterTitle({ _: 'textWithEntities', text: 'Rich', entities: [] })).toEqual({
+      _: 'textWithEntities', text: 'Rich', entities: [],
+    })
+  })
+
   it('persists filters, exact rich titles, deletion, and default-tab ordering', async () => {
     const { ctx, store } = await createStore()
     await expect(store.listFilters('session')).resolves.toEqual([{ filterId: 0 }])

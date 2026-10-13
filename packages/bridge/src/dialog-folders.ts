@@ -181,7 +181,11 @@ export function encodeDialogFilterTitle(title: tl.TypeTextWithEntities): JsonVal
 }
 
 export function decodeDialogFilterTitle(title: JsonValue): tl.TypeTextWithEntities {
-  return decodeTlValue(title) as tl.TypeTextWithEntities
+  const decoded = decodeTlValue(title) as tl.TypeTextWithEntities
+  // Titles stored by clients before the TextWithEntities migration are plain
+  // strings. Normalize to the newest wire form so the per-layer response
+  // adapter only ever converts in the downgrade direction.
+  return typeof decoded === 'string' ? { _: 'textWithEntities', text: decoded, entities: [] } : decoded
 }
 
 function filterKey(platformSessionId: string, filterId: number): string {
