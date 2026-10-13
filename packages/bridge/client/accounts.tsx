@@ -23,7 +23,7 @@ import {
 } from 'cordis-webui-solidjs/components'
 import { sessionToken } from 'cordis-webui-solidjs/session'
 import AddAccount from './add-account.js'
-import { cameraErrorMessage, startQrCamera } from './qr-camera.js'
+import { cameraErrorMessage, screenErrorMessage, startQrCamera, startQrScreen } from './qr-camera.js'
 import {
   copyText,
   formatPhone,
@@ -470,6 +470,8 @@ function QrLogin(props: {
     [account, setAccount] = createSignal(''),
     [approved, setApproved] = createSignal(false),
     [cameraState, setCameraState] = createSignal<'idle' | 'starting' | 'scanning'>('idle'),
+    [captureSource, setCaptureSource] = createSignal<'camera' | 'screen' | null>(null),
+    [dragging, setDragging] = createSignal(false),
     [cameraMessage, setCameraMessage] = createSignal('')
   const scan = useAction(),
     approve = useAction(),
@@ -477,34 +479,37 @@ function QrLogin(props: {
   let videoElement: HTMLVideoElement | undefined
   let cameraController: AbortController | undefined
   let cameraStop: (() => void) | undefined
-  const stopCamera = () => {
+  const stopCapture = () => {
     cameraController?.abort()
     cameraStop?.()
     cameraController = undefined
     cameraStop = undefined
     setCameraState('idle')
+    setCaptureSource(null)
   }
-  const startCamera = () => {
-    if (cameraState() !== 'idle' || !videoElement) return
+  const startCapture = (source: 'camera' | 'screen') => {
+    if (cameraState() !== 'idle' || !videoElement || scan.busy() || approve.busy()) return
     const current = new AbortController()
     cameraController = current
+    setCaptureSource(source)
     setCameraMessage('')
     setCameraState('starting')
-    void startQrCamera(videoElement, current.signal, (value) => {
+    const start = source === 'screen' ? startQrScreen : startQrCamera
+    void start(videoElement, current.signal, (value) => {
       const parsed = parseTelegramLoginUrl(value)
       if (!parsed) {
         setCameraMessage('识别到二维码，但不是有效的 Telegram 登录码。')
         return false
       }
-      stopCamera()
+      stopCapture()
       setInput(parsed)
       setApproved(false)
       setCameraMessage('二维码已识别。请选择目标账号，再手动批准登录。')
       return true
     }, (error) => {
       if (cameraController !== current) return
-      stopCamera()
-      setCameraMessage(cameraErrorMessage(error))
+      stopCapture()
+      setCameraMessage(source === 'screen' ? screenErrorMessage(error) : cameraErrorMessage(error))
     }).then((stop) => {
       if (cameraController !== current) {
         stop()
@@ -514,9 +519,9 @@ function QrLogin(props: {
       setCameraState('scanning')
     }).catch((error) => {
       if (cameraController !== current) return
-      stopCamera()
+      stopCapture()
       if ((error as Error)?.name !== 'AbortError')
-        setCameraMessage(cameraErrorMessage(error))
+        setCameraMessage(source === 'screen' ? screenErrorMessage(error) : cameraErrorMessage(error))
     })
   }
   const token = createMemo(() => parseTelegramLoginUrl(input().trim()))
@@ -526,31 +531,61 @@ function QrLogin(props: {
     if (!readyAccounts().some((value) => value.platformId === account()))
       setAccount(readyAccounts()[0]?.platformId ?? '')
   })
-  const decode = (file?: File) => {
-    if (!file) return
-    stopCamera()
+  const scanQrFile = async (file: File) => {
+    stopCapture()
+    setInput('')
+    setApproved(false)
     setCameraMessage('')
-    void scan.run(async () => {
-      setApproved(false)
-      const { decodeQrImage } = await import('./qr.js')
-      const result = await decodeQrImage(file, controller.signal)
-      if (!parseTelegramLoginUrl(result))
-        throw new Error('This is not a valid Telegram login QR code')
-      setInput(result)
-    })
+    const { decodeQrImage } = await import('./qr.js')
+    const result = await decodeQrImage(file, controller.signal)
+    const parsed = parseTelegramLoginUrl(result)
+    if (!parsed) throw new Error('图片中的二维码不是有效的 Telegram 登录码')
+    setInput(parsed)
+    setCameraMessage('二维码已识别。请选择目标账号，再手动批准登录。')
+  }
+  const decode = (file?: File) => {
+    if (!file || scan.busy() || approve.busy()) return
+    void scan.run(() => scanQrFile(file))
   }
   const paste = (event: ClipboardEvent) => {
-    const file = Array.from(event.clipboardData?.items ?? [])
-      .find((item) => item.type.startsWith('image/'))
-      ?.getAsFile()
-    if (file) {
+    const item = Array.from(event.clipboardData?.items ?? [])
+      .find((value) => value.type.startsWith('image/'))
+    const file = item?.getAsFile() ?? Array.from(event.clipboardData?.files ?? [])
+      .find((value) => value.type.startsWith('image/'))
+    if (file && !scan.busy() && !approve.busy()) {
       event.preventDefault()
       decode(file)
     }
   }
+  const readClipboard = () => {
+    if (scan.busy() || approve.busy()) return
+    if (!navigator.clipboard?.read) {
+      setCameraMessage('浏览器不支持直接读取剪贴板，请在此弹窗按 Ctrl+V（Mac 为 ⌘V）。')
+      return
+    }
+    void scan.run(async () => {
+      const items = await navigator.clipboard.read()
+      for (const item of items) {
+        const type = item.types.find((value) => value.startsWith('image/'))
+        if (!type) continue
+        const blob = await item.getType(type)
+        await scanQrFile(new File([blob], 'clipboard-qr', { type: blob.type || type }))
+        return
+      }
+      throw new Error('剪贴板中没有图片，请先复制 Telegram 二维码截图')
+    })
+  }
+  const drop = (event: DragEvent) => {
+    event.preventDefault()
+    setDragging(false)
+    if (scan.busy() || approve.busy()) return
+    decode(Array.from(event.dataTransfer?.files ?? []).find((file) => file.type.startsWith('image/'))
+      ?? event.dataTransfer?.files[0])
+  }
   const onVisibilityChange = () => {
-    if (document.hidden && cameraState() !== 'idle') {
-      stopCamera()
+    // Screen capture must continue when the Telegram application takes focus.
+    if (document.hidden && captureSource() === 'camera') {
+      stopCapture()
       setCameraMessage('页面切换到后台，已自动关闭摄像头。')
     }
   }
@@ -558,55 +593,88 @@ function QrLogin(props: {
   document.addEventListener('visibilitychange', onVisibilityChange)
   onCleanup(() => {
     controller.abort()
-    stopCamera()
+    stopCapture()
     window.removeEventListener('paste', paste)
     document.removeEventListener('visibilitychange', onVisibilityChange)
   })
   return (
-    <Modal title="Approve Telegram QR login" onClose={() => { stopCamera(); props.onClose() }}>
+    <Modal title="Approve Telegram QR login" onClose={() => { stopCapture(); props.onClose() }}>
       <p>
-        使用摄像头扫描、上传或粘贴 Telegram 登录二维码，也可以直接粘贴登录链接。
-        扫描只在浏览器本地进行，必须再次确认才会批准登录。
+        可以共享显示 Telegram 登录二维码的应用窗口、使用摄像头扫码，或者上传、拖放、粘贴截图。
+        图像只在当前浏览器本地解码，不上传屏幕内容；识别后仍需手动批准登录。
       </p>
       <div class="qr-camera-controls">
         <button
           class="button outlined"
           type="button"
-          disabled={scan.busy() || approve.busy() || !props.connected || !readyAccounts().length}
-          onClick={() => cameraState() === 'idle' ? startCamera() : stopCamera()}
+          disabled={scan.busy() || approve.busy() || !props.connected || !readyAccounts().length ||
+            (cameraState() !== 'idle' && captureSource() !== 'screen')}
+          onClick={() => captureSource() === 'screen' ? stopCapture() : startCapture('screen')}
         >
-          {cameraState() === 'idle' ? '使用摄像头扫码' : '停止摄像头'}
+          {captureSource() === 'screen' ? '停止共享屏幕' : '共享 Telegram 窗口扫码'}
         </button>
-        <small class="muted">摄像头需要 HTTPS 或 localhost；手机优先使用后置摄像头。</small>
+        <button
+          class="button outlined"
+          type="button"
+          disabled={scan.busy() || approve.busy() || !props.connected || !readyAccounts().length ||
+            (cameraState() !== 'idle' && captureSource() !== 'camera')}
+          onClick={() => captureSource() === 'camera' ? stopCapture() : startCapture('camera')}
+        >
+          {captureSource() === 'camera' ? '停止摄像头' : '使用摄像头扫码'}
+        </button>
+        <small class="muted">共享时请在浏览器的选择窗口中选择 Telegram 应用，避免共享 WebUI 本身。需要 HTTPS 或 localhost。</small>
       </div>
       <video
         ref={(element) => { videoElement = element }}
         class="qr-camera-video"
-        aria-label="摄像头预览"
+        aria-label={captureSource() === 'screen' ? '共享窗口预览' : '摄像头预览'}
         muted
         playsinline
         style={{ display: cameraState() === 'idle' ? 'none' : 'block' }}
       />
       <Show when={cameraState() === 'starting'}>
-        <p role="status">正在开启摄像头并等待画面…</p>
+        <p role="status">正在等待{captureSource() === 'screen' ? '屏幕共享权限' : '摄像头画面'}…</p>
       </Show>
       <Show when={cameraState() === 'scanning'}>
-        <p role="status">将 Telegram 登录二维码放入摄像头画面中。</p>
+        <p role="status">{captureSource() === 'screen'
+          ? '正在扫描共享窗口中的 Telegram 登录二维码，切换到 Telegram 也可继续。'
+          : '将 Telegram 登录二维码放入摄像头画面中。'}</p>
       </Show>
       <Show when={cameraMessage()}>
         <p class="notice" role="status">{cameraMessage()}</p>
       </Show>
-      <label class="field">
-        <span>QR image</span>
-        <input
-          type="file"
-          accept="image/*"
-          disabled={scan.busy() || approve.busy()}
-          onChange={(event) => decode(event.currentTarget.files?.[0])}
-        />
-      </label>
+      <div
+        class="qr-upload-zone"
+        classList={{ dragging: dragging() }}
+        aria-label="二维码图片上传、拖放或粘贴区域"
+        onDragOver={(event) => {
+          if (!Array.from(event.dataTransfer?.types ?? []).includes('Files')) return
+          event.preventDefault()
+          setDragging(true)
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={drop}
+      >
+        <label class="field">
+          <span>QR image · 上传二维码图片</span>
+          <input
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif,image/bmp,image/avif"
+            disabled={scan.busy() || approve.busy()}
+            onChange={(event) => {
+              decode(event.currentTarget.files?.[0])
+              event.currentTarget.value = ''
+            }}
+          />
+        </label>
+        <div class="qr-upload-actions">
+          <button class="button outlined" type="button" disabled={scan.busy() || approve.busy()}
+            onClick={readClipboard}>粘贴剪贴板图片</button>
+          <small class="muted">也可拖入截图，或在弹窗内按 Ctrl+V / ⌘V；最大 8 MiB。</small>
+        </div>
+      </div>
       <Show when={scan.busy()}>
-        <p role="status">Scanning the QR code…</p>
+        <p role="status">正在本地识别 QR 图片…</p>
       </Show>
       <label class="field">
         <span>Telegram login link</span>
@@ -615,7 +683,7 @@ function QrLogin(props: {
           placeholder="tg://login?token=…"
           disabled={approve.busy()}
           onInput={(event) => {
-            stopCamera()
+            stopCapture()
             setCameraMessage('')
             setInput(event.currentTarget.value)
             setApproved(false)
