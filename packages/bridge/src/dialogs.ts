@@ -5366,6 +5366,8 @@ export class DialogRpc {
             _: 'messageEntityTextUrl', offset: base + entity.offset, length: entity.length,
             url: entity.url,
           })
+        } else if (entity.type === 'spoiler') {
+          output.push({ _: 'messageEntitySpoiler', offset: base + entity.offset, length: entity.length })
         } else if (entity.type === 'bold') {
           output.push({ _: 'messageEntityBold', offset: base + entity.offset, length: entity.length })
         } else if (entity.type === 'italic') {
@@ -5410,8 +5412,19 @@ export class DialogRpc {
 
   private _inputTextPart(text: string, entities?: tl.TypeMessageEntity[]): IMMessageInput['parts'][number] {
     const mapped: IMTextEntity[] = []
+    const formatTypes: Record<string, 'bold' | 'italic' | 'underline' | 'strikethrough' | 'code' | 'pre' | 'blockquote' | 'spoiler'> = {
+      messageEntityBold: 'bold', messageEntityItalic: 'italic', messageEntityUnderline: 'underline',
+      messageEntityStrike: 'strikethrough', messageEntityCode: 'code', messageEntityPre: 'pre',
+      messageEntityBlockquote: 'blockquote', messageEntitySpoiler: 'spoiler',
+    }
     for (const entity of entities ?? []) {
       const input = entity as any
+      if (Number.isSafeInteger(input.offset) && Number.isSafeInteger(input.length)
+        && input.offset >= 0 && input.length > 0 && input.offset + input.length <= text.length) {
+        const type = formatTypes[entity._]
+        if (type) { mapped.push({ type, offset: input.offset, length: input.length, ...(type === 'pre' ? { language: input.language } : {}) }); continue }
+        if (entity._ === 'messageEntityTextUrl') { mapped.push({ type: 'text-link', offset: input.offset, length: input.length, url: input.url }); continue }
+      }
       if (entity._ === 'messageEntityCustomEmoji') {
         const definition = this._reactions?.resolveCustomEmoji(Number(input.documentId))
         if (definition && input.offset >= 0 && input.length > 0 && input.offset + input.length <= text.length) {
@@ -5433,7 +5446,7 @@ export class DialogRpc {
       mapped.push({ type: 'mention', offset: input.offset, length: input.length, userId })
     }
     for (const inferred of plainUsernameMentions(text)) {
-      if (mapped.some((entity) => rangesOverlap(entity, inferred))) continue
+      if (mapped.some((entity) => (entity.type === 'mention' || entity.type === 'code' || entity.type === 'pre') && rangesOverlap(entity, inferred))) continue
       const userId = this._mentionedUserId(text, inferred.offset, inferred.length)
       if (userId) mapped.push({ ...inferred, type: 'mention', userId })
     }

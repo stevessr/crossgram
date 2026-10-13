@@ -14,7 +14,7 @@ import type {
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { MATRIX_EMOJI } from './emoji.js'
 import { MatrixClient, MatrixHttpError, type MatrixClientOptions } from './client.js'
-import { matrixMentionUserIds, matrixTextEntities, textContent, stripReplyFallback, matrixReplyTarget } from './formatting.js'
+import { matrixMentionUserIds, matrixFormattedText, textContent, stripReplyFallback, matrixReplyTarget } from './formatting.js'
 import { buildSpaceFolders } from './space-hierarchy.js'
 import { countClosedMatrixPoll, type MatrixPollTally } from './poll-results.js'
 import type {
@@ -187,15 +187,15 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
 
   async getStickerSources(roomId?: string): Promise<MatrixPackSource[]> {
     await this.loadJoinedDialogs()
-    const globalData = GLOBAL_PACK_TYPES.map(type => this.stickerAccountData.get(type)).filter(Boolean).at(-1)
-    const globals: Record<string, unknown> = isRecord(globalData?.rooms) ? globalData.rooms : {}
+    const globals = this.globalStickerRooms()
     const sources = this.localStickerSources(roomId)
     // Globally selected packs can belong to rooms the account has not joined.
     // Fetch only the explicit pack keys, with a bounded short-lived cache.
     for (const [id, keys] of Object.entries(globals)) {
-      if (this.joinedRoomIds.has(id) || !isRecord(keys)) continue
+      if (!isRecord(keys)) continue
       for (const key of Object.keys(keys)) {
         const cacheKey = packId(id, key)
+        if (sources.some(source => source.id === cacheKey)) continue
         let cached = this.externalImagePacks.get(cacheKey)
         if (!cached || cached.expires < Date.now()) {
           const content = (async () => {
@@ -217,9 +217,23 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     return sources.sort((a, b) => Number(b.global) - Number(a.global) || a.id.localeCompare(b.id))
   }
 
+  private globalStickerRooms(): Record<string, Record<string, unknown>> {
+    // Clients can still write legacy account data while newer clients write
+    // the stable namespace. An empty stable event must not hide legacy packs.
+    const rooms: Record<string, Record<string, unknown>> = Object.create(null)
+    for (const type of GLOBAL_PACK_TYPES) {
+      const selected = this.stickerAccountData.get(type)?.rooms
+      if (!isRecord(selected)) continue
+      for (const [room, keys] of Object.entries(selected)) {
+        if (!isRecord(keys)) continue
+        rooms[room] = { ...rooms[room], ...keys }
+      }
+    }
+    return rooms
+  }
+
   private localStickerSources(roomId?: string): MatrixPackSource[] {
-    const globalData = GLOBAL_PACK_TYPES.map(type => this.stickerAccountData.get(type)).filter(Boolean).at(-1)
-    const globals: Record<string, unknown> = isRecord(globalData?.rooms) ? globalData.rooms : {}
+    const globals = this.globalStickerRooms()
     const visibleRooms = new Set(roomId ? [roomId] : [])
     const pending = roomId ? [roomId] : []
     while (pending.length && visibleRooms.size < 64) {
@@ -236,7 +250,15 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       if (!this.joinedRoomIds.has(id)) continue
       sources.push(...roomPacks(id, state.values(), globals).filter(pack => pack.global || visibleRooms.has(id)))
     }
-    const personal = USER_PACK_TYPES.map(type => this.stickerAccountData.get(type)).filter(Boolean).at(-1)
+    const personalPacks = USER_PACK_TYPES.map(type => this.stickerAccountData.get(type)).filter(isRecord)
+    const personal = personalPacks.length ? {
+      ...Object.assign({}, ...personalPacks),
+      images: Object.assign({}, ...personalPacks.map(pack => Object.fromEntries(
+        Object.entries(isRecord(pack.images) ? pack.images : {}).map(([key, image]) => [key,
+          isRecord(image) ? { ...image, usage: image.usage ?? (isRecord(pack.pack) ? pack.pack.usage : undefined) ?? [] } : image,
+        ]),
+      ))),
+    } : undefined
     if (personal) sources.push({ id: packId('@account', ''), title: 'Matrix stickers', content: personal, global: true })
     return sources.sort((a, b) => Number(b.global) - Number(a.global) || a.id.localeCompare(b.id))
   }
@@ -1721,12 +1743,13 @@ function matrixMessageParts(content: MatrixRoomMessageContent): IMMessage<Matrix
     }]
   }
   if (content.msgtype === 'm.text' || content.msgtype === 'm.notice' || content.msgtype === 'm.emote') {
-    if (!body) return []
+    const formatted = matrixFormattedText(content)
+    if (!formatted.text) return []
     const prefix = content.msgtype === 'm.emote' ? '* ' : ''
-    const entities = matrixTextEntities(content)?.map((entity) => ({
+    const entities = formatted.entities?.map((entity) => ({
       ...entity, offset: entity.offset + prefix.length,
     }))
-    return [{ type: 'text', text: prefix + body, ...(entities ? { entities } : {}) }]
+    return [{ type: 'text', text: prefix + formatted.text, ...(entities ? { entities } : {}) }]
   }
   if (!['m.image', 'm.file', 'm.audio', 'm.video'].includes(content.msgtype ?? '')) return []
   const mxc = content.url
@@ -1760,7 +1783,8 @@ function matrixMessageParts(content: MatrixRoomMessageContent): IMMessage<Matrix
 }
 
 function formattedContent(base: MatrixRoomMessageContent, body: string, entities?: readonly { type: string, offset: number, length: number, url?: string, language?: string }[]): MatrixRoomMessageContent {
-  const content = { ...base, ...textContent(body, undefined, entities as never), msgtype: base.msgtype ?? 'm.text' }
+  const { format: _format, formatted_body: _html, 'm.mentions': _mentions, ...rest } = base
+  const content = { ...rest, ...textContent(body, undefined, entities as never), msgtype: base.msgtype ?? 'm.text' }
   delete content['m.relates_to']; delete content['m.new_content']
   return content
 }

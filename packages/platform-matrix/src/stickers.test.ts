@@ -119,3 +119,36 @@ describe('automatic Matrix message-to-pack mapping', () => {
     await platform.stop()
   })
 })
+
+describe('coexisting stable and legacy sticker catalogs', () => {
+  it('unions global selections, fetches missing joined-room packs, and preserves personal image usage', async () => {
+    const { MatrixPlatform } = await import('./index.js')
+    const platform = new MatrixPlatform({ homeserver: 'https://matrix.test', accessToken: 'fixture' })
+    const internal = platform as any
+    internal.loadJoinedDialogs = async () => []
+    internal.joinedRoomIds.add('!a:test')
+    internal.joinedRoomIds.add('!b:test')
+    internal.ingestState('!a:test', [event('m.room.image_pack', 'local', { images })])
+    internal.ingestState('!b:test', [event('im.ponies.room_emotes', 'legacy', { images })])
+    internal.ingestAccountData({ account_data: { events: [
+      { type: 'im.ponies.emote_rooms', content: { rooms: { '!b:test': { legacy: {} } } } },
+      { type: 'm.image_pack.rooms', content: { rooms: { '!a:test': { missing: {} } } } },
+      { type: 'im.ponies.user_emotes', content: { pack: { usage: ['sticker'] }, images: { old: { url: 'mxc://test/old' } } } },
+      { type: 'm.image_pack', content: { pack: { usage: ['emoticon'] }, images: { newer: { url: 'mxc://test/new' } } } },
+    ] } })
+    const fetched: string[] = []
+    platform.client.getStateContent = async (room, _type, key) => { fetched.push(`${room}/${key}`); return { images } }
+    try {
+      const sources = await platform.getStickerSources()
+      expect(sources.map(s => s.id)).toEqual(expect.arrayContaining([packId('!a:test', 'missing'), packId('!b:test', 'legacy'), packId('@account', '')]))
+      expect(sources.map(s => s.id)).not.toContain(packId('!a:test', 'local'))
+      expect(fetched).toEqual(['!a:test/missing'])
+      const personal = mapPack('matrix:stickers', sources.find(s => s.id === packId('@account', ''))!)
+      expect(personal.stickers.map(s => s.locator)).toEqual([{ mxc: 'mxc://test/old' }])
+      internal.ingestAccountData({ account_data: { events: [{ type: 'm.image_pack.rooms', content: { rooms: {} } }, { type: 'm.image_pack', content: {} }] } })
+      expect((await platform.getStickerSources()).map(s => s.id)).toContain(packId('!b:test', 'legacy'))
+      internal.ingestAccountData({ account_data: { events: [{ type: 'im.ponies.emote_rooms', content: { rooms: {} } }] } })
+      expect((await platform.getStickerSources()).map(s => s.id)).not.toContain(packId('!b:test', 'legacy'))
+    } finally { await platform.stop() }
+  })
+})

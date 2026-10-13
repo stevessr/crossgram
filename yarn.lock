@@ -2021,6 +2021,7 @@ __metadata:
   resolution: "@mtproto-relay/platform-matrix@workspace:packages/platform-matrix"
   dependencies:
     "@mtproto-relay/bridge": "workspace:*"
+    htmlparser2: "npm:^10.0.0"
     schemastery: "npm:^3.18.0"
     undici: "npm:^8.10.0"
     vitest: "npm:^4.1.10"

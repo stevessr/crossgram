@@ -1498,6 +1498,8 @@ function makeMessageEntities(
           _: 'messageEntityTextUrl', offset: base + entity.offset, length: entity.length,
           url: entity.url,
         })
+      } else if (entity.type === 'spoiler') {
+        entities.push({ _: 'messageEntitySpoiler', offset: base + entity.offset, length: entity.length })
       } else if (entity.type === 'bold') {
         entities.push({ _: 'messageEntityBold', offset: base + entity.offset, length: entity.length })
       } else if (entity.type === 'italic') {

@@ -233,6 +233,13 @@ export interface IMMessageReactionRow {
   updatedAt: Date
 }
 
+export interface StickerSetReferenceRow {
+  platformSessionId: string
+  setId: string
+  providerId: string
+  providerPackId: string
+}
+
 export interface StickerSetInstallRow {
   id: number
   platformSessionId: string
@@ -309,6 +316,7 @@ declare module '@cordisjs/plugin-database' {
     mtproto_sticker_favorite: StickerFavoriteRow
     mtproto_reaction_recent: ReactionRecentRow
     mtproto_im_message_reaction: IMMessageReactionRow
+    mtproto_sticker_set_reference: StickerSetReferenceRow
     mtproto_sticker_set_install: StickerSetInstallRow
     mtproto_draft: DraftRow
     mtproto_notification_settings: NotificationSettingsRow
@@ -497,6 +505,10 @@ export function defineModels(ctx: Context): void {
     unique: [['messageId', 'nativeReactionKey']],
     indexes: ['messageId'],
   })
+
+  ctx.model.extend('mtproto_sticker_set_reference', {
+    platformSessionId: 'string', setId: 'string', providerId: 'string', providerPackId: 'text',
+  }, { primary: ['platformSessionId', 'setId'] })
 
   ctx.model.extend('mtproto_sticker_set_install', {
     id: 'unsigned', platformSessionId: 'string', providerId: 'string', providerPackId: 'text',

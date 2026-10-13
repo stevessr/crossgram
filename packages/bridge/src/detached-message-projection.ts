@@ -146,6 +146,7 @@ function mapEntity(
   if (entity.type === 'text-link') return {
     _: 'messageEntityTextUrl', offset, length: entity.length, url: entity.url,
   }
+  if (entity.type === 'spoiler') return { _: 'messageEntitySpoiler', offset, length: entity.length }
   if (entity.type === 'bold') return { _: 'messageEntityBold', offset, length: entity.length }
   if (entity.type === 'italic') return { _: 'messageEntityItalic', offset, length: entity.length }
   if (entity.type === 'underline') return { _: 'messageEntityUnderline', offset, length: entity.length }

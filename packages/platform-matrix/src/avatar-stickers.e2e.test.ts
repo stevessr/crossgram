@@ -26,6 +26,7 @@ const pack = (url: string) => ({ pack: { usage: ['sticker'] }, images: { cat: { 
 describe('Matrix avatars and room/global stickers over real HTTP and bridge RPC', () => {
   let homeserver: string, platform: MatrixPlatform, rpc: DialogRpc, uploads: UploadManager
   let stickers: StickerRpc
+  let recreateStickers: () => StickerRpc, registry: StickerProviderRegistry
   let cleanup: () => Promise<void>, store: MessageStore
   let profileAvatar = 'mxc://test/old-user', uploadSequence = 0
   const calls: Array<{ path: string, method: string, body: Buffer }> = []
@@ -78,9 +79,10 @@ describe('Matrix avatars and room/global stickers over real HTTP and bridge RPC'
     platform = new MatrixPlatform({ homeserver, accessToken: 'fixture-token', userId: session.userId })
     const dir = await mkdtemp(join(tmpdir(), 'matrix-avatar-')); uploads = new UploadManager(dir)
     store = new MessageStore(ctx.database)
-    const registry = new StickerProviderRegistry()
+    registry = new StickerProviderRegistry()
     registry.register('matrix:stickers', new MatrixStickerProvider(platform.client, 'matrix:stickers', 'matrix', id => platform.getStickerSources(id)))
-    stickers = new StickerRpc(ctx.database, registry, platform, session)
+    recreateStickers = () => new StickerRpc(ctx.database, registry, platform, session)
+    stickers = recreateStickers()
     rpc = new DialogRpc(platform, session, store, uploads, undefined, 1, stickers)
     cleanup = async () => { await platform.stop(); await rm(dir, { recursive: true, force: true }); for (const fiber of fibers.reverse()) await fiber.dispose() }
   })
@@ -113,6 +115,16 @@ describe('Matrix avatars and room/global stickers over real HTTP and bridge RPC'
     expect((await store.getConversation(session.platformSessionId, '!a:test'))?.avatar).toBeUndefined()
     const full = await rpc.getFullChannel({ _: 'channels.getFullChannel', channel })
     expect(full.fullChat).toMatchObject({ stickerset: { _: 'stickerSet', count: 3 } })
+    if (full.fullChat._ !== 'channelFull' || !full.fullChat.stickerset) throw new Error('Missing room set')
+    const set = full.fullChat.stickerset
+    const request = { _: 'messages.getStickerSet' as const, stickerset: { _: 'inputStickerSetID' as const, id: set.id, accessHash: set.accessHash }, hash: 0 }
+    for (const candidate of [stickers, recreateStickers()]) {
+      registry.touch('matrix:stickers')
+      const loaded = await candidate.getStickerSet(request)
+      expect(loaded).toMatchObject({ _: 'messages.stickerSet', documents: expect.any(Array) })
+      if (loaded._ !== 'messages.stickerSet') throw new Error('Missing set content')
+      expect(loaded.documents).toHaveLength(3)
+    }
     expect(full.chats[0]).toMatchObject({ photo: { _: 'chatPhotoEmpty' } })
     await platform.setConversationAvatar(session, { id: '!space:test' }, { kind: 'image', mimeType: 'image/png', source: { async *stream() { yield new Uint8Array([7]) } } })
     expect(rooms['!space:test'].find(e => e.type === 'm.room.avatar')?.content.url).toMatch(/^mxc:/)

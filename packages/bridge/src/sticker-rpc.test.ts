@@ -12,6 +12,37 @@ import { StickerProviderRegistry, type IMSticker, type IMStickerProvider } from 
 import type { IMPlatform, PlatformSession } from './platform.js'
 
 describe('StickerRpc', () => {
+  it('restores room-only set identities per session, refreshes contents, and rejects removed packs', async () => {
+    const registry = new StickerProviderRegistry()
+    let available = true
+    const provider: IMStickerProvider = {
+      capabilities: { platformKinds: ['matrix'], ownerPlatformId: 'matrix', sessionScoped: true },
+      listPacks: async () => ({ packs: [] }),
+      getPack: async () => available ? { providerId: 'matrix:stickers', packId: 'room-only', title: 'Room', stickers: [] } : null,
+      getSticker: async () => null,
+      openAsset: async () => { throw new Error('unused') },
+    }
+    registry.register('matrix:stickers', provider)
+    const references: any[] = []
+    const database = {
+      upsert: async (table: string, rows: any[]) => { if (table === 'mtproto_sticker_set_reference') references.push(...rows) },
+      get: async (table: string, query: Record<string, unknown>) => table === 'mtproto_sticker_set_reference'
+        ? references.filter(row => Object.entries(query).every(([key, value]) => row[key] === value)) : [],
+    }
+    const make = (sessionId = 'first') => new StickerRpc(database as never, registry, { platformKind: 'matrix' } as IMPlatform,
+      { platformId: 'matrix', platformSessionId: sessionId } as PlatformSession)
+    const rpc = make()
+    const set = (await rpc.getConversationSet({ providerId: 'matrix:stickers', packId: 'room-only' }))!
+    const req = { _: 'messages.getStickerSet' as const, stickerset: { _: 'inputStickerSetID' as const, id: set.id, accessHash: set.accessHash }, hash: 0 }
+    expect((await rpc.getStickerSet(req))._).toBe('messages.stickerSet')
+    registry.touch('matrix:stickers')
+    expect((await make().getStickerSet(req))._).toBe('messages.stickerSet')
+    await expect(make('other').getStickerSet(req)).rejects.toThrow('STICKERSET_INVALID')
+    available = false
+    registry.touch('matrix:stickers')
+    await expect(rpc.getStickerSet(req)).rejects.toThrow('STICKERSET_INVALID')
+  })
+
   it('releases only the deactivated session revision', () => {
     const registry = new StickerProviderRegistry()
     registry.register('provider', { } as IMStickerProvider)

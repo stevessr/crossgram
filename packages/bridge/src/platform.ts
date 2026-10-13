@@ -367,7 +367,7 @@ export type IMTextEntity =
       numericId?: string
     }
   | {
-      type: 'bold' | 'italic' | 'underline' | 'strikethrough' | 'code' | 'pre' | 'blockquote'
+      type: 'bold' | 'italic' | 'underline' | 'strikethrough' | 'code' | 'pre' | 'blockquote' | 'spoiler'
       offset: number
       length: number
       language?: string

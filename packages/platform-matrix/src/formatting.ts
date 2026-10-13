@@ -1,11 +1,12 @@
+import { parseMatrixHtml, renderMatrixHtml } from './rich-text.js'
 import type { IMTextEntity } from '@mtproto-relay/bridge'
 import type { MatrixRoomMessageContent } from './types.js'
 
 type MentionEntity = Extract<IMTextEntity, { type: 'mention' }>
 
 /**
- * Render Telegram/Crossgram mention entities into both Matrix's notification
- * metadata and Matrix-compatible HTML links. Entity offsets are UTF-16 units.
+ * Render Telegram/Crossgram formatting and mention entities into Matrix HTML
+ * and explicit notification metadata. Entity offsets are UTF-16 units.
  * Plain text is retained unchanged for clients that do not render HTML.
  */
 export function textContent(
@@ -29,19 +30,16 @@ export function textContent(
   }
 
   const content: MatrixRoomMessageContent = { msgtype: 'm.text', body }
-  if (selected.length) {
-    let html = ''
-    let cursor = 0
-    for (const mention of selected) {
-      html += escapeHtml(body.slice(cursor, mention.offset))
-      html += '<a href="https://matrix.to/#/' + encodeURIComponent(mention.userId) + '">'
-        + escapeHtml(body.slice(mention.offset, mention.offset + mention.length)) + '</a>'
-      cursor = mention.offset + mention.length
-    }
+  const valid = (entities ?? []).filter(entity => entity.type !== 'mention'
+    && Number.isSafeInteger(entity.offset) && entity.offset >= 0
+    && Number.isSafeInteger(entity.length) && entity.length > 0
+    && entity.offset + entity.length <= body.length)
+  const formatted = [...valid, ...selected]
+  if (formatted.length) {
     content.format = 'org.matrix.custom.html'
-    content.formatted_body = html + escapeHtml(body.slice(cursor))
-    content['m.mentions'] = { user_ids: [...new Set(selected.map((mention) => mention.userId))] }
+    content.formatted_body = renderMatrixHtml(body, formatted)
   }
+  if (selected.length) content['m.mentions'] = { user_ids: [...new Set(selected.map(mention => mention.userId))] }
   if (replyToId) content['m.relates_to'] = { 'm.in_reply_to': { event_id: replyToId } }
   return content
 }
@@ -125,13 +123,6 @@ function rangesOverlap(aStart: number, aLength: number, bStart: number, bLength:
   return aStart < bStart + bLength && bStart < aStart + aLength
 }
 
-function escapeHtml(text: string): string {
-  const escapes: Record<string, string> = {
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }
-  return text.replace(/[&<>"']/gu, (char) => escapes[char]!)
-}
-
 function decodeHtml(text: string): string {
   return text.replace(/&(#x[0-9a-f]+|#\d+|amp|lt|gt|quot|apos|nbsp);/giu, (encoded, entity: string) => {
     if (entity.startsWith('#')) {
@@ -145,6 +136,17 @@ function decodeHtml(text: string): string {
     }
     return namedEntities[entity.toLowerCase()] ?? encoded
   })
+}
+
+/** Use the formatted body as the text source, not Markdown fallback markers. */
+export function matrixFormattedText(content: MatrixRoomMessageContent): { text: string, entities?: IMTextEntity[] } {
+  if (content.format !== 'org.matrix.custom.html' || typeof content.formatted_body !== 'string'
+    || content.formatted_body.length > 1_000_000) return { text: content.body ?? '', entities: matrixTextEntities(content) }
+  const parsed = parseMatrixHtml(content.formatted_body, new Set(matrixMentionUserIds(content)))
+  for (const entity of matrixTextEntities({ ...content, body: parsed.text, formatted_body: undefined }) ?? []) {
+    if (!parsed.entities.some(existing => existing.type === 'mention' && rangesOverlap(existing.offset, existing.length, entity.offset, entity.length))) parsed.entities.push(entity)
+  }
+  return { text: parsed.text, entities: parsed.entities.length ? parsed.entities : undefined }
 }
 
 /** Remove legacy rich-reply quotes only when the event has a real reply relation. */

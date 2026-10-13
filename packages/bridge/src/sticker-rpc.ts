@@ -92,11 +92,20 @@ export class StickerRpc {
   }
 
   async getConversationSet(reference: { providerId: string, packId: string }): Promise<tl.RawStickerSet | undefined> {
+    this._refreshProjectionCache()
     const provider = this._registry.get(reference.providerId)
     if (!provider) return
     const context = { ...this._context() }
     const pack = await provider.getPack(context, reference.packId)
-    return pack ? this._makeSet(pack, undefined, false) : undefined
+    if (!pack) return
+    const set = this._makeSet(pack, undefined, false)
+    // Room-only packs are not in the account-wide installed catalog. Persist
+    // the opaque Telegram ID so another connection/restart can reopen them.
+    await this._database.upsert('mtproto_sticker_set_reference', [{
+      platformSessionId: this._session.platformSessionId, setId: set.id.toString(),
+      providerId: reference.providerId, providerPackId: reference.packId,
+    }], ['platformSessionId', 'setId'])
+    return set
   }
 
   async getStickerSet(req: tl.messages.RawGetStickerSetRequest): Promise<tl.messages.TypeStickerSet> {
@@ -770,7 +779,9 @@ export class StickerRpc {
     if (revision === this._projectionRevision) return
     this._projectionRevision = revision
     this._documents.clear()
-    this._sets.clear()
+    // These are identities, not cached pack contents. Keep them across a
+    // catalog revision; getPack still validates existence and current content.
+    for (const [id, ref] of this._sets) if (!this._registry.get(ref.providerId)) this._sets.delete(id)
   }
 
   private _shortName(pack: IMStickerPackSummary): string {
@@ -788,6 +799,15 @@ export class StickerRpc {
     if (input._ === 'inputStickerSetID') {
       const ref = this._sets.get(input.id.toNumber())
       if (ref) return ref
+      const [saved] = await this._database.get('mtproto_sticker_set_reference', {
+        platformSessionId: this._session.platformSessionId, setId: input.id.toString(),
+      })
+      if (saved && this._registry.get(saved.providerId)
+        && this._setId(saved.providerId, saved.providerPackId) === input.id.toNumber()) {
+        const restored = { providerId: saved.providerId, packId: saved.providerPackId }
+        this._sets.set(input.id.toNumber(), restored)
+        return restored
+      }
     }
     const packs = await this._listPacks()
     if (input._ === 'inputStickerSetID') {
