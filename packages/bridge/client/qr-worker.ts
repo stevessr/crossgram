@@ -14,6 +14,7 @@ self.onmessage = (event: MessageEvent<ImageBitmap>) => {
       context.getImageData(0, 0, width, height).data,
       width,
       height,
+      { inversionAttempts: 'attemptBoth' },
     )
     self.postMessage({ value: code?.data })
   } catch (error) {
