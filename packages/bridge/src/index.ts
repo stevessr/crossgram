@@ -887,13 +887,15 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   ctx.effect(async () => {
     await ctx.database.prepared()
     await legacyPhoneMigration
+    // The reaper must run even while startup subscriptions are still opening;
+    // a saturated first sync must not keep every platform hot forever.
+    if (config.lazySync?.enabled ?? true) subscriptions.startLazySyncReaper()
     // Retained delivery rows are the durable difference journal. They must
     // survive a restart so reconnecting devices can still recover the updates
     // they missed; the store prunes them per scope on write instead.
     await Promise.all(registry.ids.map(platformId => provision(platformId)))
     await publishStickerPacks()
     await subscriptions.startActiveSessions()
-    if (config.lazySync?.enabled ?? true) subscriptions.startLazySyncReaper()
     return () => subscriptions.stop()
   })
 
