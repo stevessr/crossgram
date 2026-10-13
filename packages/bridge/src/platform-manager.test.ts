@@ -1875,6 +1875,67 @@ describe('PlatformSubscriptionManager lazy sync', () => {
     await manager.stop()
   })
 
+  function createCoalescingManager(
+    platform: PushPlatform,
+    database: Awaited<ReturnType<typeof createDatabase>>,
+    store: MessageStore,
+  ) {
+    // A one-millisecond window keeps the test on real timers while both
+    // events still land in the same batch.
+    const errors: unknown[] = []
+    const manager = new PlatformSubscriptionManager(
+      database, new PlatformRegistry([['push', platform]]), store,
+      error => { errors.push(error) }, undefined, undefined, new Context(), 'show',
+      () => Date.now(), {}, 1,
+    )
+    return { manager, errors }
+  }
+
+  it('coalesces a reaction flood for one message into a single ingest', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    const store = new MessageStore(database)
+    const setReactions = vi.spyOn(store, 'setReactions')
+    const { manager, errors } = createCoalescingManager(platform, database, store)
+    await manager.ensure(session)
+    const conversation: IMConversation = { id: 'flood-room', kind: 'group', title: 'Flood' }
+    const reactionEvent = (n: number): IMEvent => ({
+      type: 'message-reactions', eventId: `flood-${n}`, conversation,
+      target: { conversationId: conversation.id, messageId: 'msg-1', targetId: 'msg-1' },
+      context: { available: [], reactions: [], maxSelected: 20 }, timestamp: n,
+    })
+
+    const first = manager.ingestLocalEvent(session, reactionEvent(1))
+    const second = manager.ingestLocalEvent(session, reactionEvent(2))
+    const [a, b] = await Promise.all([first, second])
+    expect(errors).toEqual([])
+    expect(setReactions).toHaveBeenCalledTimes(1)
+    expect(a).toBe(b)
+    await manager.stop()
+  })
+
+  it('keeps separate reaction batches for different messages', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    const store = new MessageStore(database)
+    const setReactions = vi.spyOn(store, 'setReactions')
+    const { manager, errors } = createCoalescingManager(platform, database, store)
+    await manager.ensure(session)
+    const conversation: IMConversation = { id: 'flood-room', kind: 'group', title: 'Flood' }
+    const reactionEvent = (messageId: string, n: number): IMEvent => ({
+      type: 'message-reactions', eventId: `flood-${messageId}-${n}`, conversation,
+      target: { conversationId: conversation.id, messageId, targetId: messageId },
+      context: { available: [], reactions: [], maxSelected: 20 }, timestamp: n,
+    })
+
+    await Promise.all([
+      manager.ingestLocalEvent(session, reactionEvent('msg-1', 1)),
+      manager.ingestLocalEvent(session, reactionEvent('msg-2', 2)),
+    ])
+    expect(setReactions).toHaveBeenCalledTimes(2)
+    await manager.stop()
+  })
+
   it('never restarts subscriptions for platforms that were explicitly stopped', async () => {
     const clock = { value: 3_000_000 }
     const platform = new PushPlatform()

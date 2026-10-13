@@ -229,6 +229,22 @@ export const DEFAULT_LAZY_SYNC: Required<LazySyncOptions> = {
   reapIntervalMs: 60_000,
 }
 
+/** Reaction events for one message coalesce into the latest context. */
+const REACTION_COALESCE_MS = 2_000
+/** Upper bound of concurrently pending reaction batches. */
+const REACTION_COALESCE_MAX = 400
+
+interface ReactionBatch {
+  timer: { unref?(): unknown }
+  session: PlatformSession
+  event: Extract<IMEvent, { type: 'message-reactions' }>
+  options?: PlatformEventDeliveryOptions
+  /** Settles every caller waiting on this batch; failures settle undefined. */
+  settle: (result: PlatformEventPublishResult | undefined) => void
+  /** The shared deferred every caller of this batch awaits. */
+  promise: Promise<PlatformEventPublishResult | undefined>
+}
+
 /** Owns one durable event subscription per active platform session. */
 export class PlatformSubscriptionManager {
   private readonly _subscriptions = new Map<string, {
@@ -244,6 +260,7 @@ export class PlatformSubscriptionManager {
   private readonly _lazySyncDeadlineAt = new Map<string, number>()
   /** Sessions kept for lazy restarts after their subscription is disposed. */
   private readonly _retainedSessions = new Map<string, PlatformSession>()
+  private readonly _reactionBatches = new Map<string, ReactionBatch>()
   private _reaper?: { unref?(): unknown }
 
   constructor(
@@ -261,6 +278,7 @@ export class PlatformSubscriptionManager {
     private readonly _recalledMessageMode: RecalledMessageMode = 'show',
     private readonly _now: () => number = () => Date.now(),
     lazySync: LazySyncOptions = {},
+    private readonly _reactionCoalesceMs = REACTION_COALESCE_MS,
   ) {
     this._lazy = { ...DEFAULT_LAZY_SYNC, ...lazySync }
   }
@@ -527,6 +545,8 @@ export class PlatformSubscriptionManager {
       clearInterval(this._reaper)
       this._reaper = undefined
     }
+    for (const batch of this._reactionBatches.values()) clearTimeout(batch.timer)
+    this._reactionBatches.clear()
     const subscriptions = [...this._subscriptions.values()].map((subscription) => subscription.fiber)
     this._subscriptions.clear()
     this._forgetAllSessions()
@@ -551,6 +571,62 @@ export class PlatformSubscriptionManager {
   }
 
   private _enqueue(
+    session: PlatformSession,
+    event: IMEvent,
+    options?: PlatformEventDeliveryOptions,
+  ): Promise<PlatformEventPublishResult> {
+    if (event.type === 'message-reactions') {
+      return this._coalesceReaction(session, event, options)
+    }
+    return this._enqueueNow(session, event, options)
+  }
+
+  /**
+   * Reaction floods (a busy Discord channel re-emits the same message dozens
+   * of times per second) each paid a full ingest-plus-publish pipeline, which
+   * starved everything else. Events for one message coalesce for a short
+   * window and only the latest context is ever ingested.
+   */
+  private _coalesceReaction(
+    session: PlatformSession,
+    event: Extract<IMEvent, { type: 'message-reactions' }>,
+    options?: PlatformEventDeliveryOptions,
+  ): Promise<PlatformEventPublishResult | undefined> {
+    const key = `${session.platformSessionId}:${event.conversation.id}:${event.target.messageId}`
+    const existing = this._reactionBatches.get(key)
+    if (existing) {
+      existing.event = event
+      existing.options = options
+      return existing.promise
+    }
+    const { promise, resolve } = Promise.withResolvers<PlatformEventPublishResult | undefined>()
+    const batch: ReactionBatch = {
+      timer: setTimeout(() => this._flushReactionBatch(key), this._reactionCoalesceMs),
+      session, event, options, settle: resolve, promise,
+    }
+    batch.timer.unref?.()
+    this._reactionBatches.set(key, batch)
+    if (this._reactionBatches.size > REACTION_COALESCE_MAX) {
+      const oldest = this._reactionBatches.keys().next().value
+      if (oldest !== undefined) this._flushReactionBatch(oldest)
+    }
+    return promise
+  }
+
+  private _flushReactionBatch(key: string): void {
+    const batch = this._reactionBatches.get(key)
+    if (!batch) return
+    this._reactionBatches.delete(key)
+    // Delivery failures are already reported through _onError and the durable
+    // delivery journal, so the waiting callers settle undefined on failure.
+    this._enqueueNow(batch.session, batch.event, batch.options)
+      .then(batch.settle, error => {
+        this._onError(error, batch.session)
+        batch.settle(undefined)
+      })
+  }
+
+  private async _enqueueNow(
     session: PlatformSession,
     event: IMEvent,
     options?: PlatformEventDeliveryOptions,
