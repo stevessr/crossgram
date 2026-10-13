@@ -327,6 +327,12 @@ export class PlatformSubscriptionManager {
         const sessionCtx = fiberCtx.extend({ bridgeSession: { platform, session } })
         state.context = sessionCtx
         const unsubscribe = await platform.subscribe(session, async (event) => {
+          // The adapter handler runs while the subscription is alive by
+          // definition. When the reaper paused this session the gateway or
+          // sync loop keeps emitting in the background; re-enqueueing those
+          // events would auto-ensure the subscription and reopen the pause
+          // forever. Resume only through real client activity.
+          if (!this._subscriptions.has(session.platformSessionId)) return
           await this._enqueue(session, event)
         })
         this._onTrace?.(
