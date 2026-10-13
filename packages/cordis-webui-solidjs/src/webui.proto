@@ -1,8 +1,22 @@
 syntax = "proto3";
-package crossgram.webui.v1;
+package crossgram.webui.v2;
 
-// The WebUI only upgrades to protobuf after a JSON handshake. Large bodies
-// are gzip-compressed when beneficial; gzip applies solely to json_payload.
+// Dynamic extension data uses native typed protobuf fields, never JSON text.
+// Field numbers match google.protobuf.Value/Struct/ListValue.
+message Value {
+  oneof kind {
+    NullValue null_value = 1;
+    double number_value = 2;
+    string string_value = 3;
+    bool bool_value = 4;
+    Struct struct_value = 5;
+    ListValue list_value = 6;
+  }
+}
+enum NullValue { NULL_VALUE = 0; }
+message Struct { map<string, Value> fields = 1; }
+message ListValue { repeated Value values = 1; }
+
 message Frame {
   enum Kind {
     UNSPECIFIED = 0;
@@ -23,6 +37,7 @@ message Frame {
     RPC_CANCEL = 15;
   }
   Kind kind = 1;
-  bytes json_payload = 2;
+  // Serialized Value; gzip-compressed iff gzip is true. Empty means no body.
+  bytes protobuf_payload = 2;
   bool gzip = 3;
 }

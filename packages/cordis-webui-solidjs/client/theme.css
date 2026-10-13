@@ -2045,3 +2045,6 @@
     }
   }
 }
+
+/* Plugin module URLs may contain long encoded paths in worktrees. */
+.plugin-detail header .muted { overflow-wrap: anywhere; }

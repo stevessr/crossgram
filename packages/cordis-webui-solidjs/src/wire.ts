@@ -1,16 +1,15 @@
+import { encodeValue, decodeValue } from './protobuf-value.js'
 /**
  * Dependency-free Protocol Buffers wire codec for the Solid WebUI control plane.
- * The message kind is a protobuf enum; the original Muon/RPC JSON payload is
- * held in a bytes field to preserve snapshots, deltas and extension methods.
+ * The message kind is a protobuf enum; Muon/RPC values use native protobuf
+ * Value/Struct/List fields, including extension-defined snapshots and methods.
  * Large server->browser payloads can be gzip-compressed independently.
  *
  * Wire schema: packages/cordis-webui-solidjs/src/webui.proto
  */
-export const PROTO_TRANSPORT = 'protobuf-gzip-v1'
+export const PROTO_TRANSPORT = 'protobuf-native-v2'
 export const MAX_DECODE_BYTES = 32 * 1024 * 1024
 const MAX_FRAME_BYTES = 16 * 1024 * 1024
-const encoder = new TextEncoder()
-const decoder = new TextDecoder('utf-8', { fatal: true })
 const names = [
   '',
   'entry:init',
@@ -70,7 +69,7 @@ export function encodeFrame(
   if (!kind) throw new Error('Unknown WebUI protobuf type: ' + type)
   const source = body === undefined
     ? new Uint8Array()
-    : encoder.encode(JSON.stringify(body))
+    : encodeValue(body)
   let payload: Uint8Array = source, gzip = false
   if (compress && source.byteLength >= 2048) {
     const candidate = compress(source)
@@ -126,7 +125,7 @@ export function unpackFrame(frame: WireFrame, payload = frame.payload) {
     throw new Error('WebUI decompressed message exceeds limit')
   return {
     type: frame.type,
-    body: payload.length ? JSON.parse(decoder.decode(payload)) : undefined,
+    body: payload.length ? decodeValue(payload) : undefined,
   }
 }
 /** Browser decompression with an output cap to prevent gzip bombs. */

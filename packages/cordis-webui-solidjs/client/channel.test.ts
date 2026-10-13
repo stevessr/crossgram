@@ -140,7 +140,7 @@ describe('Connection lifecycle', () => {
     const { connection, socket } = setup()
     const { channel, release } = connection.acquire<any>('test')
     socket.receive('entry:init', {
-      version: 'solid-1', reset: true, transport: 'protobuf-gzip-v1',
+      version: 'solid-1', reset: true, transport: 'protobuf-native-v2',
       entries: { test: meta },
     })
     expect(socket.frames.at(-1)).toEqual({ type: 'entry:subscribe', body: { id: 'test' } })

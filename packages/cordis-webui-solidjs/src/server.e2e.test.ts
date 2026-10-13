@@ -219,6 +219,42 @@ describe('Solid WebUI production service', () => {
       await app.stop()
     }
   })
+  it('roundtrips nested native protobuf RPC values over a real upgraded WebSocket', async () => {
+    const app = await start()
+    let entry: ReturnType<SolidWebUI['addEntry']> | undefined
+    const plugin = app.ctx.plugin({
+      name: 'native-value-echo', inject: ['webui'],
+      apply(ctx: Context) {
+        entry = (ctx.get('webui') as unknown as SolidWebUI).addEntry<any>(
+          { baseUrl: import.meta.url, client: 'loader' },
+          { echo(value: unknown) { return value } },
+        )
+      },
+    })
+    const socket = new WebSocket(app.url.replace('http:', 'ws:') + '/api')
+    socket.binaryType = 'arraybuffer'
+    const frames: any[] = []
+    let binaryResponses = 0
+    socket.addEventListener('message', event => {
+      if (typeof event.data === 'string') frames.push(JSON.parse(event.data))
+      else { binaryResponses++; frames.push(unpackFrame(decodeFrame(event.data as ArrayBuffer))) }
+    })
+    try {
+      await plugin
+      await vi.waitFor(() => expect(entry?.id && frames.length).toBeTruthy())
+      socket.send(JSON.stringify({ type: 'transport:upgrade', body: { version: 1 } }))
+      await vi.waitFor(() => expect(frames.some(f => f.type === 'transport:ready')).toBe(true))
+      const value = { text: '中文🙂', rows: [null, false, 1.25, { nested: 'value' }] }
+      socket.send(encodeFrame('rpc:request', { sn: 42, entryId: entry!.id, method: 'echo', args: [value] }))
+      await vi.waitFor(() => expect(frames.find(f => f.type === 'rpc:response' && f.body.sn === 42)?.body)
+        .toEqual({ sn: 42, ok: true, value }))
+      expect(binaryResponses).toBeGreaterThan(0)
+    } finally {
+      socket.close()
+      await plugin.dispose()
+      await app.stop()
+    }
+  })
   it.each(['text', 'buffer'])('upgrades %s JSON envelopes over real WebSockets and processes binary ping/pong', async (encoding) => {
     const app = await start()
     const socket = new WebSocket(app.url.replace('http:', 'ws:') + '/api')
@@ -230,7 +266,7 @@ describe('Solid WebUI production service', () => {
     })
     try {
       await vi.waitFor(() =>
-        expect(frames[0]?.body?.transport).toBe('protobuf-gzip-v1'),
+        expect(frames[0]?.body?.transport).toBe('protobuf-native-v2'),
       )
       const upgrade = JSON.stringify({ type: 'transport:upgrade', body: { version: 1 } })
       socket.send(encoding === 'buffer' ? Buffer.from(upgrade) : upgrade)

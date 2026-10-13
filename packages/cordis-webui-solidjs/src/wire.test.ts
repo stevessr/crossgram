@@ -14,7 +14,7 @@ describe('versioned WebUI protobuf transport', () => {
     expect(unpackFrame(decodeFrame(encodeFrame('ping')))).toEqual({
       type: 'ping', body: undefined,
     })
-    expect(PROTO_TRANSPORT).toBe('protobuf-gzip-v1')
+    expect(PROTO_TRANSPORT).toBe('protobuf-native-v2')
     expect(supportsProtoType('entry:delta')).toBe(true)
     expect(unpackFrame(decodeFrame(encodeFrame('rpc:delta', { sn: 1, value: 'part' }))))
       .toEqual({ type: 'rpc:delta', body: { sn: 1, value: 'part' } })

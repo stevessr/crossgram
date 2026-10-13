@@ -101,7 +101,7 @@ describe('bounded subscription/RPC transport', () => {
   })
   it('negotiates protobuf without breaking the JSON bootstrap and receives binary commands', async () => {
     const { socket, request, client } = setup()
-    expect(socket.frames[0].body.transport).toBe('protobuf-gzip-v1')
+    expect(socket.frames[0].body.transport).toBe('protobuf-native-v2')
     await request('transport:upgrade', { version: 1 })
     expect(socket.frames.at(-1)).toEqual({ type: 'transport:ready', body: { version: 1 } })
     expect(client.protobuf).toBe(true)
@@ -118,8 +118,8 @@ describe('bounded subscription/RPC transport', () => {
     await request('entry:subscribe', { id: 'entry' })
     const frame = decodeFrame(socket.binaryFrames.at(-1)!)
     expect(frame.gzip).toBe(true)
-    expect(socket.binaryFrames.at(-1)!.length).toBeLessThan(1000)
-    expect(unpackFrame(frame, gunzipSync(frame.payload)).body.data.large).toHaveLength(100_000)
+    expect(socket.binaryFrames.at(-1)!.length).toBeLessThan(data.large.length / 50)
+    expect(unpackFrame(frame, gunzipSync(frame.payload)).body).toMatchObject({ data })
     client.dispose()
   })
   it('subscribes with a complete snapshot, unsubscribes, and answers heartbeat', async () => {
