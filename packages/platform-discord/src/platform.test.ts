@@ -603,6 +603,33 @@ describe('DiscordPlatform userbot', () => {
     expect(client.listenerCount('threadUpdate')).toBe(0)
   })
 
+  it('publishes reaction events even when the channel cache entry is evicted mid-mapping', async () => {
+    const channel = dmChannel()
+    const client = fakeClient([channel])
+    const platform = new DiscordPlatform({ token: 'token' }, { client })
+    const events: IMEvent[] = []
+    const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
+
+    // The library re-resolves `message.channel` from the cache on every
+    // access and returns null once a gateway resume evicts the entry; the
+    // reaction mapping awaits between the guard and its own access. Flip the
+    // eviction flag inside the actors fetch to replay exactly that window.
+    let evicted = false
+    const target = message(channel, { reactions: { cache: new Collection() } })
+    const reaction = {
+      emoji: { id: null, name: '👍', animated: false },
+      message: target, count: 1, me: true,
+      users: { cache: new Collection(), fetch: vi.fn(async () => { evicted = true; return new Collection() }) },
+    }
+    target.reactions.cache.set('👍', reaction)
+    Object.defineProperty(target, 'channel', { get: () => (evicted ? null : channel) })
+
+    ;(client as unknown as EventEmitter).emit('messageReactionAdd', reaction, user('200', 'Alice'))
+    await vi.waitFor(() => expect(events.map((event) => event.type)).toEqual(['message-reactions']))
+    expect(events[0]).toMatchObject({ conversation: { id: channel.id } })
+    await unsubscribe()
+  })
+
   it('marks an exact Discord message read through the user-account API', async () => {
     const channel = dmChannel()
     const target = message(channel)

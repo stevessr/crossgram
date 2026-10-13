@@ -231,9 +231,15 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
         ? await reaction.message.fetch().catch(() => null)
         : reaction.message
       if (!message || !this.shouldExposeMessage(message)) return
-      const context = await this.mapReactionContext(message, true)
+      // The library re-resolves `message.channel` from the cache on every
+      // access and returns null once a gateway resume evicts the entry. The
+      // reaction mapping awaits between the guard and its own access, so pin
+      // the channel now and pass it through instead of re-reading the getter.
+      const channel = message.channel as DiscordChannel | null
+      if (!channel) return
+      const context = await this.mapReactionContext(message, true, channel)
       const key = reactionKey(reaction)
-      const conversation = this.mapConversation(message.channel)
+      const conversation = this.mapConversation(channel)
       this.dispatch(handler, {
         type: 'message-reactions',
         eventId: `discord:reaction-${action}:${message.channelId}:${message.id}:${key}:${Date.now()}`,
@@ -830,10 +836,11 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
 
   private shouldExposeMessage(
     message: Message | PartialMessage | null | undefined,
+    channel: DiscordChannel | null | undefined = (message?.channel ?? null) as DiscordChannel | null,
   ): message is Message & { channel: DiscordChannel } {
     return isUsableMessage(message)
-      && isSupportedChannel(message.channel)
-      && this.isVisible(message.channel)
+      && isSupportedChannel(channel)
+      && this.isVisible(channel)
       && (this.includeBots || !message.author.bot)
   }
 
@@ -1089,11 +1096,11 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     }
   }
 
-  private reactionDefinitions(channel: DiscordChannel): IMReactionDefinition[] {
+  private reactionDefinitions(channel: DiscordChannel | null | undefined): IMReactionDefinition[] {
     const definitions: IMReactionDefinition[] = COMMON_REACTIONS.map((emoji) => ({
       key: `unicode:${emoji}`, title: emoji, presentation: { type: 'emoji', emoticon: emoji },
     }))
-    if (channel.type === 'DM' || channel.type === 'GROUP_DM') return definitions
+    if (!channel || channel.type === 'DM' || channel.type === 'GROUP_DM') return definitions
     for (const emoji of channel.guild.emojis.cache.values()) definitions.push(customEmojiDefinition(emoji))
     return definitions
   }
@@ -1102,7 +1109,10 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     if (!message.reactions.cache.size) return undefined
     const current = [...message.reactions.cache.values()]
     return {
-      available: mergeDefinitions(this.reactionDefinitions(message.channel as DiscordChannel), current.map(reactionDefinition)),
+      available: mergeDefinitions(
+        this.reactionDefinitions((message.channel ?? null) as DiscordChannel | null),
+        current.map(reactionDefinition),
+      ),
       reactions: current.map((reaction) => ({
         key: reactionKey(reaction), count: reaction.count, selected: reaction.me,
         recentActors: [...reaction.users.cache.values()].slice(0, 3).map((user) => ({ userId: user.id })),
@@ -1111,7 +1121,11 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     }
   }
 
-  private async mapReactionContext(message: Message, fetchActors: boolean): Promise<IMReactionContext> {
+  private async mapReactionContext(
+    message: Message,
+    fetchActors: boolean,
+    channel: DiscordChannel | null = (message.channel ?? null) as DiscordChannel | null,
+  ): Promise<IMReactionContext> {
     const reactions = []
     for (const reaction of message.reactions.cache.values()) {
       const users = fetchActors
@@ -1124,7 +1138,7 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     }
     return {
       available: mergeDefinitions(
-        this.reactionDefinitions(message.channel as DiscordChannel),
+        this.reactionDefinitions(channel),
         [...message.reactions.cache.values()].map(reactionDefinition),
       ),
       reactions,
