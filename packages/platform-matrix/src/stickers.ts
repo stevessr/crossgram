@@ -72,7 +72,7 @@ export class MatrixStickerProvider implements IMStickerProvider {
     const pack = source ? mapPack(this.providerId, source) : null
     return pack?.count ? pack : null
   }
-  async getSticker(context: StickerProviderContext, id: string) {
+  async getSticker(context: StickerProviderContext, id: string): Promise<IMSticker | null> {
     // Received standalone stickers already carry authoritative MIME/dimensions.
     // Never scan room catalogs or overwrite animated metadata on media reads.
     if (id.startsWith('mxc://')) return this.observed(id) ?? { providerId: this.providerId, stickerId: id, format: 'static' as const, mimeType: 'image/webp', locator: { mxc: id } }
@@ -82,8 +82,8 @@ export class MatrixStickerProvider implements IMStickerProvider {
       const found = mapPack(this.providerId, source).stickers.find(s => s.stickerId === id)
       if (found) return found
     }
-    // Standalone m.sticker events need not belong to an image pack.
-    return null
+    // Historical received stickers remain downloadable after their pack is removed.
+    return this.observed(id) ?? null
   }
   async openAsset(_context: StickerProviderContext, sticker: IMSticker) {
     const mxc = object(sticker.locator).mxc

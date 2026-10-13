@@ -61,3 +61,61 @@ describe('Matrix adapter sticker catalog invalidation', () => {
     await platform.stop()
   })
 })
+
+describe('automatic Matrix message-to-pack mapping', () => {
+  it('uses canonical pack/sticker IDs, prefers the local pack, and invalidates on updates', async () => {
+    const { MatrixPlatform } = await import('./index.js')
+    const platform = new MatrixPlatform({ homeserver: 'https://matrix.test', accessToken: 'fixture' })
+    const internal = platform as any
+    internal.joinedRoomIds.add('!a:test'); internal.joinedRoomIds.add('!b:test')
+    internal.ingestState('!a:test', [event('m.room.image_pack', 'local', { images })])
+    internal.ingestState('!b:test', [event('m.room.image_pack', 'global', { images })])
+    internal.ingestAccountData({ account_data: { events: [{ type: 'm.image_pack.rooms', content: { rooms: { '!b:test': { global: {} } } } }] } })
+    const received = (room: string, url = 'mxc://test/cat') => internal.mapTimelineMessage(room, {
+      type: 'm.sticker', event_id: '$sticker', sender: '@alice:test', origin_server_ts: 1000,
+      content: { url, body: 'Received cat', info: { mimetype: 'image/png', w: 256, h: 256 } },
+    }).content.parts[0].sticker
+    const localId = packId('!a:test', 'local'), globalId = packId('!b:test', 'global')
+    expect(received('!a:test')).toMatchObject({ packId: localId, stickerId: packId(localId, 'cat'), width: 256 })
+    expect(received('!unrelated:test')).toMatchObject({ packId: globalId, stickerId: packId(globalId, 'cat') })
+    internal.ingestState('!a:test', [event('m.room.image_pack', 'local', {})])
+    expect(received('!a:test').packId).toBe(globalId)
+    internal.ingestAccountData({ account_data: { events: [{ type: 'm.image_pack.rooms', content: { rooms: {} } }] } })
+    expect(received('!a:test').packId).toBeUndefined()
+    expect(received('!a:test').stickerId).toBe('mxc://test/cat')
+    expect(received('!unrelated:test', 'mxc://test/unknown').packId).toBeUndefined()
+    await platform.stop()
+  })
+
+  it('retains downloadable received media after pack removal without resurrecting the catalog', async () => {
+    const { MatrixPlatform } = await import('./index.js')
+    const { MatrixStickerProvider } = await import('./stickers.js')
+    const platform = new MatrixPlatform({ homeserver: 'https://matrix.test', accessToken: 'fixture' })
+    const internal = platform as any
+    internal.loadJoinedDialogs = async () => []
+    internal.joinedRoomIds.add('!room:test')
+    internal.ingestState('!room:test', [event('m.room.image_pack', '', { images })])
+    const part = internal.mapTimelineMessage('!room:test', { type: 'm.sticker', event_id: '$s', sender: '@me:test', content: { url: 'mxc://test/cat' } }).content.parts[0]
+    const provider = new MatrixStickerProvider(platform.client, 'matrix:stickers', 'matrix', id => platform.getStickerSources(id), id => platform.getObservedSticker(id))
+    internal.ingestState('!room:test', [event('m.room.image_pack', '', {})])
+    const context = { platformKind: 'matrix', session: { platformId: 'matrix', platformSessionId: 's', userId: '@me:test', credentials: {}, metadata: {} } }
+    expect(await provider.getPack(context, part.sticker.packId)).toBeNull()
+    expect(await provider.getSticker(context, part.sticker.stickerId)).toMatchObject({ locator: { mxc: 'mxc://test/cat' }, mimeType: 'image/png', width: 128 })
+    await platform.stop()
+  })
+
+  it('inherits canonical Space packs and attaches global-only catalogs to rooms', async () => {
+    const { MatrixPlatform } = await import('./index.js')
+    const platform = new MatrixPlatform({ homeserver: 'https://matrix.test', accessToken: 'fixture' })
+    const internal = platform as any
+    internal.loadJoinedDialogs = async () => []
+    internal.joinedRoomIds.add('!space:test'); internal.joinedRoomIds.add('!room:test')
+    internal.ingestState('!space:test', [event('m.room.image_pack', 'space', { images })])
+    internal.ingestState('!room:test', [event('m.space.parent', '!space:test', { canonical: true })])
+    const result = internal.mapTimelineMessage('!room:test', { type: 'm.sticker', event_id: '$s', sender: '@me:test', content: { url: 'mxc://test/cat' } })
+    expect(result.content.parts[0].sticker.packId).toBe(packId('!space:test', 'space'))
+    internal.ingestAccountData({ account_data: { events: [{ type: 'm.image_pack', content: { images } }] } })
+    expect(await platform.getConversationStickerPack({} as any, { id: '!empty:test' })).toMatchObject({ providerId: 'matrix:stickers' })
+    await platform.stop()
+  })
+})

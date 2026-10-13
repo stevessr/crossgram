@@ -7,10 +7,11 @@ import type {
   IMDialogPage, IMChatFolder, IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia, IMMediaInput,
   IMInlineKeyboardButton, IMMessage, IMMessageInput, IMMessagePinMutation, IMMessageSearchPage, IMMessageSearchQuery, IMMessageTarget, IMPageQuery, IMPlatform, IMReadTarget,
   IMRequest, IMRequestAction, IMRequestPage, IMRequestQuery,
-  IMReactionActorPage, IMReactionActorPageRequest, IMReactionContext, IMReactionDefinition, IMReactionTarget,
+  IMReactionActorPage, IMReactionActorPageRequest, IMReactionContext, IMReactionDefinition, IMReactionResource, IMReactionTarget,
   IMSticker, IMStickerSendPlan, IMTransferOptions, IMUser, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
+import { MATRIX_EMOJI } from './emoji.js'
 import { MatrixClient, MatrixHttpError, type MatrixClientOptions } from './client.js'
 import { matrixMentionUserIds, matrixTextEntities, textContent } from './formatting.js'
 import { buildSpaceFolders } from './space-hierarchy.js'
@@ -19,10 +20,11 @@ import type {
   MatrixDirectAccountData, MatrixEvent, MatrixInvitedRoom, MatrixJoinedRoom, MatrixMediaLocator, MatrixRoomMemberContent,
   MatrixAnnotation, MatrixRoomMessageContent, MatrixSyncResponse,
 } from './types.js'
-import { MatrixStickerProvider, USER_PACK_TYPES, GLOBAL_PACK_TYPES, PACK_TYPES, roomPacks, packId, type MatrixPackSource } from './stickers.js'
+import { MatrixStickerProvider, USER_PACK_TYPES, GLOBAL_PACK_TYPES, PACK_TYPES, roomPacks, mapPack, packId, type MatrixPackSource } from './stickers.js'
 import { isRecord } from './guards.js'
 
 const STANDARD_REACTIONS = ['👍', '👎', '❤️', '😂', '😮', '😢', '😡', '🔥', '🎉', '👏', '🤔'] as const
+const UNICODE_REACTIONS = MATRIX_EMOJI.map(key => ({ key, presentation: { type: 'emoji' as const, emoticon: key } }))
 const MAX_SELECTED_REACTIONS = 20
 
 export interface Config {
@@ -154,29 +156,39 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
 
   async getConversationStickerPack(_session: PlatformSession, conversation: IMConversationRef) {
     const sources = await this.getStickerSources(conversation.id)
-    return sources.some(source => source.roomId === conversation.id || (source.roomId && !source.global))
+    return sources.some(source => mapPack(this.stickerProviderId, source).count)
       ? { providerId: this.stickerProviderId, packId: `room:${Buffer.from(conversation.id).toString('base64url')}` }
       : undefined
   }
 
+  private readonly stickerMediaIndexes = new Map<string, Map<string, IMSticker>>()
+
   getObservedSticker(id: string): IMSticker | undefined { return this.observedStickers.get(id) }
+
+  private indexStickerSources(roomId: string, sources: MatrixPackSource[]) {
+    const index = new Map<string, IMSticker>()
+    // Prefer the current room when identical media occurs in several packs.
+    for (const source of [...sources].sort((a, b) => Number(b.roomId === roomId) - Number(a.roomId === roomId) || a.id.localeCompare(b.id))) {
+      for (const sticker of mapPack(this.stickerProviderId, source).stickers) {
+        const mxc = (sticker.locator as { mxc: string }).mxc
+        if (!index.has(mxc)) index.set(mxc, sticker)
+      }
+    }
+    this.stickerMediaIndexes.set(roomId, index)
+    if (this.stickerMediaIndexes.size > 128) this.stickerMediaIndexes.delete(this.stickerMediaIndexes.keys().next().value!)
+    return index
+  }
+
+  private stickerForMxc(roomId: string, mxc: string) {
+    return (this.stickerMediaIndexes.get(roomId)
+      ?? this.indexStickerSources(roomId, this.localStickerSources(roomId))).get(mxc)
+  }
 
   async getStickerSources(roomId?: string): Promise<MatrixPackSource[]> {
     await this.loadJoinedDialogs()
     const globalData = GLOBAL_PACK_TYPES.map(type => this.stickerAccountData.get(type)).filter(Boolean).at(-1)
     const globals: Record<string, unknown> = isRecord(globalData?.rooms) ? globalData.rooms : {}
-    const visibleRooms = new Set(roomId ? [roomId] : [])
-    const pending = roomId ? [roomId] : []
-    while (pending.length && visibleRooms.size < 64) {
-      const current = pending.pop()!
-      for (const event of this.imagePackStates.get(current)?.values() ?? []) {
-        if (visibleRooms.size >= 64) break
-        if (event.type !== 'm.space.parent' || event.content.canonical !== true || !event.state_key
-          || !this.joinedRoomIds.has(event.state_key) || visibleRooms.has(event.state_key)) continue
-        visibleRooms.add(event.state_key); pending.push(event.state_key)
-      }
-    }
-    const sources: MatrixPackSource[] = []
+    const sources = this.localStickerSources(roomId)
     // Globally selected packs can belong to rooms the account has not joined.
     // Fetch only the explicit pack keys, with a bounded short-lived cache.
     for (const [id, keys] of Object.entries(globals)) {
@@ -200,6 +212,25 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         if (content) sources.push({ roomId: id, id: cacheKey, title: id, content, global: true })
       }
     }
+    if (roomId) this.indexStickerSources(roomId, sources)
+    return sources.sort((a, b) => Number(b.global) - Number(a.global) || a.id.localeCompare(b.id))
+  }
+
+  private localStickerSources(roomId?: string): MatrixPackSource[] {
+    const globalData = GLOBAL_PACK_TYPES.map(type => this.stickerAccountData.get(type)).filter(Boolean).at(-1)
+    const globals: Record<string, unknown> = isRecord(globalData?.rooms) ? globalData.rooms : {}
+    const visibleRooms = new Set(roomId ? [roomId] : [])
+    const pending = roomId ? [roomId] : []
+    while (pending.length && visibleRooms.size < 64) {
+      const current = pending.pop()!
+      for (const event of this.imagePackStates.get(current)?.values() ?? []) {
+        if (visibleRooms.size >= 64) break
+        if (event.type !== 'm.space.parent' || event.content.canonical !== true || !event.state_key
+          || !this.joinedRoomIds.has(event.state_key) || visibleRooms.has(event.state_key)) continue
+        visibleRooms.add(event.state_key); pending.push(event.state_key)
+      }
+    }
+    const sources: MatrixPackSource[] = []
     for (const [id, state] of this.imagePackStates) {
       if (!this.joinedRoomIds.has(id)) continue
       sources.push(...roomPacks(id, state.values(), globals).filter(pack => pack.global || visibleRooms.has(id)))
@@ -873,15 +904,42 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     await this.client.markRead(target.conversationId, target.messageId)
   }
 
+  private roomReactionContext(roomId: string, context: IMReactionContext, picker = false): IMReactionContext {
+    const definitions = new Map([...picker ? UNICODE_REACTIONS : [], ...context.available].map(def => [def.key, def]))
+    const stickers = this.stickerMediaIndexes.get(roomId) ?? this.indexStickerSources(roomId, this.localStickerSources(roomId))
+    for (const sticker of stickers.values()) {
+      const key = (sticker.locator as { mxc: string }).mxc
+      if (!['image/png', 'image/webp', 'image/gif', 'image/apng'].includes(sticker.mimeType)) continue
+      definitions.set(key, { key, title: sticker.title, presentation: { type: 'custom', alt: sticker.title ?? '', resource: {
+        version: sticker.version ?? 1, format: sticker.format, mimeType: sticker.mimeType as IMReactionResource['mimeType'],
+        width: sticker.width ?? 100, height: sticker.height ?? 100, size: sticker.size, locator: { mxc: key },
+      } } })
+    }
+    // MXC reaction keys can be received even after a pack was removed.
+    for (const summary of context.reactions) if (/^mxc:\/\/[^/]+\/.+/.test(summary.key) && definitions.get(summary.key)?.presentation.type !== 'custom') {
+      definitions.set(summary.key, { key: summary.key, presentation: { type: 'custom', alt: '', resource: {
+        version: 1, format: 'static', mimeType: 'image/png', width: 100, height: 100, locator: { mxc: summary.key },
+      } } })
+    }
+    return { ...context, available: [...definitions.values()] }
+  }
+
+  downloadReactionResource(session: PlatformSession, resource: IMReactionResource, options: IMDownloadOptions = {}) {
+    const locator = resource.locator
+    if (!isRecord(locator) || typeof locator.mxc !== 'string' || !/^mxc:\/\/[^/]+\/.+/.test(locator.mxc)) throw new Error('Invalid Matrix reaction media')
+    return this.downloadMedia(session, { id: locator.mxc, kind: 'image', mimeType: resource.mimeType, locator: { mxc: locator.mxc } }, options)
+  }
+
   async getAvailableReactions(_session: PlatformSession, target: IMReactionTarget): Promise<IMReactionContext> {
+    await this.getStickerSources(target.conversationId)
     const userId = await this.getAccountUserId()
-    if (!target.targetId && !target.messageId) return reactionContext([], userId)
-    return reactionContext(await this.loadReactionEvents(target.conversationId, target.targetId ?? target.messageId!), userId)
+    if (!target.targetId && !target.messageId) return this.roomReactionContext(target.conversationId, reactionContext([], userId), true)
+    return this.roomReactionContext(target.conversationId, reactionContext(await this.loadReactionEvents(target.conversationId, target.targetId ?? target.messageId!), userId), true)
   }
 
   async getMessageReactions(_session: PlatformSession, target: IMMessageTarget): Promise<IMReactionContext> {
     const userId = await this.getAccountUserId()
-    return reactionContext(await this.loadReactionEvents(target.conversationId, target.targetId), userId)
+    return this.roomReactionContext(target.conversationId, reactionContext(await this.loadReactionEvents(target.conversationId, target.targetId), userId))
   }
 
   async setMessageReactions(session: PlatformSession, target: IMMessageTarget, reactionKeys: readonly string[]): Promise<IMReactionContext> {
@@ -889,7 +947,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     const userId = await this.getAccountUserId()
     if (reactionKeys.length > MAX_SELECTED_REACTIONS) throw new Error(`Matrix supports at most ${MAX_SELECTED_REACTIONS} selected reactions`)
     const requested = new Set(reactionKeys)
-    if ([...requested].some((key) => !reactionDefinition(key))) throw new Error('Matrix reactions must be emoji keys')
+    if ([...requested].some((key) => !reactionDefinition(key))) throw new Error('Matrix reaction keys must not be empty')
     const existing = await this.loadReactionEvents(target.conversationId, target.targetId)
     const selected = new Set<string>()
     for (const event of existing) {
@@ -907,16 +965,20 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   async getMessageReactionActors(_session: PlatformSession, target: IMMessageTarget, request: IMReactionActorPageRequest): Promise<IMReactionActorPage> {
     const userId = await this.getAccountUserId()
     const events = await this.loadReactionEvents(target.conversationId, target.targetId)
+    const seenActors = new Set<string>()
     const actors = events.flatMap((event) => {
       const relation = relationFromValue(event.content['m.relates_to'])
       if (!event.sender || relation?.rel_type !== 'm.annotation' || !relation.key || (request.reactionKey && request.reactionKey !== relation.key)) return []
+      const identity = JSON.stringify([event.sender, relation.key])
+      if (seenActors.has(identity)) return []
+      seenActors.add(identity)
       return [{ reactionKey: relation.key, actor: { userId: event.sender, timestamp: matrixTimestamp(event) } }]
     }).sort((a, b) => (b.actor.timestamp ?? 0) - (a.actor.timestamp ?? 0))
     const offset = request.offset === undefined ? 0 : Number(request.offset)
     if (!Number.isSafeInteger(offset) || offset < 0) throw new Error(`invalid Matrix reaction offset: ${request.offset}`)
     const limit = Math.max(0, Math.min(Math.trunc(request.limit), 1_000))
     const page = actors.slice(offset, offset + limit)
-    return { context: reactionContext(events, userId), actors: page, nextOffset: offset + page.length < actors.length ? String(offset + page.length) : undefined }
+    return { context: this.roomReactionContext(target.conversationId, reactionContext(events, userId)), actors: page, nextOffset: offset + page.length < actors.length ? String(offset + page.length) : undefined }
   }
 
   private async loadReactionEvents(roomId: string, targetId: string): Promise<MatrixEvent[]> {
@@ -1071,6 +1133,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         if (emitted >= limit) return
       }
     } finally {
+      await reader.cancel().catch(() => {})
       reader.releaseLock()
     }
   }
@@ -1104,6 +1167,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     for (const roomId of Object.keys(response.rooms?.leave ?? {})) {
       if (this.joinedRoomIds.delete(roomId)) joinedMembershipChanged = true
       this.roomState.delete(roomId)
+      this.stickerMediaIndexes.clear()
       this.imagePackStates.delete(roomId)
       this.onStickerChange?.()
       this.joinedMemberCounts.delete(roomId)
@@ -1168,7 +1232,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
             this.reactionEventTargets.delete(redacts)
             await handler({ type: 'message-reactions', eventId: event.event_id, conversation,
               target: { conversationId: roomId, messageId: reactionTargetId, targetId: reactionTargetId },
-              context: reactionContext(await this.loadReactionEvents(roomId, reactionTargetId), userId), timestamp: matrixTimestamp(event) })
+              context: this.roomReactionContext(roomId, reactionContext(await this.loadReactionEvents(roomId, reactionTargetId), userId)), timestamp: matrixTimestamp(event) })
           } else await handler({ type: 'message-delete', eventId: event.event_id, conversation, messageIds: [redacts], timestamp: matrixTimestamp(event) })
           continue
         }
@@ -1178,7 +1242,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
           this.rememberReaction(event.event_id, relation.event_id)
           await handler({ type: 'message-reactions', eventId: event.event_id, conversation,
             target: { conversationId: roomId, messageId: relation.event_id, targetId: relation.event_id },
-            context: reactionContext(await this.loadReactionEvents(roomId, relation.event_id), userId), timestamp: matrixTimestamp(event) })
+            context: this.roomReactionContext(roomId, reactionContext(await this.loadReactionEvents(roomId, relation.event_id), userId)), timestamp: matrixTimestamp(event) })
           continue
         }
         const message = this.mapTimelineMessage(roomId, event)
@@ -1282,6 +1346,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   private ingestAccountData(response: MatrixSyncResponse): boolean {
     for (const event of response.account_data?.events ?? []) {
       if ([...USER_PACK_TYPES, ...GLOBAL_PACK_TYPES].includes(event.type)) {
+        this.stickerMediaIndexes.clear()
         this.stickerAccountData.set(event.type, event.content)
         this.onStickerChange?.()
       }
@@ -1340,6 +1405,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     if (fullSnapshot) {
       this.joinedRoomIds.clear()
       this.roomState.clear()
+      this.stickerMediaIndexes.clear()
       this.imagePackStates.clear()
       this.joinedMemberCounts.clear()
       this.conversations.clear()
@@ -1376,6 +1442,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       if (PACK_TYPES.includes(event.type) || event.type === 'm.room.name' || event.type === 'm.space.parent') {
         let packs = this.imagePackStates.get(roomId)
         if (!packs) this.imagePackStates.set(roomId, packs = new Map())
+        this.stickerMediaIndexes.clear()
         packs.set(key, event)
         this.onStickerChange?.()
       }
@@ -1487,6 +1554,14 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         } }] : matrixMessageParts(content)
     if (!parts.length) return
     for (const part of parts) if (part.type === 'sticker') {
+      const matched = this.stickerForMxc(roomId, part.sticker.stickerId)
+      if (matched) part.sticker = {
+        ...matched, title: content.body ?? matched.title,
+        mimeType: content.info?.mimetype ?? matched.mimeType,
+        format: content.info?.mimetype ? part.sticker.format : matched.format,
+        width: content.info?.w ?? matched.width, height: content.info?.h ?? matched.height,
+        size: content.info?.size ?? matched.size,
+      }
       this.observedStickers.set(part.sticker.stickerId, part.sticker)
       if (this.observedStickers.size > 10_000) this.observedStickers.delete(this.observedStickers.keys().next().value!)
     }
@@ -1523,7 +1598,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       ...((mentionIds.length || event.unsigned?.['m.relations']?.['m.annotation']?.length) ? { metadata: {
         ...(mentionIds.length ? { matrixMentions: mentionIds } : {}),
         ...(event.unsigned?.['m.relations']?.['m.annotation']?.length
-          ? { reactionContext: JSON.parse(JSON.stringify(bundledReactionContext(event.unsigned['m.relations']['m.annotation']!))) as never } : {}),
+          ? { reactionContext: JSON.parse(JSON.stringify(this.roomReactionContext(roomId, bundledReactionContext(event.unsigned['m.relations']['m.annotation']!)))) as never } : {}),
       } } : {}),
     }
   }
@@ -1691,7 +1766,7 @@ function matrixRoomMessageContent(value: unknown): MatrixRoomMessageContent {
   return { ...value, info: { mimetype: typeof info.mimetype === 'string' ? info.mimetype : undefined, size: typeof info.size === 'number' ? info.size : undefined, w: typeof info.w === 'number' ? info.w : undefined, h: typeof info.h === 'number' ? info.h : undefined }, file, 'm.relates_to': relationFromValue(value['m.relates_to']), 'm.new_content': isRecord(value['m.new_content']) ? matrixRoomMessageContent(value['m.new_content']) : undefined } as MatrixRoomMessageContent
 }
 function reactionDefinition(key: string): IMReactionDefinition | undefined {
-  return /\p{Extended_Pictographic}|\p{Regional_Indicator}/u.test(key) && key.length <= 32 && !/[\s\r\n]/u.test(key) ? { key, presentation: { type: 'emoji', emoticon: key } } : undefined
+  return key.length ? { key, presentation: { type: 'emoji', emoticon: key } } : undefined
 }
 function reactionDefinitions(keys: Iterable<string>): IMReactionDefinition[] {
   const all = new Map<string, IMReactionDefinition>()
@@ -1701,9 +1776,13 @@ function reactionDefinitions(keys: Iterable<string>): IMReactionDefinition[] {
 }
 function reactionContext(events: readonly MatrixEvent[], userId: string): IMReactionContext {
   const grouped = new Map<string, { count: number, actors: Array<{ userId: string, timestamp: number }>, selectedAt?: number }>()
+  const seen = new Set<string>()
   for (const event of events) {
     const relation = relationFromValue(event.content['m.relates_to'])
-    if (!event.sender || relation?.rel_type !== 'm.annotation' || !relation.key) continue
+    if (event.unsigned?.redacted_because || !event.sender || relation?.rel_type !== 'm.annotation' || !relation.key) continue
+    const identity = JSON.stringify([event.sender, relation.key])
+    if (seen.has(identity)) continue
+    seen.add(identity)
     const group = grouped.get(relation.key) ?? { count: 0, actors: [] }; grouped.set(relation.key, group)
     const timestamp = matrixTimestamp(event); group.count++; group.actors.push({ userId: event.sender, timestamp })
     if (event.sender === userId) group.selectedAt = Math.max(group.selectedAt ?? 0, timestamp)

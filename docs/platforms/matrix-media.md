@@ -13,3 +13,32 @@
 References: [Matrix image packs](https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/2545-emotes.md), [Matrix Client-Server API](https://spec.matrix.org/v1.19/client-server-api/).
 
 Validation uses local HTTP homeserver fixtures and actual bridge RPC/upload/SQLite paths, plus encrypted MTProto long-vector serialization. It does not modify a live user's Matrix avatar or demonstrate a real Telegram client UI.
+
+## Automatic pack association and reactions
+
+Received `m.sticker` MXC URIs are matched against visible image packs and emitted
+with the same canonical sticker/set identity as the Telegram pack catalog.
+Current-room packs take precedence over global duplicates; canonical Space
+packs and enabled global/personal packs are included. Unmatched events remain
+standalone stickers, not invented packs. Matching uses a bounded room index,
+invalidated by pack, account-data and membership state changes. Global-only
+catalogs also attach to rooms that have no local pack.
+
+The reaction picker publishes the full bundled Unicode Emoji 18.0 keyboard list
+and the room-visible sticker images (including global/personal and inherited
+packs), not only eleven hard-coded defaults. The full Unicode list is added only
+to picker requests, not copied into every stored message reaction context.
+Known MXC reaction keys project as Telegram custom emoji with downloadable media;
+sending them writes the original MXC key in `m.annotation`. This image-key
+convention follows [MSC4027](https://github.com/matrix-org/matrix-spec-proposals/pull/4027),
+which is a proposal, not a claim of a finalized Matrix image-reaction standard.
+
+Per the [Matrix reaction rules](https://spec.matrix.org/v1.19/client-server-api/#event-annotations-and-reactions),
+Unicode keycaps, flags, ZWJ sequences and non-emoji string keys are not dropped.
+Duplicate annotations from the same sender/key count once and produce one actor.
+Key strings are retained exactly, without emoji variation-selector rewriting.
+
+Local HTTP/bridge E2E covers opening the received sticker's set, canonical asset
+lookup, room-scoped picker contents, MXC reaction send/read, duplicate counts and
+ranged custom-reaction downloads. Actual Telegram picker rendering remains
+client-dependent and is not demonstrated by these API fixtures.

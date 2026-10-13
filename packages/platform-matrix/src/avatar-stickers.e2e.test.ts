@@ -11,6 +11,7 @@ import { DialogRpc } from '../../bridge/src/dialogs.js'
 import { MessageStore } from '../../bridge/src/message-store.js'
 import { defineModels } from '../../bridge/src/models.js'
 import { UploadManager } from '../../bridge/src/upload-manager.js'
+import { ReactionRpc } from '../../bridge/src/reaction-rpc.js'
 import { StickerRpc } from '../../bridge/src/sticker-rpc.js'
 import { StickerProviderRegistry } from '../../bridge/src/sticker-provider.js'
 import type { PlatformSession } from '@mtproto-relay/bridge'
@@ -24,6 +25,7 @@ const pack = (url: string) => ({ pack: { usage: ['sticker'] }, images: { cat: { 
 
 describe('Matrix avatars and room/global stickers over real HTTP and bridge RPC', () => {
   let homeserver: string, platform: MatrixPlatform, rpc: DialogRpc, uploads: UploadManager
+  let stickers: StickerRpc
   let cleanup: () => Promise<void>, store: MessageStore
   let profileAvatar = 'mxc://test/old-user', uploadSequence = 0
   const calls: Array<{ path: string, method: string, body: Buffer }> = []
@@ -54,8 +56,15 @@ describe('Matrix avatars and room/global stickers over real HTTP and bridge RPC'
         const old = list.findIndex(e => e.type === 'm.room.avatar'); if (old >= 0) list.splice(old, 1)
         list.push(state('m.room.avatar', content)); return reply({ event_id: `$avatar-${uploadSequence}` })
       }
+      if (path.endsWith('/m.annotation')) return reply({ chunk: [
+        { type: 'm.reaction', event_id: '$r1', sender: '@alice:test', content: { 'm.relates_to': { rel_type: 'm.annotation', event_id: '$received', key: 'mxc://test/local-b' } } },
+        { type: 'm.reaction', event_id: '$r2', sender: '@alice:test', content: { 'm.relates_to': { rel_type: 'm.annotation', event_id: '$received', key: 'mxc://test/local-b' } } },
+        { type: 'm.reaction', event_id: '$r3', sender: '@bob:test', content: { 'm.relates_to': { rel_type: 'm.annotation', event_id: '$received', key: '1️⃣' } } },
+        { type: 'm.reaction', event_id: '$r4', sender: '@bob:test', content: { 'm.relates_to': { rel_type: 'm.annotation', event_id: '$received', key: 'looks good' } } },
+      ] })
+      if (path.includes('/send/m.reaction/')) return reply({ event_id: '$new-reaction' })
       if (path.includes('/send/m.sticker/')) return reply({ event_id: '$sent-sticker' })
-      if (path.endsWith('/messages')) return reply({ chunk: [{ type: 'm.sticker', event_id: '$received', sender: '@alice:test', origin_server_ts: 1000, content: { body: 'Cat', url: 'mxc://test/incoming', info: { mimetype: 'image/png', w: 64, h: 64 } } }] })
+      if (path.endsWith('/messages')) return reply({ chunk: [{ type: 'm.sticker', event_id: '$received', sender: '@alice:test', origin_server_ts: 1000, content: { body: 'Cat', url: 'mxc://test/local-b', info: { mimetype: 'image/png', w: 64, h: 64 } } }] })
       if (path.includes('/download/')) { res.setHeader('content-type', 'image/png'); return res.end(Buffer.from([1, 2, 3])) }
       if (path.includes('/pinned_events')) { res.statusCode = 404; return reply({ errcode: 'M_NOT_FOUND' }) }
       throw new Error(`Unexpected HTTP ${req.method} ${path}`)
@@ -71,7 +80,7 @@ describe('Matrix avatars and room/global stickers over real HTTP and bridge RPC'
     store = new MessageStore(ctx.database)
     const registry = new StickerProviderRegistry()
     registry.register('matrix:stickers', new MatrixStickerProvider(platform.client, 'matrix:stickers', 'matrix', id => platform.getStickerSources(id)))
-    const stickers = new StickerRpc(ctx.database, registry, platform, session)
+    stickers = new StickerRpc(ctx.database, registry, platform, session)
     rpc = new DialogRpc(platform, session, store, uploads, undefined, 1, stickers)
     cleanup = async () => { await platform.stop(); await rm(dir, { recursive: true, force: true }); for (const fiber of fibers.reverse()) await fiber.dispose() }
   })
@@ -130,6 +139,45 @@ describe('Matrix avatars and room/global stickers over real HTTP and bridge RPC'
     await store.upsertUsers(session, [{ ...user, avatarRemoved: true }])
     expect((await store.getUser(session.platformId, user.id))?.avatar).toBeNull()
   })
+  it('projects all Unicode emoji and only visible room stickers, renders and sends MXC reactions', async () => {
+    await platform.getDialogs(session, { limit: 100 })
+    const context = await platform.getAvailableReactions(session, { conversationId: '!b:test' })
+    const emoji = context.available.filter(d => d.presentation.type === 'emoji').map(d => d.key)
+    expect(emoji.length).toBeGreaterThan(3500)
+    expect(emoji).toEqual(expect.arrayContaining(['1️⃣', '🇨🇳', '👩🏽‍💻', '❤️']))
+    const custom = context.available.filter(d => d.presentation.type === 'custom').map(d => d.key)
+    expect(custom).toEqual(expect.arrayContaining(['mxc://test/local-b', 'mxc://test/global', 'mxc://test/personal']))
+    expect(custom).not.toContain('mxc://test/local-a')
+    const reactions = new ReactionRpc(platform, session)
+    const chat = reactions.chatReactions('!b:test', context)
+    expect(chat._).toBe('chatReactionsSome')
+    const definition = context.available.find(d => d.key === 'mxc://test/local-b')!
+    const customInput = reactions.toTlReaction('!b:test', definition)
+    expect(customInput._).toBe('reactionCustomEmoji')
+    expect(reactions.resolveInput('!b:test', customInput, context).key).toBe('mxc://test/local-b')
+    const target = { conversationId: '!b:test', messageId: '$received', targetId: '$received' }
+    const counts = await platform.getMessageReactions(session, target)
+    expect(counts.available.length).toBeLessThan(100)
+    expect(counts.reactions.find(r => r.key === 'mxc://test/local-b')?.count).toBe(1)
+    const message = (await platform.getHistory(session, { id: '!b:test' }, { limit: 1 })).messages[0]
+    message.reactionContext = counts
+    const projected = reactions.messageReactions('!b:test', message, () => 1)
+    expect(projected.results).toEqual(expect.arrayContaining([expect.objectContaining({ reaction: customInput, count: 1 })]))
+    const otherContext = await platform.getAvailableReactions(session, { conversationId: '!a:test' })
+    const other = otherContext.available.find(d => d.key === 'mxc://test/local-a')!
+    expect(() => reactions.resolveInput('!b:test', reactions.toTlReaction('!a:test', other), context)).toThrow('REACTION_INVALID')
+    expect(counts.reactions.map(r => r.key)).toEqual(expect.arrayContaining(['1️⃣', 'looks good']))
+    expect(counts.available.find(d => d.key === 'mxc://test/local-b')?.presentation.type).toBe('custom')
+    const actors = await platform.getMessageReactionActors(session, target, { reactionKey: 'mxc://test/local-b', limit: 10 })
+    expect(actors.actors).toHaveLength(1)
+    await platform.setMessageReactions(session, target, ['mxc://test/local-b', '1️⃣'])
+    const writes = calls.filter(c => c.path.includes('/send/m.reaction/')).map(c => JSON.parse(c.body.toString()))
+    expect(writes).toEqual(expect.arrayContaining([{ 'm.relates_to': { rel_type: 'm.annotation', event_id: '$received', key: 'mxc://test/local-b' } }]))
+    if (customInput._ !== 'reactionCustomEmoji') throw new Error('Expected custom reaction')
+    const file = await reactions.getFile(customInput.documentId.toNumber(), 1, 1)
+    expect([...file!.bytes]).toEqual([2])
+  })
+
   it('keeps local packs room-scoped, merges global and personal packs, maps native sticker events and sends without uploading', async () => {
     const provider = new MatrixStickerProvider(platform.client, 'matrix:stickers', 'matrix', id => platform.getStickerSources(id))
     const context = { session, platformKind: 'matrix' }
@@ -145,6 +193,22 @@ describe('Matrix avatars and room/global stickers over real HTTP and bridge RPC'
     expect(sent.content.parts[0].type).toBe('sticker')
     expect(calls.filter(c => c.path.includes('/upload'))).toHaveLength(before)
     const history = await platform.getHistory(session, { id: '!b:test' }, { limit: 10 })
-    expect(history.messages[0].content.parts[0]).toMatchObject({ type: 'sticker', sticker: { providerId: 'matrix:stickers', stickerId: 'mxc://test/incoming' } })
+    const part = history.messages[0].content.parts[0]
+    expect(part).toMatchObject({ type: 'sticker', sticker: { providerId: 'matrix:stickers', stickerId: local.stickerId, packId: local.packId } })
+    if (part.type !== 'sticker') throw new Error('Expected sticker')
+    const media = stickers.makeMessageMedia(part.sticker)
+    if (media.document?._ !== 'document') throw new Error('Expected document')
+    const document = media.document
+    const attr = document.attributes.find(a => a._ === 'documentAttributeSticker')
+    if (attr?._ !== 'documentAttributeSticker' || attr.stickerset._ !== 'inputStickerSetID') throw new Error('Missing automatic pack association')
+    const opened = await stickers.getStickerSet({ _: 'messages.getStickerSet', stickerset: attr.stickerset, hash: 0 })
+    if (opened._ !== 'messages.stickerSet') throw new Error('Expected complete pack')
+    expect(opened.documents.some(d => d.id.eq(document.id))).toBe(true)
+    expect(opened.set.count).toBe(1)
+    const canonical = await provider.getSticker(context, part.sticker.stickerId)
+    expect(canonical?.packId).toBe(local.packId)
+    const asset = await provider.openAsset(context, canonical!)
+    const chunks = []; for await (const chunk of asset.source.stream()) chunks.push(...chunk)
+    expect(chunks).toEqual([1, 2, 3])
   })
 })
