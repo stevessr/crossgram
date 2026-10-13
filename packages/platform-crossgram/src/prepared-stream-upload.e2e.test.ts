@@ -124,9 +124,12 @@ describe('prepared Telegram-to-QQ Highway streaming E2E', () => {
     const staged = uploads.getStaged('session', '700')
     expect(staged).toBeDefined()
 
-    await client.sendMessage('2:group', undefined, [{
-      kind: 'file', name: 'streamed.bin', mimeType: 'application/octet-stream',
-      source: staged!.media.source,
+    await client.sendMessage('2:group', [{
+      type: 'media',
+      media: {
+        kind: 'file', name: 'streamed.bin', mimeType: 'application/octet-stream',
+        source: staged!.media.source,
+      },
     }])
 
     expect(prepareCalls).toBe(1)

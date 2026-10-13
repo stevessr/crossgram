@@ -71,6 +71,62 @@ describe('QQNTClient streaming transport', () => {
     })
   })
 
+  it('describes an ordered body to a bridge that understands it and a flat one otherwise', async () => {
+    const manifests = new Map<number, Record<string, any>>()
+    const sendWith = async (protocolVersion: number) => {
+      const client = new QQNTClient({
+        endpoint: 'http://bridge.invalid/v1',
+        fetch: async (url: RequestInfo | URL, init?: RequestInit) => {
+          if (String(url).endsWith('/status')) return Response.json({ protocolVersion, ready: true })
+          if (String(url).endsWith('/uploads/prepare')) {
+            return Response.json({
+              prepared: { kind: 'image', fileUuid: 'photo-uuid', msgInfo: 'msg-info' },
+            })
+          }
+          const encoded = new Headers(init?.headers).get('x-qqnt-manifest')
+          if (encoded) manifests.set(protocolVersion, JSON.parse(Buffer.from(encoded, 'base64url').toString()))
+          return Response.json({
+            id: 'm', conversationId: 'u', senderId: 'self', timestamp: 1, outgoing: true, parts: [],
+          })
+        },
+      })
+      await client.sendMessage('u', [
+        { type: 'text', text: 'lead' },
+        {
+          type: 'media',
+          media: {
+            kind: 'image',
+            name: 'photo.png',
+            mimeType: 'image/png',
+            source: { size: 3, async *stream() { yield Uint8Array.of(1, 2, 3) } },
+          },
+        },
+      ], {}, { originRequestId: 'origin' })
+    }
+
+    await sendWith(35)
+    // The ordered body names its own text and media, so it carries no flat list.
+    expect(manifests.get(35)?.parts).toEqual([
+      { type: 'text', text: 'lead' },
+      {
+        type: 'media',
+        media: expect.objectContaining({ kind: 'image', name: 'photo.png', size: 3 }),
+        prepared: { kind: 'image', fileUuid: 'photo-uuid', msgInfo: 'msg-info' },
+      },
+    ])
+    expect(manifests.get(35)?.media).toBeUndefined()
+    expect(manifests.get(35)?.uploadedMedia).toBeUndefined()
+
+    // An older bridge keeps the flat shape of one text block then every media item.
+    await sendWith(34)
+    expect(manifests.get(34)?.parts).toBeUndefined()
+    expect(manifests.get(34)?.text).toBe('lead')
+    expect(manifests.get(34)?.media).toHaveLength(1)
+    expect(manifests.get(34)?.uploadedMedia).toEqual([
+      { kind: 'image', fileUuid: 'photo-uuid', msgInfo: 'msg-info' },
+    ])
+  })
+
   it('treats a bridge sticker range past EOF as an empty Telegram chunk', async () => {
     const client = new QQNTClient({
       endpoint: 'http://bridge.invalid/v1',
@@ -579,11 +635,16 @@ describe('QQNTClient streaming transport', () => {
     const chunks = [new Uint8Array([1, 2]), new Uint8Array([3, 4, 5])]
     const progress: number[] = []
     let streamCalls = 0
-    const message = await client.sendMessage('1:uid', 'caption', [{
-      kind: 'file', name: 'x.mp4', mimeType: 'video/mp4', width: 320, height: 200, duration: 9,
-      source: { size: 5, async *stream() { streamCalls++; yield* chunks } },
+    const message = await client.sendMessage('1:uid', [{
+      type: 'text', text: 'caption',
+    }, {
+      type: 'media',
+      media: {
+        kind: 'file', name: 'x.mp4', mimeType: 'video/mp4', width: 320, height: 200, duration: 9,
+        source: { size: 5, async *stream() { streamCalls++; yield* chunks } },
+      },
     }], { onProgress: (item) => { progress.push(item.transferredBytes) } },
-    'origin-1', undefined, undefined, 'old-account-view-id', '571')
+    { originRequestId: 'origin-1', replyToId: 'old-account-view-id', replyToSequence: '571' })
     expect(message.id).toBe('sent')
     expect(Buffer.concat(highwayFrames.map(highwayBody))).toEqual(Buffer.concat([
       Buffer.from([1, 2, 3, 4, 5]), thumbnail,
@@ -653,14 +714,17 @@ describe('QQNTClient streaming transport', () => {
       videoThumbnail: async () => ({ bytes: Buffer.of(1), width: 1, height: 1 }),
     })
 
-    await client.sendMessage('1:uid', undefined, [{
-      kind: 'file', name: 'boundary.mp4', mimeType: 'video/mp4',
-      source: {
-        size: video.length,
-        async *stream() {
-          yield video.subarray(0, 333_333)
-          yield video.subarray(333_333, blockSize + 11)
-          yield video.subarray(blockSize + 11)
+    await client.sendMessage('1:uid', [{
+      type: 'media',
+      media: {
+        kind: 'file', name: 'boundary.mp4', mimeType: 'video/mp4',
+        source: {
+          size: video.length,
+          async *stream() {
+            yield video.subarray(0, 333_333)
+            yield video.subarray(333_333, blockSize + 11)
+            yield video.subarray(blockSize + 11)
+          },
         },
       },
     }])
@@ -706,9 +770,12 @@ describe('QQNTClient streaming transport', () => {
       videoThumbnail: async () => ({ bytes: Buffer.of(1), width: 1, height: 1 }),
     })
 
-    await client.sendMessage('1:uid', undefined, [{
-      kind: 'file', name: 'exact.mp4', mimeType: 'video/mp4',
-      source: { size: video.length, async *stream() { yield video } },
+    await client.sendMessage('1:uid', [{
+      type: 'media',
+      media: {
+        kind: 'file', name: 'exact.mp4', mimeType: 'video/mp4',
+        source: { size: video.length, async *stream() { yield video } },
+      },
     }])
 
     expect(preparedMedia?.sha1Checkpoints).toEqual([
@@ -731,9 +798,12 @@ describe('QQNTClient streaming transport', () => {
     const address = server.address()
     if (!address || typeof address === 'string') throw new Error('missing address')
     const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
-    await expect(client.sendMessage('1:uid', undefined, [{
-      kind: 'file', name: 'short.bin',
-      source: { size: 10, async *stream() { yield new Uint8Array([1, 2]) } },
+    await expect(client.sendMessage('1:uid', [{
+      type: 'media',
+      media: {
+        kind: 'file', name: 'short.bin',
+        source: { size: 10, async *stream() { yield new Uint8Array([1, 2]) } },
+      },
     }])).rejects.toThrow(/incomplete media source/)
   })
 
@@ -741,6 +811,11 @@ describe('QQNTClient streaming transport', () => {
     const localBodies: Buffer[] = []
     let manifest: Record<string, any> | undefined
     server = createServer(async (request, response) => {
+      if (request.url === '/status') {
+        response.setHeader('content-type', 'application/json')
+        response.end(JSON.stringify({ protocolVersion: 34, ready: true }))
+        return
+      }
       if (request.url === '/uploads/prepare') {
         const body = JSON.parse((await collect(request)).toString()) as { media: { name: string } }
         response.setHeader('content-type', 'application/json')
@@ -768,10 +843,12 @@ describe('QQNTClient streaming transport', () => {
     const progress: Array<[number, number]> = []
     const streamCalls = [0, 0]
 
-    await client.sendMessage('1:uid', undefined, [{
-      kind: 'image', name: 'one.png', source: { async *stream() { streamCalls[0]++; yield Uint8Array.of(1, 2) } },
+    await client.sendMessage('1:uid', [{
+      type: 'media',
+      media: { kind: 'image', name: 'one.png', source: { async *stream() { streamCalls[0]++; yield Uint8Array.of(1, 2) } } },
     }, {
-      kind: 'image', name: 'two.png', source: { async *stream() { streamCalls[1]++; yield Uint8Array.of(3, 4, 5) } },
+      type: 'media',
+      media: { kind: 'image', name: 'two.png', source: { async *stream() { streamCalls[1]++; yield Uint8Array.of(3, 4, 5) } } },
     }], { onProgress: (item) => { progress.push([item.mediaIndex, item.transferredBytes]) } })
 
     expect(localBodies).toEqual([Buffer.alloc(0)])
@@ -826,8 +903,11 @@ describe('QQNTClient streaming transport', () => {
     expect(preparation).toBeDefined()
     const stream = vi.spyOn(preparation!.media.source, 'stream')
 
-    await client.sendMessage('1:uid', undefined, [{
-      kind: 'file', name: 'rapid.bin', mimeType: 'application/octet-stream', source: preparation!.media.source,
+    await client.sendMessage('1:uid', [{
+      type: 'media',
+      media: {
+        kind: 'file', name: 'rapid.bin', mimeType: 'application/octet-stream', source: preparation!.media.source,
+      },
     }])
 
     expect(prepareCalls).toBe(1)
@@ -1771,8 +1851,12 @@ describe('QQNTClient streaming transport', () => {
     if (!address || typeof address === 'string') throw new Error('missing address')
     const client = new QQNTClient({ endpoint: `http://127.0.0.1:${address.port}` })
     await client.status()
-    await client.sendMessage('c', undefined, [{
-      kind: 'file', voice: true, name: 'voice.ogg', source: { async *stream() { yield Uint8Array.of(1, 2); yield Uint8Array.of(3) } },
+    await client.sendMessage('c', [{
+      type: 'media',
+      media: {
+        kind: 'file', voice: true, name: 'voice.ogg',
+        source: { async *stream() { yield Uint8Array.of(1, 2); yield Uint8Array.of(3) } },
+      },
     }])
     expect(prepared).toBe(1)
     expect([...body]).toEqual([1, 2, 3])
@@ -1782,8 +1866,12 @@ describe('QQNTClient streaming transport', () => {
   it('rejects voice sends against a v20 bridge before posting bytes', async () => {
     const fetch = vi.fn(async () => Response.json({ protocolVersion: 20, ready: true }))
     const client = new QQNTClient({ endpoint: 'http://bridge.invalid/v1', fetch })
-    await expect(client.sendMessage('c', undefined, [{
-      kind: 'file', voice: true, name: 'voice.ogg', source: { async *stream() { yield Uint8Array.of(1) } },
+    await expect(client.sendMessage('c', [{
+      type: 'media',
+      media: {
+        kind: 'file', voice: true, name: 'voice.ogg',
+        source: { async *stream() { yield Uint8Array.of(1) } },
+      },
     }])).rejects.toThrow('protocol 21 is required')
     expect(fetch).toHaveBeenCalledOnce()
   })
@@ -1808,8 +1896,11 @@ describe('QQNTClient streaming transport', () => {
     const fetch = vi.fn(async () => Response.json({ protocolVersion: 23, ready: true }))
     const stream = vi.fn(async function* () { yield Uint8Array.of(1) })
     const client = new QQNTClient({ endpoint: 'http://bridge.invalid/v1', fetch })
-    await expect(client.sendMessage('c', undefined, [{
-      kind: 'file', name: 'video.mp4', mimeType: 'video/mp4', source: { stream },
+    await expect(client.sendMessage('c', [{
+      type: 'media',
+      media: {
+        kind: 'file', name: 'video.mp4', mimeType: 'video/mp4', source: { stream },
+      },
     }])).rejects.toThrow('protocol 24 is required')
     expect(fetch).toHaveBeenCalledOnce()
     expect(stream).not.toHaveBeenCalled()

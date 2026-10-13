@@ -42,6 +42,7 @@ import {
 } from './dialog-folders.js'
 import type { MessageProjectionPipeline } from './message-projection.js'
 import type { SpeechPipeline } from './speech.js'
+import { convertRichMessage, type RichMediaReference, type ResolvedRichMedia } from './rich-message.js'
 
 type GetDialogsRequest = tl.messages.RawGetDialogsRequest
 type GetPeerDialogsRequest = tl.messages.RawGetPeerDialogsRequest
@@ -698,20 +699,40 @@ export class DialogRpc {
 
   async saveDraft(req: tl.messages.RawSaveDraftRequest): Promise<tl.TlObject> {
     if (!this._drafts) throw new RpcError(500, 'DRAFT_STORE_UNAVAILABLE')
-    if (req.richMessage) throw new RpcError(400, 'DRAFT_RICH_MESSAGE_UNSUPPORTED')
     await this._hydratePeers()
     const scope = await this._resolveDraftScope(req.peer, req.replyTo)
     this._assertWritableConversation(scope.conversationId)
     const date = Math.floor(Date.now() / 1000)
     if (hasDraftContent(req)) {
+      let message = req.message
+      let entities = req.entities
+      let richMessage: tl.RawRichMessage | undefined
+      if (req.richMessage) {
+        // An article draft keeps the article itself: the client reopens it in
+        // its editor. Its media is materialised now and pruned again on read if
+        // the relay can no longer serve the bytes.
+        const conversion = await convertRichMessage(
+          req.richMessage,
+          (reference) => this._resolveDraftMedia(reference),
+        )
+        richMessage = {
+          _: 'richMessage',
+          blocks: conversion?.blocks ?? [],
+          photos: conversion?.photos ?? [],
+          documents: conversion?.documents ?? [],
+        }
+        message = conversion?.text ?? ''
+        entities = undefined
+      }
       const draft: tl.RawDraftMessage = {
         _: 'draftMessage',
         noWebpage: req.noWebpage,
         invertMedia: req.invertMedia,
         replyTo: req.replyTo,
-        message: req.message,
-        entities: req.entities,
-        media: req.media,
+        message,
+        entities,
+        media: richMessage ? undefined : req.media,
+        richMessage,
         date,
         effect: req.effect,
         suggestedPost: req.suggestedPost,
@@ -719,7 +740,7 @@ export class DialogRpc {
       await this._drafts.save(
         this._session.platformSessionId, scope.conversationId, scope.topMsgId, draft,
       )
-      await this._publishDraft(scope.conversationId, scope.topMsgId, draft)
+      await this._publishDraft(scope.conversationId, scope.topMsgId, this._servableDraft(draft))
     } else {
       await this._drafts.remove(
         this._session.platformSessionId, scope.conversationId, scope.topMsgId,
@@ -735,9 +756,13 @@ export class DialogRpc {
     await this._hydratePeers()
     const drafts = await this._drafts?.list(this._session.platformSessionId) ?? []
     const state = await this._store?.getUpdateState(this._session.platformSessionId)
+    const servable = drafts.map((stored) => ({
+      ...stored,
+      draft: this._servableDraft(stored.draft as tl.RawDraftMessage),
+    }))
     return {
       _: 'updates',
-      updates: drafts.map((stored) => this._makeDraftUpdate(stored)),
+      updates: servable.map((stored) => this._makeDraftUpdate(stored)),
       users: [], chats: [],
       date: state?.date ?? Math.floor(Date.now() / 1000),
       seq: state?.seq ?? 0,
@@ -2397,9 +2422,10 @@ export class DialogRpc {
   ): Promise<tl.TypeUpdates> {
     if (!this._store) throw new RpcError(500, 'MESSAGE_STORE_UNAVAILABLE')
     if (req.scheduleDate !== undefined) throw new RpcError(400, 'SCHEDULED_MESSAGES_UNAVAILABLE')
-    if (req.media || req.richMessage || req.message === undefined) throw new RpcError(400, 'MESSAGE_EDIT_UNSUPPORTED')
-    if (!req.message.length) throw new RpcError(400, 'MESSAGE_EMPTY')
-    if (Array.from(req.message).length > this._platform.capabilities.send.maxTextLength) {
+    if (req.media) throw new RpcError(400, 'MESSAGE_EDIT_UNSUPPORTED')
+    if (req.message === undefined && !req.richMessage) throw new RpcError(400, 'MESSAGE_EDIT_UNSUPPORTED')
+    if (!req.richMessage && !req.message!.length) throw new RpcError(400, 'MESSAGE_EMPTY')
+    if (!req.richMessage && Array.from(req.message!).length > this._platform.capabilities.send.maxTextLength) {
       throw new RpcError(400, 'MESSAGE_TOO_LONG')
     }
     await this._hydratePeers()
@@ -2418,10 +2444,34 @@ export class DialogRpc {
       throw new RpcError(400, 'MESSAGE_EDIT_TIME_EXPIRED')
     }
     const ordinal = projected.parts.find((part) => part.tlMessageId === req.id)?.ordinal ?? 0
-    await this._hydrateMentionUsernames(req.message, req.entities)
     const replyToNativeSequence = qqReplySequenceFromMetadata(projected.source.metadata)
-    const content: IMMessageInput = {
-      parts: [this._inputTextPart(req.message, req.entities)],
+    const editUploads: UploadedFile[] = []
+    let content: IMMessageInput
+    if (req.richMessage) {
+      // An edit that replaces an article is relayed as a replacement message,
+      // and only one physical upstream message can be replaced: refuse an
+      // article whose target upstream split into several messages rather than
+      // leaving the extras behind.
+      if ((projected.source.sourceIds?.length ?? 1) > 1) {
+        throw new RpcError(400, 'MESSAGE_EDIT_UNSUPPORTED')
+      }
+      const rich = await this._richMessageContent(
+        req.richMessage, editUploads, req.message, req.entities,
+      )
+      if (!rich) throw new RpcError(400, 'MESSAGE_EMPTY')
+      this._assertSendableContent(rich)
+      this._assertSendableMedia(
+        rich.parts.flatMap((part) => part.type === 'media' ? [part.media] : []),
+        [],
+        rich.parts.some((part) => part.type === 'text' && part.text.length > 0),
+      )
+      content = rich
+    } else {
+      await this._hydrateMentionUsernames(req.message!, req.entities)
+      content = { parts: [this._inputTextPart(req.message!, req.entities)] }
+    }
+    content = {
+      ...content,
       ...(projected.source.replyToId !== undefined
         ? { replyToId: projected.source.replyToId }
         : {}),
@@ -2438,6 +2488,8 @@ export class DialogRpc {
     } catch (error) {
       this._throwMessageAction(error, 'MESSAGE_EDIT_FORBIDDEN')
     }
+    // The replacement message consumed the staged uploads of a rich edit.
+    await Promise.all(editUploads.map((upload) => this._uploads?.complete(upload)))
     const conversation = this._conversation(conversationId)
     const source: IMMessage<any> = {
       ...(edited!.replacedMessageId
@@ -3494,6 +3546,7 @@ export class DialogRpc {
     req: SendMessageRequest,
     excludeConnection?: ServerConnection,
   ): Promise<tl.TypeUpdates> {
+    if (req.richMessage) return this._sendRichMessage(req, excludeConnection)
     if (!req.message.length) throw new RpcError(400, 'MESSAGE_EMPTY')
     if (Array.from(req.message).length > this._platform.capabilities.send.maxTextLength) {
       throw new RpcError(400, 'MESSAGE_TOO_LONG')
@@ -3578,6 +3631,138 @@ export class DialogRpc {
         : uniqueUsers([this._makeSelfUser(), await this._getPeerUser(peerId)]),
       chats: channel ? [this._makeChat(displayTarget)] : [],
       date: source.timestamp, seq: 0,
+    }
+  }
+
+  /**
+   * Relay one article as a single ordered platform message.
+   *
+   * Telegram clients post articles with an empty `message` field, so the body
+   * of the article is the message: its blocks become ordered text and media
+   * parts and the platform decides how much of the structure it can show.
+   */
+  private async _sendRichMessage(
+    req: SendMessageRequest,
+    excludeConnection?: ServerConnection,
+  ): Promise<tl.TypeUpdates> {
+    if (req.scheduleDate !== undefined) throw new RpcError(400, 'SCHEDULED_MESSAGES_UNAVAILABLE')
+    const uploads: UploadedFile[] = []
+    const content = await this._richMessageContent(req.richMessage!, uploads, req.message, req.entities)
+    if (!content) throw new RpcError(400, 'MESSAGE_EMPTY')
+    return this._sendRichContent(req.peer, content, uploads, [req.randomId], req.replyTo, excludeConnection)
+  }
+
+  /**
+   * Turn an article into relay content.
+   *
+   * Media the request declares is resolved through the same path as `sendMedia`
+   * so an article may carry anything a normal send can, including its staged
+   * uploads.
+   */
+  private async _richMessageContent(
+    input: tl.TypeInputRichMessage,
+    uploads: UploadedFile[],
+    text?: string,
+    entities?: tl.TypeMessageEntity[],
+  ): Promise<IMMessageInput | undefined> {
+    await this._hydratePeers()
+    await this._hydrateMentionUsernames(text ?? '', entities)
+    const conversion = await convertRichMessage(input, async (reference) => this._resolveRichMedia(reference, (
+      resolved,
+    ) => {
+      uploads.push(resolved.upload)
+    }))
+    if (!conversion) return undefined
+    return {
+      parts: [
+        ...(text?.length ? [this._inputTextPart(text, entities)] : []),
+        ...conversion.parts.map((part) => part.type === 'text'
+          ? this._inputTextPart(part.text, part.entities)
+          : { type: 'media' as const, media: part.media }),
+      ],
+    }
+  }
+
+  /**
+   * Resolve one article media reference.
+   *
+   * `onResolved` receives the staged upload a caller must release after a
+   * successful send. A reference the relay cannot resolve is reported to the
+   * caller as `MEDIA_INVALID`, exactly like an unresolvable `sendMedia`.
+   */
+  private async _resolveRichMedia(
+    reference: RichMediaReference,
+    onResolved?: (resolved: ResolvedMediaUpload) => void,
+  ): Promise<ResolvedRichMedia | undefined> {
+    if (!reference.input) throw new RpcError(400, 'MEDIA_INVALID')
+    const media: tl.TypeInputMedia = reference.kind === 'photo'
+      ? { _: 'inputMediaPhoto', id: reference.input as tl.TypeInputPhoto }
+      : { _: 'inputMediaDocument', id: reference.input as tl.TypeInputDocument }
+    const resolved = await this._resolveSendMedia(media)
+    if ('sticker' in resolved) throw new RpcError(400, 'MEDIA_INVALID')
+    onResolved?.(resolved)
+    return { media: resolved.media }
+  }
+
+  /**
+   * Materialise one draft media reference.
+   *
+   * A draft has no platform message to download from, so only media whose bytes
+   * this relay still has staged is worth keeping; anything else is dropped so
+   * the client never reopens an article with a picture it cannot load.
+   */
+  private async _resolveDraftMedia(reference: RichMediaReference): Promise<ResolvedRichMedia | undefined> {
+    if (!reference.input || !this._uploads) return undefined
+    let resolved: ResolvedMediaUpload | ResolvedStickerInput
+    try {
+      resolved = await this._resolveSendMedia(reference.kind === 'photo'
+        ? { _: 'inputMediaPhoto', id: reference.input as tl.TypeInputPhoto }
+        : { _: 'inputMediaDocument', id: reference.input as tl.TypeInputDocument })
+    } catch {
+      return undefined
+    }
+    if ('sticker' in resolved) return undefined
+    const staged = this._uploads.getStaged(this._session.platformSessionId, String(resolved.upload.fileId))
+    if (!staged) return undefined
+    const media = makeStagedMessageMedia(staged, this._dcId)
+    return {
+      media: staged.media,
+      ...(media._ === 'messageMediaPhoto' && media.photo._ === 'photo' ? { rawPhoto: media.photo } : {}),
+      ...(media._ === 'messageMediaDocument' && media.document._ === 'document'
+        ? { rawDocument: media.document } : {}),
+    }
+  }
+
+  /**
+   * A stored draft as the client should see it.
+   *
+   * A draft holds the uploads of the article it waits to send, so media whose
+   * bytes the relay no longer has — an upload that was swept, or a relay that
+   * restarted before the draft was sent — is removed instead of advertised as a
+   * picture that will never load.
+   */
+  private _servableDraft(draft: tl.RawDraftMessage): tl.RawDraftMessage {
+    if (!draft.richMessage) return draft
+    const rich = draft.richMessage
+    if (!rich.photos.length && !rich.documents.length) return draft
+    const servable = new Set<string>()
+    for (const media of [...rich.photos, ...rich.documents]) {
+      if (this._uploads?.getStaged(this._session.platformSessionId, media.id.toString())) {
+        servable.add(media.id.toString())
+      }
+    }
+    if (servable.size === rich.photos.length + rich.documents.length) return draft
+    return {
+      ...draft,
+      richMessage: {
+        ...rich,
+        photos: rich.photos.filter((photo) => servable.has(photo.id.toString())),
+        documents: rich.documents.filter((document) => servable.has(document.id.toString())),
+        blocks: rich.blocks.filter((block) => {
+          const id = mediaBlockId(block)
+          return id === undefined || servable.has(id)
+        }),
+      },
     }
   }
 
@@ -3723,6 +3908,38 @@ export class DialogRpc {
     }
   }
 
+  /** A content body this platform is able to store, whatever RPC produced it. */
+  private _assertSendableContent(content: IMMessageInput): void {
+    const text = content.parts.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n')
+    if (Array.from(text).length > this._platform.capabilities.send.maxTextLength) {
+      throw new RpcError(400, 'MESSAGE_TOO_LONG')
+    }
+  }
+
+  /** Per-platform limits on the media a body carries. */
+  private _assertSendableMedia(
+    media: readonly IMMediaInput[],
+    stickers: readonly import('./sticker-provider.js').IMStickerSendPlan[],
+    hasText: boolean,
+  ): void {
+    if (media.length > this._platform.capabilities.send.maxMedia) throw new RpcError(400, 'MEDIA_TOO_MANY')
+    if (media.some((item) => item.kind === 'image') && !this._platform.capabilities.send.images) {
+      throw new RpcError(400, 'PHOTO_SEND_UNAVAILABLE')
+    }
+    if (media.some((item) => item.kind === 'file') && !this._platform.capabilities.send.files) {
+      throw new RpcError(400, 'FILE_SEND_UNAVAILABLE')
+    }
+    if (hasText && media.length && !this._platform.capabilities.send.mixed) {
+      throw new RpcError(400, 'MIXED_SEND_UNAVAILABLE')
+    }
+    if (stickers.some((item) => item.type === 'native') && !this._platform.capabilities.stickers?.native) {
+      throw new RpcError(400, 'STICKER_SEND_UNAVAILABLE')
+    }
+    if (stickers.some((item) => item.type === 'upload') && !this._platform.capabilities.stickers?.upload) {
+      throw new RpcError(400, 'STICKER_SEND_UNAVAILABLE')
+    }
+  }
+
   private async _sendRichContent(
     inputPeer: tl.TypeInputPeer,
     content: IMMessageInput,
@@ -3736,9 +3953,7 @@ export class DialogRpc {
     const stickers = content.parts.flatMap((part) => part.type === 'sticker' ? [part.sticker] : [])
     const text = content.parts.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n')
     if (stickers.length > 1) throw new RpcError(400, 'STICKERS_TOO_MUCH')
-    if (Array.from(text).length > this._platform.capabilities.send.maxTextLength) {
-      throw new RpcError(400, 'MESSAGE_TOO_LONG')
-    }
+    this._assertSendableContent(content)
 
     await this._hydratePeers()
     const hydrateMs = performance.now() - startedAt
@@ -3749,24 +3964,7 @@ export class DialogRpc {
     const replyMs = performance.now() - replyAt
     const replyToId = replyTarget?.id
     const systemPeer = await this._systemPeers?.resolve(this._session, peerId)
-    if (!systemPeer) {
-      if (media.length > this._platform.capabilities.send.maxMedia) throw new RpcError(400, 'MEDIA_TOO_MANY')
-      if (media.some((item) => item.kind === 'image') && !this._platform.capabilities.send.images) {
-        throw new RpcError(400, 'PHOTO_SEND_UNAVAILABLE')
-      }
-      if (media.some((item) => item.kind === 'file') && !this._platform.capabilities.send.files) {
-        throw new RpcError(400, 'FILE_SEND_UNAVAILABLE')
-      }
-      if (text && media.length && !this._platform.capabilities.send.mixed) {
-        throw new RpcError(400, 'MIXED_SEND_UNAVAILABLE')
-      }
-      if (stickers.some((item) => item.type === 'native') && !this._platform.capabilities.stickers?.native) {
-        throw new RpcError(400, 'STICKER_SEND_UNAVAILABLE')
-      }
-      if (stickers.some((item) => item.type === 'upload') && !this._platform.capabilities.stickers?.upload) {
-        throw new RpcError(400, 'STICKER_SEND_UNAVAILABLE')
-      }
-    }
+    if (!systemPeer) this._assertSendableMedia(media, stickers, Boolean(text))
     const resolvedContent: IMMessageInput = {
       ...content,
       replyToId,
@@ -5656,8 +5854,13 @@ export class DialogRpc {
 
   private async _mainDrafts(): Promise<Map<string, StoredDraft>> {
     const drafts = await this._drafts?.list(this._session.platformSessionId) ?? []
-    return new Map(drafts.filter((draft) => draft.topMsgId === 0)
-      .map((draft) => [draft.conversationId, draft]))
+    const servable = drafts
+      .filter((draft) => draft.topMsgId === 0)
+      .map((draft) => ({
+        ...draft,
+        draft: this._servableDraft(draft.draft as tl.RawDraftMessage),
+      }))
+    return new Map(servable.map((draft) => [draft.conversationId, draft]))
   }
 
   private _makeDraftUpdate(stored: {
@@ -6777,6 +6980,15 @@ function withReplyToTopId(update: tl.TypeUpdate, replyToTopId: number | undefine
       replyTo: { ...update.message.replyTo, replyToTopId },
     },
   }
+}
+
+/** Media id a stored article block refers to, when it refers to one at all. */
+function mediaBlockId(block: tl.TypePageBlock): string | undefined {
+  if (block._ === 'pageBlockPhoto') return block.photoId.toString()
+  if (block._ === 'pageBlockVideo') return block.videoId.toString()
+  if (block._ === 'pageBlockAudio') return block.audioId.toString()
+  if (block._ === 'pageBlockDocument') return block.documentId.toString()
+  return undefined
 }
 
 function hasDraftContent(request: tl.messages.RawSaveDraftRequest): boolean {

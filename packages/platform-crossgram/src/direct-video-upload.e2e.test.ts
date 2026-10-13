@@ -109,9 +109,14 @@ describe('QQNT direct playable-video upload E2E', () => {
       videoThumbnail: async () => ({ bytes: thumbnail, width: 320, height: 180 }),
     })
 
-    await client.sendMessage('2:group', 'caption', [{
-      kind: 'file', name: 'clip.mp4', mimeType: 'video/mp4', width: 320, height: 180, duration: 4,
-      source: { size: video.length, async *stream() { yield video } },
+    await client.sendMessage('2:group', [{
+      type: 'text', text: 'caption',
+    }, {
+      type: 'media',
+      media: {
+        kind: 'file', name: 'clip.mp4', mimeType: 'video/mp4', width: 320, height: 180, duration: 4,
+        source: { size: video.length, async *stream() { yield video } },
+      },
     }])
 
     expect(preparedRequest).toMatchObject({ conversationId: '2:group', media: {
@@ -189,14 +194,17 @@ describe('QQNT direct playable-video upload E2E', () => {
       videoThumbnail: async () => ({ bytes: Buffer.of(1), width: 1, height: 1 }),
     })
 
-    await client.sendMessage('2:group', undefined, [{
-      kind: 'file', name: 'long.mp4', mimeType: 'video/mp4',
-      source: {
-        size: video.length,
-        async *stream() {
-          for (let offset = 0; offset < video.length; offset += 700_001) {
-            yield video.subarray(offset, offset + 700_001)
-          }
+    await client.sendMessage('2:group', [{
+      type: 'media',
+      media: {
+        kind: 'file', name: 'long.mp4', mimeType: 'video/mp4',
+        source: {
+          size: video.length,
+          async *stream() {
+            for (let offset = 0; offset < video.length; offset += 700_001) {
+              yield video.subarray(offset, offset + 700_001)
+            }
+          },
         },
       },
     }])

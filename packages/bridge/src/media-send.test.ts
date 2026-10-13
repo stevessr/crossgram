@@ -804,3 +804,172 @@ async function collectSource(source: import('./platform.js').IMMediaSource): Pro
   }
   return bytes
 }
+
+const TINY_PNG = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=',
+  'base64',
+)
+
+function sendRequest(
+  peerId: number,
+  overrides: Partial<tl.messages.RawSendMessageRequest>,
+): tl.messages.RawSendMessageRequest {
+  return {
+    _: 'messages.sendMessage', peer: peer(peerId), message: '',
+    randomId: Long.fromNumber(900 + peerId), ...overrides,
+  }
+}
+
+function emptyCaption(): tl.RawPageCaption {
+  return { _: 'pageCaption', text: { _: 'textEmpty' }, credit: { _: 'textEmpty' } }
+}
+
+/** Upload one image the way an article composer does, and return its reference. */
+async function stagePhoto(
+  rpc: DialogRpc,
+  uploads: UploadManager,
+  peerId: number,
+  fileId: number,
+  name: string,
+): Promise<tl.RawInputPhoto> {
+  await uploads.savePart(session.platformSessionId, String(fileId), 0, TINY_PNG)
+  const media = await rpc.uploadMedia({
+    _: 'messages.uploadMedia', peer: peer(peerId),
+    media: { _: 'inputMediaUploadedPhoto', file: inputFile(fileId, 1, name) },
+  })
+  if (media._ !== 'messageMediaPhoto' || media.photo._ !== 'photo') {
+    throw new Error('staged photo was not materialised')
+  }
+  return {
+    _: 'inputPhoto', id: media.photo.id, accessHash: media.photo.accessHash,
+    fileReference: media.photo.fileReference,
+  }
+}
+
+function articleBlocks(photos: readonly tl.RawInputPhoto[]): tl.TypePageBlock[] {
+  return [
+    { _: 'pageBlockParagraph', text: { _: 'textPlain', text: 'lead' } },
+    { _: 'pageBlockPhoto', photoId: photos[0]!.id, caption: emptyCaption() },
+    { _: 'pageBlockParagraph', text: { _: 'textPlain', text: 'tail' } },
+    { _: 'pageBlockPhoto', photoId: photos[1]!.id, caption: emptyCaption() },
+  ]
+}
+
+function richRequest(
+  peerId: number,
+  photos: readonly tl.RawInputPhoto[],
+  randomId: number,
+): tl.messages.RawSendMessageRequest {
+  return sendRequest(peerId, {
+    randomId: Long.fromNumber(randomId),
+    richMessage: { _: 'inputRichMessage', blocks: articleBlocks(photos), photos: [...photos] },
+  })
+}
+
+/** Telegram message an updates payload created, in the timeline or as a replacement. */
+function newMessage(updates: tl.TypeUpdates): tl.RawMessage {
+  const update = (updates as tl.RawUpdates).updates.find((item) =>
+    item._ === 'updateNewMessage' || item._ === 'updateNewChannelMessage') as
+    | tl.RawUpdateNewMessage
+    | tl.RawUpdateNewChannelMessage
+    | undefined
+  if (!update) throw new Error('updates carried no new message')
+  return update.message as tl.RawMessage
+}
+
+describe('rich message send', () => {
+  it('relays an article as one ordered message and projects it back as an article', async () => {
+    const { rpc, uploads, inputs, peerId } = await createHarness()
+    const photos = [
+      await stagePhoto(rpc, uploads, peerId, 101, 'first.png'),
+      await stagePhoto(rpc, uploads, peerId, 102, 'second.png'),
+    ]
+
+    const message = newMessage(await rpc.sendMessage(richRequest(peerId, photos, 17)))
+
+    expect(inputs).toHaveLength(1)
+    expect(inputs[0]!.parts.map((part) => part.type)).toEqual(['text', 'media', 'text', 'media'])
+    expect(inputs[0]!.parts.flatMap((part) => part.type === 'text' ? [part.text] : []))
+      .toEqual(['lead', 'tail'])
+    expect(message.media).toBeUndefined()
+    expect(message.richMessage?.blocks.map((block) => block._)).toEqual([
+      'pageBlockParagraph', 'pageBlockPhoto', 'pageBlockParagraph', 'pageBlockPhoto',
+    ])
+    expect(message.richMessage?.photos).toHaveLength(2)
+    // A successful send releases the staged uploads it consumed.
+    await expect(uploads.open(session.platformSessionId, '101', 1)).rejects.toThrow('part is missing')
+  })
+
+  it('reports an article whose declared photo was never uploaded', async () => {
+    const { rpc, peerId } = await createHarness()
+    await expect(rpc.sendMessage(sendRequest(peerId, {
+      randomId: Long.fromNumber(18),
+      richMessage: {
+        _: 'inputRichMessage',
+        blocks: [{ _: 'pageBlockPhoto', photoId: Long.fromNumber(404), caption: emptyCaption() }],
+        photos: [{
+          _: 'inputPhoto', id: Long.fromNumber(404), accessHash: Long.fromNumber(404),
+          fileReference: new TextEncoder().encode('bridge-staged:404'),
+        }],
+      },
+    }))).rejects.toThrow('MEDIA_INVALID')
+  })
+
+  it('replaces an edited article with the edited body order', async () => {
+    const { rpc, platform, uploads, inputs, peerId } = await createHarness()
+    const before = [
+      await stagePhoto(rpc, uploads, peerId, 201, 'before-a.png'),
+      await stagePhoto(rpc, uploads, peerId, 202, 'before-b.png'),
+    ]
+    const messageId = newMessage(await rpc.sendMessage(richRequest(peerId, before, 19))).id
+
+    platform.capabilities.messageActions = {
+      delete: { own: { supported: true }, others: { supported: true } },
+      edit: { mode: 'delete-and-resend' },
+      forward: { mode: 'unsupported', preservesAuthor: false },
+    }
+    platform.deleteMessages = async () => {}
+
+    const after = [
+      await stagePhoto(rpc, uploads, peerId, 203, 'after-a.png'),
+      await stagePhoto(rpc, uploads, peerId, 204, 'after-b.png'),
+    ]
+    const edited = await rpc.editMessage({
+      _: 'messages.editMessage', peer: peer(peerId), id: messageId, message: '',
+      richMessage: { _: 'inputRichMessage', blocks: articleBlocks(after), photos: [...after] },
+    })
+
+    expect(inputs).toHaveLength(2)
+    expect(inputs[1]!.parts.map((part) => part.type)).toEqual(['text', 'media', 'text', 'media'])
+    expect(newMessage(edited).richMessage?.photos).toHaveLength(2)
+  })
+
+  it('refuses an article edit whose target was split into several upstream messages', async () => {
+    const { rpc, platform, store, uploads, peerId } = await createHarness()
+    const photos = [
+      await stagePhoto(rpc, uploads, peerId, 301, 'first.png'),
+      await stagePhoto(rpc, uploads, peerId, 302, 'second.png'),
+    ]
+    const messageId = newMessage(await rpc.sendMessage(richRequest(peerId, photos, 20))).id
+    platform.capabilities.messageActions = {
+      delete: { own: { supported: true }, others: { supported: true } },
+      edit: { mode: 'delete-and-resend' },
+      forward: { mode: 'unsupported', preservesAuthor: false },
+    }
+    platform.deleteMessages = async () => {}
+    // A caption plus an ordinary QQ file relays as several physical messages,
+    // and only one of them could be replaced.
+    const original = store.findProjectedByTlId.bind(store)
+    store.findProjectedByTlId = (async (...args: Parameters<typeof original>) => {
+      const projected = await original(...args)
+      return projected
+        ? { ...projected, source: { ...projected.source, sourceIds: ['physical-a', 'physical-b'] } }
+        : projected
+    }) as typeof store.findProjectedByTlId
+
+    await expect(rpc.editMessage({
+      _: 'messages.editMessage', peer: peer(peerId), id: messageId, message: '',
+      richMessage: { _: 'inputRichMessage', blocks: articleBlocks(photos), photos: [...photos] },
+    })).rejects.toThrow('MESSAGE_EDIT_UNSUPPORTED')
+  })
+})

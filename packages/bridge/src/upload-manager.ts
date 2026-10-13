@@ -54,6 +54,9 @@ export interface UploadSweepResult {
   directories: number
 }
 
+/** Veto for one upload a sweep would otherwise release. */
+export type UploadKeepPredicate = (platformSessionId: string, fileId: string) => boolean
+
 /**
  * How long an upload may sit without progress before it is treated as
  * abandoned. A client sends the media it staged within seconds; the generous
@@ -210,23 +213,33 @@ export class UploadManager {
    * A directory is kept while a surviving entry still owns it, and the ones
    * without any owner are judged by their own mtime: a legacy upload in flight
    * has no entry at all, but every accepted part refreshes that mtime.
+   *
+   * `keep` lets an owner veto a release for an upload it still needs, such as
+   * the media of an article draft the client has not sent yet.
    */
-  async sweep(maxIdleMs: number, now = Date.now()): Promise<UploadSweepResult> {
+  async sweep(
+    maxIdleMs: number,
+    now = Date.now(),
+    options: { keep?: UploadKeepPredicate } = {},
+  ): Promise<UploadSweepResult> {
     if (!Number.isFinite(maxIdleMs) || maxIdleMs < 0) {
       throw new RangeError('maxIdleMs must be a non-negative finite number')
     }
     const cutoff = now - maxIdleMs
+    const keep = options.keep
     let staged = 0
     let prepared = 0
     let directories = 0
 
     for (const [key, entry] of [...this._staged]) {
       if (entry.updatedAt >= cutoff) continue
+      if (keep?.(entry.upload.platformSessionId, entry.upload.fileId)) continue
       this._staged.delete(key)
       staged++
     }
     for (const [key, entry] of [...this._prepared]) {
       if (entry.updatedAt >= cutoff) continue
+      if (keep?.(entry.platformSessionId, entry.fileId)) continue
       this._prepared.delete(key)
       try {
         await entry.sink.abort(new Error('upload abandoned'))

@@ -1,4 +1,5 @@
 import type { JsonValue } from '@mtproto-relay/bridge'
+import type { QQPreparedMedia } from './highway.js'
 
 export interface QQMediaLocator {
   messageId: string
@@ -319,6 +320,49 @@ export interface WireTextPart {
         faceType: number
       }
   >
+}
+
+/** One element of an ordered send body, mirroring the bridge's `QQSendPart`. */
+export type WireSendPart =
+  | WireTextPart
+  | {
+      type: 'media'
+      media: WireSendMedia
+      /** CDN metadata for this item, when the bridge already uploaded its bytes. */
+      prepared?: QQPreparedMedia
+    }
+
+/** Media item of an ordered send body, mirroring the bridge's `QQSendMediaSpec`. */
+export interface WireSendMedia {
+  kind: 'image' | 'video' | 'file' | 'voice'
+  name: string
+  mimeType?: string
+  size?: number
+  md5?: string
+  sha1?: string
+  sha1Checkpoints?: string[]
+  file10MMd5?: string
+  width?: number
+  height?: number
+  duration?: number
+  thumbnail?: {
+    size: number
+    md5: string
+    sha1: string
+    width: number
+    height: number
+  }
+}
+
+/** Media item the bridge can prepare or receive as already-uploaded bytes. */
+export type WireUploadMedia = Omit<WireSendMedia, 'kind'> & { kind: 'image' | 'video' | 'file' }
+
+/** Transfer details that decorate one send. */
+export interface WireSendOptions {
+  originRequestId?: string
+  sticker?: QQStickerReference
+  replyToId?: string
+  replyToSequence?: string
 }
 
 export interface WireConversation {

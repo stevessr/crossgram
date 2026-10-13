@@ -63,12 +63,15 @@ QQ 适配器的源码位于 `packages/platform-crossgram`。适配器通过 HTTP
 | 语音消息与转写 | ✓ | ✗ | ✗ | ✗ |
 | 群文件 | ✓ | ✗ | ✗ | ✗ |
 | 语音通话 | 私聊<sup>[3]</sup> | ✗ | ✗ | ✗ |
+| 文章 / 富文本消息（rich message） | ✓<sup>[4]</sup> | ✓ | ✓ | ✓ |
 
 [1] QQ 只允许撤回 120 秒内的消息。QQ 不支持编辑已发送的消息，适配器在 120 秒内以撤回原消息并发送新消息的方式实现编辑。
 
 [2] `grayTipFilters` 列出需要隐藏的灰条文字。默认配置隐藏“回应了你的消息”灰条，因为同一事件已经以消息回应的形式显示。
 
 [3] 语音通话需要单独运行 voice-worker，见 [voice-worker](packages/voice-worker/README.md)。如果 bridge 未配置 `voiceWorkerSocketPath`，那么通话不可用。视频通话不受支持。
+
+[4] 客户端发出的文章被 relay 展开为一条有序的正文（文字与图片按文章顺序交替），平台按自己的能力显示：Discord 和 Matrix 保留文字格式，QQ 显示为一条图文消息并丢掉文字格式，需要 bridge 协议 ≥ 35 才会保持图片与文字交替，更早的 bridge 把文字放在图片之前。图片不足两张的富文本消息在 Telegram 客户端里显示为带格式的文字消息。文章草稿（`messages.saveDraft`）连同尚未发送的图片一起保存，直到草稿被发出去或清掉；relay 无法再取到图片字节时，草稿会去掉那张图片而不是给客户端一个打不开的图。
 
 所有适配器都不支持 Secret Chat、Stories、Premium、红包和转账。群公告既不显示也不能管理。Matrix 适配器不解密端到端加密事件，这类事件显示为占位消息；配置与限制见 [Matrix 适配器文档](packages/platform-matrix/README.md)。
 

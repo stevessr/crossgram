@@ -15,7 +15,7 @@ import type {
   QQMediaLocator, QQStickerReference, WireConversation, WireEvent, WireMemberPage, WireMessage, WireMultiForwardLocator,
   WirePokeResult,
   WireReactionActorPage, WireReactionContext, WireReactionState, WireRequest, WireRequestPage, WireSticker, WireStickerPack, WireStickerPackSummary,
-  WireFlashTransferManifest, WireFlashTransferResult, WireReactionAssetMeta, WireStickerAssetMeta, WireTextPart,
+  WireFlashTransferManifest, WireFlashTransferResult, WireReactionAssetMeta, WireStickerAssetMeta, WireSendOptions, WireSendPart, WireUploadMedia, WireTextPart,
 } from './protocol.js'
 import { QQHighwayUploadWriter, uploadHighway, type QQMediaUploadPlan } from './highway.js'
 import { Sha1CompressionState } from './sha1-state.js'
@@ -114,6 +114,26 @@ export interface QQNTMediaLease {
   /** Monotonic gateway expiry; only the gateway compares it to its local clock. */
   expiry: number
 }
+
+/** One media item of a send, as the adapter describes it. */
+export interface QQOutboundMedia {
+  kind: 'image' | 'file'
+  voice?: boolean
+  name: string
+  mimeType?: string
+  width?: number
+  height?: number
+  duration?: number
+  source: IMMediaSource
+}
+
+/** One element of a send, as the adapter describes it. */
+export type QQSendPart =
+  | WireTextPart
+  | {
+      type: 'media'
+      media: QQOutboundMedia
+    }
 
 export class QQNTClient {
   readonly endpoint: string
@@ -570,20 +590,7 @@ export class QQNTClient {
 
   async prepareMediaUpload(
     conversationId: string,
-    media: {
-      kind: 'image' | 'video' | 'file'
-      name: string
-      mimeType?: string
-      size: number
-      md5: string
-      sha1: string
-      sha1Checkpoints?: string[]
-      file10MMd5: string
-      width?: number
-      height?: number
-      duration?: number
-      thumbnail?: ReturnType<typeof videoThumbnailMetadata>
-    },
+    media: WireUploadMedia,
     signal?: AbortSignal,
   ): Promise<QQMediaUploadPlan> {
     const response = await this.fetchImpl(`${this.endpoint}/uploads/prepare`, {
@@ -598,38 +605,48 @@ export class QQNTClient {
     return responseJson(response)
   }
 
+  /**
+   * Whether the bridge keeps the caller's own element order.
+   *
+   * A bridge that cannot report its version keeps the shape every bridge
+   * understands, which is one text block followed by every media item.
+   */
+  private async supportsSendParts(): Promise<boolean> {
+    if (this.bridgeProtocol === undefined) {
+      try {
+        await this.status()
+      } catch {
+        return false
+      }
+    }
+    return (this.bridgeProtocol ?? 0) >= 35
+  }
+
   async sendMessage(
     conversationId: string,
-    text: string | undefined,
-    media: Array<{
-      kind: 'image' | 'file'
-      voice?: boolean
-      name: string
-      mimeType?: string
-      width?: number
-      height?: number
-      duration?: number
-      source: IMMediaSource
-    }> | undefined,
+    parts: readonly QQSendPart[],
     options: IMTransferOptions = {},
-    originRequestId?: string,
-    sticker?: QQStickerReference,
-    textParts?: WireTextPart[],
-    replyToId?: string,
-    replyToSequence?: string,
+    transfer: WireSendOptions = {},
   ): Promise<WireMessage> {
-    const voice = media?.find((item) => item.voice)
+    const { originRequestId, sticker, replyToId, replyToSequence } = transfer
+    const textParts: WireTextPart[] = parts.flatMap((part) => part.type === 'text' ? [part] : [])
+    const mediaParts: QQOutboundMedia[] = parts.flatMap((part) => part.type === 'media' ? [part.media] : [])
+    const text = textParts.length ? textParts.map((part) => part.text).join('\n') : undefined
+    const voice = mediaParts.find((item) => item.voice)
     if (voice) {
       if (this.bridgeProtocol === undefined) await this.status()
       if (this.bridgeProtocol! < 21) {
         throw new Error('QQNT bridge protocol 21 is required for voice messages')
       }
-      if (media?.length !== 1 || text || textParts?.length || sticker || replyToSequence) {
+      if (mediaParts.length !== 1 || text || sticker || replyToSequence) {
         throw new Error('QQNT voice messages must contain exactly one voice item')
       }
       const manifest = {
         conversationId, replyToId, replyToSequence, originRequestId,
-        media: [{ kind: 'voice', name: voice.name, mimeType: voice.mimeType, duration: voice.duration }],
+        media: [{
+          kind: 'voice', name: voice.name,
+          mimeType: voice.mimeType, duration: voice.duration,
+        }],
       }
       const response = await this.fetchImpl(`${this.endpoint}/messages`, {
         method: 'POST', headers: this.headers({
@@ -646,14 +663,14 @@ export class QQNTClient {
       }
       return responseJson(response)
     }
-    const hasVideo = media?.some((item) => outboundMediaKind(item) === 'video')
+    const hasVideo = mediaParts.some((item) => outboundMediaKind(item) === 'video')
     if (hasVideo) {
       if (this.bridgeProtocol === undefined) await this.status()
       if (this.bridgeProtocol! < 24) {
         throw new Error('QQNT bridge protocol 24 is required for playable video messages')
       }
     }
-    const preparedMedia = media && await Promise.all(media.map(async (item) => {
+    const preparedMedia = await Promise.all(mediaParts.map(async (item) => {
       const kind = outboundMediaKind(item)
       const fast = fastUpload(item.source)
       if (fast) {
@@ -671,16 +688,12 @@ export class QQNTClient {
       ])
       return { item, kind, hashes, thumbnail, plan: undefined, uploaded: false }
     }))
-    const uploadedMedia = preparedMedia && await Promise.all(preparedMedia.map(async ({
+    const specs = preparedMedia.map(({ item, kind, hashes, thumbnail }) =>
+      sendMediaSpec(item, kind, hashes, thumbnail))
+    const uploadedMedia = await Promise.all(preparedMedia.map(async ({
       item, kind, hashes, thumbnail, plan: fastPlan, uploaded,
     }, mediaIndex) => {
-      const mediaSpec = {
-        kind, name: item.name, mimeType: item.mimeType, size: hashes.size,
-        md5: hashes.md5, sha1: hashes.sha1, sha1Checkpoints: hashes.sha1Checkpoints,
-        file10MMd5: hashes.file10MMd5,
-        width: item.width, height: item.height, duration: item.duration,
-        ...(thumbnail ? { thumbnail: videoThumbnailMetadata(thumbnail) } : {}),
-      }
+      const mediaSpec = specs[mediaIndex]!
       const plan = fastPlan ?? await this.prepareMediaUpload(conversationId, mediaSpec, options.signal)
       if (plan.prepared.kind !== kind) throw new Error('QQNT bridge returned the wrong prepared media kind')
       if (plan.highway && !uploaded) {
@@ -723,22 +736,29 @@ export class QQNTClient {
       }
       return plan.prepared
     }))
-    const manifest = {
-      conversationId,
-      text,
-      textParts,
-      replyToId,
-      replyToSequence,
-      originRequestId,
-      sticker,
-      media: preparedMedia?.map(({ item, kind, hashes, thumbnail }) => ({
-        kind, name: item.name, mimeType: item.mimeType, size: hashes.size,
-        md5: hashes.md5, sha1: hashes.sha1, sha1Checkpoints: hashes.sha1Checkpoints,
-        file10MMd5: hashes.file10MMd5,
-        width: item.width, height: item.height, duration: item.duration,
-        ...(thumbnail ? { thumbnail: videoThumbnailMetadata(thumbnail) } : {}),
-      })),
-      uploadedMedia,
+    // A bridge that understands an ordered body receives the message as its
+    // parts; an older one keeps the flat shape of one text block followed by
+    // every media item, which is what such a bridge emits itself.
+    let manifest: Record<string, unknown>
+    if (await this.supportsSendParts()) {
+      let mediaIndex = 0
+      const wireParts: WireSendPart[] = parts.map((part) => part.type === 'text'
+        ? { type: 'text', text: part.text, entities: part.entities }
+        : {
+            type: 'media',
+            media: specs[mediaIndex]!,
+            prepared: uploadedMedia[mediaIndex++],
+          })
+      manifest = {
+        conversationId, replyToId, replyToSequence, originRequestId, sticker,
+        parts: wireParts,
+      }
+    } else {
+      manifest = {
+        conversationId, text, textParts, replyToId, replyToSequence, originRequestId, sticker,
+        media: specs,
+        uploadedMedia,
+      }
     }
     const headers = this.headers({
       'x-qqnt-manifest': Buffer.from(JSON.stringify(manifest)).toString('base64url'),
@@ -1689,6 +1709,22 @@ function videoThumbnailMetadata(thumbnail: HashedVideoThumbnail) {
     sha1: thumbnail.sha1,
     width: thumbnail.width,
     height: thumbnail.height,
+  }
+}
+
+/** Wire spec of one media item of a send. */
+function sendMediaSpec(
+  item: { name: string, mimeType?: string, width?: number, height?: number, duration?: number },
+  kind: 'image' | 'video' | 'file',
+  hashes: { size: number, md5: string, sha1: string, sha1Checkpoints?: string[], file10MMd5: string },
+  thumbnail: HashedVideoThumbnail | undefined,
+): WireUploadMedia {
+  return {
+    kind, name: item.name, mimeType: item.mimeType, size: hashes.size,
+    md5: hashes.md5, sha1: hashes.sha1, sha1Checkpoints: hashes.sha1Checkpoints,
+    file10MMd5: hashes.file10MMd5,
+    width: item.width, height: item.height, duration: item.duration,
+    ...(thumbnail ? { thumbnail: videoThumbnailMetadata(thumbnail) } : {}),
   }
 }
 

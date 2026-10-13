@@ -360,10 +360,16 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   // Only a send reaches UploadManager.complete(), and nothing calls remove() on
   // the abandonment paths, so staged media, prepared sinks, and legacy part
   // directories that a client walked away from are released here instead of
-  // accumulating for the life of the installation.
+  // accumulating for the life of the installation. An article draft is the one
+  // holder that never sends its media on its own, so the uploads it waits on
+  // stay until the draft is gone.
   ctx.effect(() => {
     const timer = setInterval(() => {
-      void uploads.sweep(UPLOAD_ABANDONED_TTL_MS).then((result) => {
+      void drafts.pinnedUploadIds().then((pinned) => uploads.sweep(
+        UPLOAD_ABANDONED_TTL_MS,
+        Date.now(),
+        { keep: (platformSessionId, fileId) => pinned.get(platformSessionId)?.has(fileId) ?? false },
+      )).then((result) => {
         if (!result.staged && !result.prepared && !result.directories) return
         bridgeLogger.info(
           'released abandoned uploads staged=%d prepared=%d directories=%d',
