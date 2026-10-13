@@ -175,8 +175,15 @@ export class Client {
         return
       }
       let message: { type: string; body?: any }
-      if (typeof raw === 'string') {
-        message = JSON.parse(raw)
+      // Some server adapters expose text frames as Buffer/Uint8Array rather
+      // than strings. JSON envelopes start with '{' (optionally whitespace);
+      // protobuf frames cannot start with that invalid wire-type tag. Keep
+      // accepting JSON after negotiation for requests already in flight.
+      const bytes = typeof raw === 'string' ? undefined
+        : raw instanceof ArrayBuffer ? new Uint8Array(raw) : raw
+      const first = bytes?.find(byte => ![9, 10, 13, 32].includes(byte))
+      if (typeof raw === 'string' || first === 123) {
+        message = JSON.parse(typeof raw === 'string' ? raw : new TextDecoder('utf-8', { fatal: true }).decode(bytes))
       } else {
         const frame = decodeFrame(raw)
         const payload = frame.gzip

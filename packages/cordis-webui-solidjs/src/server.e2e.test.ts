@@ -219,7 +219,7 @@ describe('Solid WebUI production service', () => {
       await app.stop()
     }
   })
-  it('upgrades real WebSocket frames to protobuf and processes binary ping/pong', async () => {
+  it.each(['text', 'buffer'])('upgrades %s JSON envelopes over real WebSockets and processes binary ping/pong', async (encoding) => {
     const app = await start()
     const socket = new WebSocket(app.url.replace('http:', 'ws:') + '/api')
     socket.binaryType = 'arraybuffer'
@@ -232,9 +232,8 @@ describe('Solid WebUI production service', () => {
       await vi.waitFor(() =>
         expect(frames[0]?.body?.transport).toBe('protobuf-gzip-v1'),
       )
-      socket.send(JSON.stringify({
-        type: 'transport:upgrade', body: { version: 1 },
-      }))
+      const upgrade = JSON.stringify({ type: 'transport:upgrade', body: { version: 1 } })
+      socket.send(encoding === 'buffer' ? Buffer.from(upgrade) : upgrade)
       await vi.waitFor(() =>
         expect(frames.some(frame => frame.type === 'transport:ready')).toBe(true),
       )

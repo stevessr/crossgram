@@ -72,6 +72,24 @@ function setup(data: Record<string, any> = { count: 0, increment: () => 42 }, ke
   return { socket, client, webui, entry, request }
 }
 describe('bounded subscription/RPC transport', () => {
+  it('accepts adapter-buffered JSON negotiation and requests alongside protobuf', async () => {
+    const { client, socket } = setup()
+    const buffered = (type: string, body?: unknown) => client.receive({
+      data: Buffer.from(' \n' + JSON.stringify({ type, body })),
+    })
+    await buffered('transport:upgrade', { version: 1 })
+    expect(client.protobuf).toBe(true)
+    expect(socket.frames.at(-1)).toEqual({ type: 'transport:ready', body: { version: 1 } })
+    await buffered('entry:subscribe', { id: 'entry' })
+    expect(socket.frames.at(-1).type).toBe('entry:snapshot')
+    await buffered('ping')
+    expect(socket.frames.at(-1).type).toBe('pong')
+    await client.receive({ data: encodeFrame('ping') })
+    expect(socket.frames.at(-1).type).toBe('pong')
+    await buffered('rpc:request', { sn: 1, entryId: 'entry', method: 'increment', args: [] })
+    expect(socket.frames.at(-1).body).toMatchObject({ sn: 1, ok: true, value: 42 })
+    client.dispose()
+  })
   it('sends metadata without eagerly serializing large or sensitive entry state', () => {
     const { socket } = setup({
       secret: 'never in metadata',
