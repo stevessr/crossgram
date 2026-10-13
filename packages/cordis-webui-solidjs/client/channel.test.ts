@@ -357,6 +357,21 @@ describe('Connection lifecycle', () => {
     await vi.advanceTimersByTimeAsync(40_000)
     expect(sockets).toHaveLength(2)
   })
+  it('does not let an obsolete retry timer open a second socket after wake', async () => {
+    vi.useFakeTimers()
+    const { connection, socket, sockets } = setup()
+    socket.close()
+    connection.wake()
+    expect(sockets).toHaveLength(2)
+    // Repeated online/visible events while a retry is already in flight must
+    // not bypass its backoff and open parallel sockets.
+    connection.wake()
+    await vi.advanceTimersByTimeAsync(500)
+    expect(sockets).toHaveLength(2)
+    sockets[1].receive('entry:init', { version: 'solid-1', reset: true, entries: {} })
+    expect(connection.state.status).toBe('connected')
+    connection.stop()
+  })
   it('times out requests with an honest uncertain-outcome error and recovers missed heartbeat', async () => {
     vi.useFakeTimers()
     const { connection, socket } = setup()

@@ -92,6 +92,7 @@ export class Connection {
   private retry = 0
   private stopped = true
   private reconnectTimer?: ReturnType<typeof setTimeout>
+  private reconnectGeneration = 0
   private pingTimer?: ReturnType<typeof setInterval>
   private pongTimer?: ReturnType<typeof setTimeout>
   private handshakeTimer?: ReturnType<typeof setTimeout>
@@ -114,6 +115,10 @@ export class Connection {
   }
   private connect() {
     if (this.stopped) return
+    // A visibility/online wake can race the queued retry (or a stale close
+    // event). Only one socket attempt may own the connection at a time.
+    if (this.socket) return
+    const generation = ++this.reconnectGeneration
     clearTimeout(this.reconnectTimer)
     this.reconnectTimer = undefined
     this.setState('status', this.retry ? 'reconnecting' : 'connecting')
@@ -123,7 +128,7 @@ export class Connection {
     try {
       socket = this.makeSocket(url.href)
     } catch (error) {
-      this.disconnected(String(error))
+      if (generation === this.reconnectGeneration) this.disconnected(String(error))
       return
     }
     this.socket = socket
@@ -458,6 +463,7 @@ export class Connection {
     }
   }
   private disconnected(reason: string) {
+    this.reconnectGeneration++
     this.socket = undefined
     this.protobuf = false
     this.upgradeRequested = false
@@ -493,10 +499,14 @@ export class Connection {
     const delay =
       Math.min(30_000, 500 * 2 ** Math.min(this.retry++, 6)) *
       (0.8 + Math.random() * 0.4)
-    this.reconnectTimer = setTimeout(() => this.connect(), delay)
+    const generation = this.reconnectGeneration
+    this.reconnectTimer = setTimeout(() => {
+      if (generation === this.reconnectGeneration) this.connect()
+    }, delay)
   }
   stop() {
     this.stopped = true
+    this.reconnectGeneration++
     clearTimeout(this.reconnectTimer)
     const socket = this.socket
     this.disconnected('Connection closed')
