@@ -3682,6 +3682,7 @@ export class DialogRpc {
               ? { replyToNativeSequence: replyTarget.nativeSequence }
               : {}),
           },
+          { idempotencyKey: JSON.stringify([req.randomId.toString()]) },
         ))
     const source: IMMessage = {
       ...sent,
@@ -4082,6 +4083,7 @@ export class DialogRpc {
       ? this._systemPeers!.makeOutgoing(this._session, systemPeer, resolvedContent)
       : await this._sendToPlatform(() => this._platform.sendMessage(
           this._session, { id: peerId }, resolvedContent, {
+            idempotencyKey: JSON.stringify(randomIds.map(id => id.toString())),
             onProgress: (progress) => this._onTransferProgress?.(this._session, progress),
           }))
     const platformMs = performance.now() - platformAt

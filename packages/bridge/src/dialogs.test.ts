@@ -81,6 +81,7 @@ class DialogTestPlatform implements IMPlatform {
     _session: PlatformSession,
     conversation: { id: string },
     content: IMMessageInput,
+    _options?: import('./platform.js').IMTransferOptions,
   ): Promise<IMMessage> {
     this.lastInput = content
     const text = content.parts.flatMap((part) => part.type === 'text' ? [part.text] : []).join('\n')
@@ -1551,6 +1552,7 @@ describe('DialogRpc', () => {
 
   it('sends exactly once per random ID and exposes the outgoing message in history', async () => {
     const platform = new DialogTestPlatform()
+    const send = vi.spyOn(platform, 'sendMessage')
     const rpc = new DialogRpc(platform, session)
     const aliceId = peerStableId('alice')
     const request = sendMessageRequest(aliceId)
@@ -1558,6 +1560,8 @@ describe('DialogRpc', () => {
     const first = await rpc.sendMessage(request) as tl.RawUpdates
     const duplicate = await rpc.sendMessage(request) as tl.RawUpdates
     expect(duplicate).toEqual(first)
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send.mock.calls[0]?.[3]).toEqual({ idempotencyKey: JSON.stringify([request.randomId.toString()]) })
     expect(first).toMatchObject({
       _: 'updates', seq: 0,
       updates: [

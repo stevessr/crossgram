@@ -70,3 +70,25 @@ media authorization/fallback and cached-profile confirmation; HTTP/SQLite/TL E2E
 for out-of-page reply targets, outgoing reply relations, random-ID confirmation,
 observer deletion updates, duplicate echoes/retries and failed upstream deletion.
 These fixtures do not establish real Telegram GUI rendering or production latency.
+
+### Retried sends
+
+The bridge forwards the MTProto `random_id` (or ordered album ID vector) as an
+opaque idempotency key. Matrix derives a stable transaction ID per account,
+room and content-part index instead of generating a new UUID on every attempt.
+A lost HTTP response or a failure while publishing the local confirmation can
+therefore be retried after reconnect/restart without creating another Matrix
+event. This uses the homeserver's [transaction identifier semantics](https://spec.matrix.org/v1.19/client-server-api/#transaction-identifiers),
+not message-text matching. Intentional identical messages with different random
+IDs are still distinct. Calls without an idempotency key keep fresh transaction
+IDs. Native stickers, uploaded stickers, files and multipart messages use the
+same per-part scheme. Uploads themselves can be repeated after failure; this
+protects message events, not media-storage deduplication. It does not retroactively
+remove messages sent twice before the fix, and depends on the homeserver retaining
+its transaction records.
+
+`send-dedup.e2e.test.ts` uses a real HTTP fixture which commits then drops a
+response, reconstructs adapter/RPC instances, injects post-send publication
+failure, and runs concurrent retries through SQLite and TL reply serialization.
+It checks one upstream event, stable client message IDs, and separate intentional
+sends. Unit tests additionally cover partial multipart failure and all media paths.

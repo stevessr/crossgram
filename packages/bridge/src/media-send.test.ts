@@ -675,7 +675,8 @@ describe('media send streaming', () => {
   })
 
   it('keeps staged parts after a platform failure and retries the same random ID', async () => {
-    const { rpc, uploads, consumed, peerId } = await createHarness(1)
+    const { rpc, platform, uploads, consumed, peerId } = await createHarness(1)
+    const send = vi.spyOn(platform, 'sendMessage')
     await uploads.savePart(session.platformSessionId, '88', 0, new TextEncoder().encode('retry-me'))
     const uploaded = await rpc.uploadMedia({
       _: 'messages.uploadMedia', peer: peer(peerId),
@@ -702,6 +703,7 @@ describe('media send streaming', () => {
     ))).toBe('retry-me')
     await expect(rpc.sendMedia(request)).resolves.toMatchObject({ _: 'updates' })
     expect(consumed).toHaveLength(2)
+    expect(send.mock.calls.map(call => call[3]?.idempotencyKey)).toEqual(['["88"]', '["88"]'])
     await expect(uploads.open(session.platformSessionId, '88', 1)).rejects.toThrow('part is missing')
   })
 

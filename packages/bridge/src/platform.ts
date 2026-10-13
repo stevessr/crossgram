@@ -774,6 +774,11 @@ export interface IMTransferProgress {
 }
 
 export interface IMTransferOptions {
+  /** Stable identity of one logical send, reused across RPC retries/reconnects.
+   * Adapters with native transactions should scope it to the account and part.
+   * Never derive this from message text: two intentional identical sends differ.
+   */
+  idempotencyKey?: string
   signal?: AbortSignal
   onProgress?: (progress: IMTransferProgress) => void | Promise<void>
 }

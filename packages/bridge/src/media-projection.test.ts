@@ -624,6 +624,7 @@ describe('rich-media projection', () => {
       session,
       { id: conversation.id },
       expect.objectContaining({ replyToId: album.id }),
+      { idempotencyKey: JSON.stringify(['9123']) },
     )
     await expect(store.findProjectedByTlId(
       session.platformSessionId, sentId, conversation.id,

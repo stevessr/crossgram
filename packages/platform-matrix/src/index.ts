@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import type { Context } from 'cordis'
 import z from 'schemastery'
 import enUS from './locales/en-US.yml'
@@ -663,13 +664,21 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   ): Promise<IMMessage<MatrixMediaLocator>> {
     // Verify current room state before uploading media or exposing any message content.
     await this.assertUnencryptedRoom(conversation.id)
+    // Random per-attempt txn IDs turn a timeout/reconnect into a second send.
+    // Scope the MTProto random_id to the account and use a stable part suffix;
+    // the homeserver then returns the original event even after relay restart.
+    const transaction = options.idempotencyKey === undefined ? undefined
+      : createHash('sha256').update(JSON.stringify([
+        session.platformId, session.platformSessionId, session.userId, conversation.id, options.idempotencyKey,
+      ])).digest('hex')
     const sourceIds: string[] = []
     const parts: IMMessage<MatrixMediaLocator>['content']['parts'] = []
     for (let index = 0; index < content.parts.length; index++) {
       const part = content.parts[index]!
+      const transactionId = transaction === undefined ? undefined : `crossgram.${transaction}.${index}`
       if (part.type === 'text') {
         const matrixContent = textContent(part.text, content.replyToId, part.entities)
-        sourceIds.push(await this.client.sendEvent(conversation.id, 'm.room.message', matrixContent))
+        sourceIds.push(await this.client.sendEvent(conversation.id, 'm.room.message', matrixContent, transactionId))
         parts.push({ type: 'text', text: part.text, entities: part.entities })
       } else if (part.type === 'media') {
         let transferredBytes = 0
@@ -685,7 +694,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
           },
         })
         const matrixContent = mediaContent(part.media, mxc, content.replyToId)
-        sourceIds.push(await this.client.sendEvent(conversation.id, 'm.room.message', matrixContent))
+        sourceIds.push(await this.client.sendEvent(conversation.id, 'm.room.message', matrixContent, transactionId))
         parts.push({
           type: 'media',
           media: {
@@ -710,7 +719,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
             body: sticker.reference.body ?? sticker.stickerId, url: sticker.reference.mxc,
             info: { mimetype: sticker.reference.mimeType, w: sticker.reference.width, h: sticker.reference.height },
             ...(content.replyToId ? { 'm.relates_to': { 'm.in_reply_to': { event_id: content.replyToId } } } : {}),
-          }))
+          }, transactionId))
           parts.push({ type: 'sticker', sticker: { providerId: this.stickerProviderId, stickerId: sticker.stickerId,
             packId: sticker.packId, title: typeof sticker.reference.body === 'string' ? sticker.reference.body : undefined,
             mimeType: typeof sticker.reference.mimeType === 'string' ? sticker.reference.mimeType : 'image/webp',
@@ -728,7 +737,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
             await options.onProgress?.({ phase: 'upload', mediaIndex: index, transferredBytes, totalBytes: sticker.source.size })
           },
         })
-        sourceIds.push(await this.client.sendEvent(conversation.id, 'm.sticker', stickerContent(sticker, mxc, content.replyToId)))
+        sourceIds.push(await this.client.sendEvent(conversation.id, 'm.sticker', stickerContent(sticker, mxc, content.replyToId), transactionId))
         parts.push({ type: 'sticker', sticker: {
           providerId: this.stickerProviderId, stickerId: mxc, format: sticker.format, mimeType: sticker.mimeType,
           size: sticker.source.size, width: sticker.width, height: sticker.height, locator: { mxc },

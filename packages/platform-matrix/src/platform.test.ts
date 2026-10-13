@@ -28,6 +28,62 @@ const roomState = [
 ]
 
 describe('MatrixPlatform', () => {
+  it('reuses per-part transaction IDs after a partial send, without deduplicating intentional identical text', async () => {
+    const stored = new Map<string, string>()
+    const attempts: string[] = []
+    let fail = true
+    const fetch = routeFetch((url) => {
+      if (!url.pathname.includes('/send/')) throw new Error(`Unexpected ${url}`)
+      attempts.push(url.pathname)
+      if (!stored.has(url.pathname)) stored.set(url.pathname, `$event-${stored.size}`)
+      if (fail && url.pathname.endsWith('.1')) {
+        fail = false
+        return json({ errcode: 'M_UNKNOWN', error: 'response lost after commit' }, { status: 503 })
+      }
+      return json({ event_id: stored.get(url.pathname) })
+    })
+    const platform = createPlatform(fetch)
+    const content = { parts: [{ type: 'text' as const, text: 'same' }, { type: 'text' as const, text: 'same' }] }
+    const target = { id: '!room:example.org' }
+    await expect(platform.sendMessage(session, target, content, { idempotencyKey: 'random-1' })).rejects.toThrow()
+    // A fresh adapter has no request-local deduplication cache to help it.
+    const restarted = createPlatform(fetch)
+    const result = await restarted.sendMessage(session, target, content, { idempotencyKey: 'random-1' })
+    expect(result.sourceIds).toEqual(['$event-0', '$event-1'])
+    expect(stored.size).toBe(2)
+    expect(attempts.slice(0, 2)).toEqual(attempts.slice(2, 4))
+    expect(attempts[0]).not.toBe(attempts[1])
+    await restarted.sendMessage(session, target, content, { idempotencyKey: 'random-2' })
+    expect(stored.size).toBe(4)
+    await restarted.sendMessage({ ...session, platformSessionId: 'another-account' }, target, content, { idempotencyKey: 'random-1' })
+    expect(stored.size).toBe(6)
+    await restarted.sendMessage(session, target, content)
+    await restarted.sendMessage(session, target, content)
+    expect(stored.size).toBe(10)
+    await platform.stop(); await restarted.stop()
+  })
+
+  it('uses stable distinct transactions for uploaded media and native/uploaded stickers', async () => {
+    const paths: string[] = []
+    const fetch = routeFetch(url => {
+      if (url.pathname.endsWith('/upload')) return json({ content_uri: 'mxc://test/uploaded' })
+      if (url.pathname.includes('/send/')) { paths.push(url.pathname); return json({ event_id: `$${url.pathname.split('/').at(-1)}` }) }
+      throw new Error(`Unexpected ${url}`)
+    })
+    const platform = createPlatform(fetch)
+    const source = { async *stream() { yield new Uint8Array([1, 2]) } }
+    const content = { parts: [
+      { type: 'media' as const, media: { kind: 'file' as const, name: 'test.bin', mimeType: 'application/octet-stream', source } },
+      { type: 'sticker' as const, sticker: { type: 'native' as const, providerId: 'matrix:stickers', stickerId: 'cat', reference: { mxc: 'mxc://test/cat' } } },
+      { type: 'sticker' as const, sticker: { type: 'upload' as const, providerId: 'test', stickerId: 'upload', format: 'static' as const, mimeType: 'image/webp', source } },
+    ] }
+    for (let i = 0; i < 2; i++) await platform.sendMessage(session, { id: '!room:example.org' }, content, { idempotencyKey: 'media-1' })
+    expect(paths.slice(0, 3)).toEqual(paths.slice(3))
+    expect(new Set(paths).size).toBe(3)
+    expect(paths.map(path => path.split('.').at(-1))).toEqual(['0', '1', '2', '0', '1', '2'])
+    await platform.stop()
+  })
+
   it('maps HTML rich replies without rendering fallback quotes as message text', async () => {
     const fetch = routeFetch(() => json(event('m.room.message', {
       msgtype: 'm.text', body: '> <@alice:example.org> quoted\n> old line\n\nanswer Bob',
