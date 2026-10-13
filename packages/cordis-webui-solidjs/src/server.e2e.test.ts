@@ -307,7 +307,7 @@ describe('Solid WebUI production service', () => {
         received += new TextDecoder().decode(chunk.value)
       }
       expect(received).toContain('event: entry:delta')
-      expect(received).toMatch(/id: [0-9]+/)
+      expect(received).toMatch(/id: [0-9a-f]{24}:[0-9]+/)
       controller.abort()
       await vi.waitFor(() => expect(app.ui.sse.activeClients).toBe(0))
     } finally {
