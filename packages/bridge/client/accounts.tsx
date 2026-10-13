@@ -461,7 +461,7 @@ function PasswordModal(props: {
     </Modal>
   )
 }
-function QrLogin(props: {
+export function QrLogin(props: {
   data: PlatformAccountDashboardData
   connected: boolean
   onClose: () => void
