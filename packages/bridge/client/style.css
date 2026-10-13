@@ -39,6 +39,32 @@
     border-radius: var(--radius-md);
     background: #111;
   }
+  .qr-upload-zone {
+    display: grid;
+    gap: 10px;
+    padding: 16px;
+    border: 2px dashed var(--outline-variant, var(--outline));
+    border-radius: var(--radius-md);
+    background: var(--surface-low);
+    transition: border-color 140ms, background-color 140ms;
+  }
+  .qr-upload-zone.dragging {
+    border-color: var(--primary);
+    background: var(--primary-container);
+  }
+  .qr-upload-zone input[type="file"] {
+    width: 100%;
+    max-width: 100%;
+  }
+  .qr-upload-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 12px;
+    align-items: center;
+  }
+  .qr-upload-actions .muted {
+    flex: 1 1 220px;
+  }
   .account-search {
     margin: 20px 0;
     max-width: 480px;
