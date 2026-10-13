@@ -33,6 +33,25 @@ describe('ServerAuthKey ID normalization', () => {
 })
 
 describe('ServerSession RPC error logging', () => {
+  it('returns a correlated RPC error rather than abandoning an unserializable response', async () => {
+    const afterResponse = vi.fn()
+    const { session, logger } = createSession(vi.fn(async (ctx) => {
+      ctx.afterResponse(afterResponse)
+      return { _: 'nearestDc', country: { secret: 'not for logs' }, thisDc: 1, nearestDc: 1 }
+    }))
+    const internal = session as any
+    internal._apiLayer = 193
+    await internal._handleRpcCall(Long.fromInt(8), { _: 'help.getNearestDc' }, Long.fromInt(9))
+    const bytes = internal._sendEncryptedMessage.mock.calls[0][0]
+    const reader = new TlBinaryReader(getServerReaderMap(), bytes)
+    expect(reader.uint()).toBe(0xf35c6d01)
+    expect(reader.long().toNumber()).toBe(8)
+    expect(reader.object()).toMatchObject({ _: 'mt_rpc_error', errorCode: 500, errorMessage: 'INTERNAL_RESPONSE_INVALID' })
+    expect(afterResponse).not.toHaveBeenCalled()
+    expect(JSON.stringify(logger.error.mock.calls)).toContain('nearestDc.country:object')
+    expect(JSON.stringify(logger.error.mock.calls)).not.toContain('not for logs')
+  })
+
   it('queues the rpc_result before running registered after-response work', async () => {
     const order: string[] = []
     const dispatch = vi.fn(async (context: { afterResponse?: (task: () => void) => void }) => {

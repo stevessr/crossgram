@@ -848,6 +848,21 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
     }
   })
 
+  it('answers a malformed result with an RPC error and keeps the encrypted connection usable', async () => {
+    await crypto.initialize?.()
+    const { port, pubKey, register, stop } = await startServer()
+    register('help.getNearestDc', async () => ({ _: 'nearestDc', country: {}, thisDc: 1, nearestDc: 1 }) as never)
+    const client = await TestClient.connect(port)
+    try {
+      const perm = await doClientHandshake(client, pubKey, false)
+      const session = Long.fromInt(1234)
+      await client.send(clientEncrypt(perm, serializeInitializedRpc({ _: 'help.getNearestDc' }), perm.salt, session, 1))
+      expect(await within(readRpcResult(client, perm), 3000, 'malformed response')).toMatchObject({ _: 'mt_rpc_error', errorCode: 500, errorMessage: 'INTERNAL_RESPONSE_INVALID' })
+      await client.send(clientEncrypt(perm, serializeInitializedRpc({ _: 'help.getAppConfig', hash: 0 }), perm.salt, session, 3))
+      expect(await within(readRpcResult(client, perm), 3000, 'next response')).toMatchObject({ _: 'help.appConfig' })
+    } finally { client.close(); await stop() }
+  })
+
   it('executes an Android-style invokeAfterMsg only after its referenced RPC completes', async () => {
     await crypto.initialize?.()
     const { port, pubKey, register, stop } = await startServer()

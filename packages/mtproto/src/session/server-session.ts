@@ -19,7 +19,7 @@ import type { RpcHandler, ServerRpcContext, RpcResult, BareVector } from '../rpc
 import type { MtprotoPacketScope } from '../rpc/context.js'
 import type { MtprotoClientInfo } from '../rpc/context.js'
 import {
-  getApiLayerResponseAdapter, getApiLayerWriterMap, resolveApiSchemaLayer, resolveApiSchemaProfile,
+  getApiLayerResponseAdapter, getApiLayerWriterMap, resolveApiSchemaLayer, resolveApiSchemaProfile, invalidResponseStringFields,
   type ApiLayerResponseAdapter,
 } from '../rpc/api-layer.js'
 import type { MtprotoDebugEvent, MtprotoDebugListener } from '../debug.js'
@@ -1558,7 +1558,17 @@ export class ServerSession {
           this._clearLoginToken()
         }
         debugResult = result
-        return this._buildRpcReply(msgId, result, method)
+        try {
+          return this._buildRpcReply(msgId, result, method)
+        } catch (error) {
+          // A failed writer used to escape without any rpc_result. Desktop then
+          // waited indefinitely for its initial difference/dialogs request.
+          this._log.error('RPC serialization failed for %s (layer %s, fields %s): %s',
+            method, this._apiLayer, invalidResponseStringFields(result, this._apiLayer).join(', '),
+            error instanceof Error ? error.stack ?? error.message : String(error))
+          debugResult = { _: 'mt_rpc_error', errorCode: 500, errorMessage: 'INTERNAL_RESPONSE_INVALID' }
+          return this._buildRpcReply(msgId, debugResult, method)
+        }
       } finally {
         release()
       }

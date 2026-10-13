@@ -351,3 +351,25 @@ function downgradeInlineKeyboardButton(
     })
   }
 }
+
+/** Failure-only diagnostics: schema field paths/types, never message contents. */
+export function invalidResponseStringFields(value: unknown, layer: number | null): string[] {
+  const resolved = layer === null ? null : resolveApiSchemaLayer(layer)
+  const entries = resolved === null ? currentSchema.e : loadSchemaEntries(resolved)
+  const fields = new Map(entries.map(entry => [entry.name, (entry.arguments ?? [])
+    .filter(arg => arg.type === 'string').map(arg => arg.name.replace(/_([a-z])/gu, (_, char: string) => char.toUpperCase()))]))
+  const output: string[] = [], seen = new Set<object>()
+  const visit = (input: unknown, path: string, depth: number) => {
+    if (depth > 30 || output.length >= 10 || !input || typeof input !== 'object' || seen.has(input)) return
+    seen.add(input)
+    if (ArrayBuffer.isView(input)) return
+    if (Array.isArray(input)) { input.slice(0, 1000).forEach((item, i) => visit(item, `${path}[${i}]`, depth + 1)); return }
+    const object = input as Record<string, unknown>
+    for (const field of fields.get(String(object._)) ?? []) {
+      if (object[field] !== undefined && typeof object[field] !== 'string') output.push(`${path}.${String(object._)}.${field}:${object[field] === null ? 'null' : typeof object[field]}`)
+    }
+    for (const [key, child] of Object.entries(object)) visit(child, `${path}.${key}`, depth + 1)
+  }
+  visit(value, 'result', 0)
+  return output.slice(0, 10)
+}
