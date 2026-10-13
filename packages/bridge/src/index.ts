@@ -248,7 +248,10 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     else bridgeLogger.debug(format, ...args)
   }
   const eventTrace = (format: string, ...args: unknown[]) => {
+    // Subscription lifecycle changes and slow pipelines are operational
+    // events; the remaining event traffic stays at debug.
     if (format.startsWith('slow local event profile')) bridgeLogger.info(format, ...args)
+    else if (format.startsWith('lazy sync') || format.startsWith('platform subscription')) bridgeLogger.info(format, ...args)
     else bridgeLogger.debug(format, ...args)
   }
   // Dropping or releasing a reservation breaks a client's pts cursor on
