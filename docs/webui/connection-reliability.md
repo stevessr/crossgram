@@ -101,11 +101,11 @@ Last-Event-ID: 123
 
 The endpoint emits `entry:init` followed by initial `entry:snapshot`
 frames for the requested entries, then `entry:delta` whenever the underlying
-entry state changes. Events carry monotonically increasing numeric IDs.
+entry state changes. Events carry a per-server-process random epoch and a monotonically increasing numeric sequence (`<epoch>:<sequence>`).
 Clients can resume from `Last-Event-ID` within a bounded 512-event / 4 MiB ring; a
-missing/stale cursor instead triggers fresh snapshots. A comment heartbeat
+missing/stale cursor or a cursor from a restarted process instead triggers fresh snapshots. A comment heartbeat
 is sent every 15 seconds and slow readers are closed rather than buffered
-indefinitely. `no-transform` and `X-Accel-Buffering: no` prevent proxy
+indefinitely. The initial 32 subscriptions and multi-event replay are delivered with pull-based backpressure; each client has an 8 MiB pending-buffer cap. Successful replay sends `entry:init` with `reset: false` so the browser does not discard its existing snapshot before applying deltas. `no-transform` and `X-Accel-Buffering: no` discourage proxy
 batching. Cross-origin requests are rejected and existing HTTP authentication
 middleware remains in force.
 
