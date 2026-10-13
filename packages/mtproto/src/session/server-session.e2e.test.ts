@@ -29,7 +29,7 @@ import type { MtprotoDebugEvent, MtprotoDebugListener } from '../debug.js'
 import { AbridgedPacketCodec } from '../transport/server-obfuscation.js'
 import type { ServerConnection } from '../transport/server-connection.js'
 import { generateRsaKeyPair, type ServerRsaKey } from '../crypto/rsa-keygen.js'
-import { bareVector } from '../rpc/protocol.js'
+import { bareVector, bareLongVector } from '../rpc/protocol.js'
 import { getApiLayerReaderMap } from '../rpc/api-layer.js'
 import { FileAuthKeyStore, type AuthKeyStore } from './auth-key-store.js'
 
@@ -550,6 +550,8 @@ async function startServer(
 
   // A handler returning a bare Vector<X> (0x1cb5c415 + count + items) — the shape
   // users.getUsers and the legacy messages.getDialogFilters return.
+  ctx.mtproto.register('photos.deletePhotos', async () => bareLongVector([Long.fromString('4294967297'), Long.fromInt(-1)]))
+
   ctx.mtproto.register('users.getUsers', async () => bareVector([
     { _: 'userEmpty', id: 1 },
     { _: 'userEmpty', id: 2 },
@@ -834,6 +836,12 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
         { _: 'userEmpty', id: 1 },
         { _: 'userEmpty', id: 2 },
       ])
+      const deletePhotos = TlBinaryWriter.serializeObject(__tlWriterMap, {
+        _: 'photos.deletePhotos', id: [],
+      } as tl.photos.RawDeletePhotosRequest)
+      await client.send(clientEncrypt(perm, deletePhotos, perm.salt, sessionLong, 8))
+      const deleted = await readRpcResult(client, perm, __tlReaderMap, true)
+      expect(deleted.map((id: Long) => id.toString())).toEqual(['4294967297', '-1'])
       client.close()
     } finally {
       await stop()
@@ -2458,14 +2466,15 @@ async function readServerObject(
 }
 
 /** Read encrypted frames until an rpc_result is found; return the inner result object. */
-async function readRpcResult(client: TestClient, key: ClientKey, readerMap: TlReaderMap = __tlReaderMap): Promise<any> {
-  return (await readRpcResultEnvelope(client, key, readerMap)).result
+async function readRpcResult(client: TestClient, key: ClientKey, readerMap: TlReaderMap = __tlReaderMap, longVector = false): Promise<any> {
+  return (await readRpcResultEnvelope(client, key, readerMap, longVector)).result
 }
 
 async function readRpcResultEnvelope(
   client: TestClient,
   key: ClientKey,
   readerMap: TlReaderMap = __tlReaderMap,
+  longVector = false,
 ): Promise<{ requestMessageId: Long, result: any, sessionId: Long }> {
   for (let i = 0; i < 10; i++) {
     const frame = await client.read()
@@ -2479,7 +2488,7 @@ async function readRpcResultEnvelope(
       // Bool results aren't in mtcute's reader map (it models Bool as a JS boolean).
       if (resultId === 0x997275b5) return { requestMessageId, result: { _: 'boolTrue' }, sessionId }
       if (resultId === 0xbc799737) return { requestMessageId, result: { _: 'boolFalse' }, sessionId }
-      if (resultId === 0x1cb5c415) return { requestMessageId, result: reader.vector(reader.object, true), sessionId }
+      if (resultId === 0x1cb5c415) return { requestMessageId, result: longVector ? reader.vector(() => reader.long(), true) : reader.vector(reader.object, true), sessionId }
       reader.pos -= 4
       return { requestMessageId, result: reader.object(), sessionId }
     }

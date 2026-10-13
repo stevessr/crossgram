@@ -2,7 +2,7 @@
 export { Config, Mtproto, default } from './service.js'
 export type { MtprotoConfig } from './service.js'
 
-export { bareVector, isBareVector, unwrapRpcRequest } from './rpc/protocol.js'
+export { bareLongVector, bareVector, isBareVector, unwrapRpcRequest } from './rpc/protocol.js'
 export type { RpcHandler, RpcResult, BareBool, BareVector, UnwrappedRpcRequest } from './rpc/protocol.js'
 export { dispatchRpcRoute, invokeRpc, registerRpcRoute } from './rpc/router.js'
 export type {

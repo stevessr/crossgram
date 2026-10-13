@@ -61,12 +61,30 @@ export class MatrixClient {
     return this.request(`/_matrix/client/v3/profile/${segment(userId)}`)
   }
 
+  async setUserAvatar(userId: string, mxc: string | null): Promise<void> {
+    await this.request(`/_matrix/client/v3/profile/${segment(userId)}/avatar_url`, {
+      method: 'PUT', body: { avatar_url: mxc ?? '' },
+    })
+  }
+
+  async setRoomAvatar(roomId: string, mxc: string | null): Promise<string> {
+    const result = await this.request<{ event_id: string }>(`/_matrix/client/v3/rooms/${segment(roomId)}/state/m.room.avatar`, {
+      method: 'PUT', body: mxc ? { url: mxc } : {},
+    })
+    if (!result.event_id) throw new Error('Matrix avatar write did not return an event ID')
+    return result.event_id
+  }
+
   getJoinedRooms(): Promise<MatrixJoinedRoomsResponse> {
     return this.request('/_matrix/client/v3/joined_rooms')
   }
 
   getDirectRooms(userId: string): Promise<MatrixDirectAccountData> {
     return this.request(`/_matrix/client/v3/user/${segment(userId)}/account_data/m.direct`)
+  }
+
+  getStateContent(roomId: string, type: string, stateKey: string): Promise<Record<string, unknown>> {
+    return this.request(`/_matrix/client/v3/rooms/${segment(roomId)}/state/${segment(type)}/${segment(stateKey)}`)
   }
 
   getRoomState(roomId: string): Promise<MatrixEvent[]> {

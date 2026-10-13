@@ -1719,7 +1719,7 @@ export class MessageStore {
       firstName: placeholder && existing ? existing.firstName : user.firstName,
       lastName: user.lastName ?? existing?.lastName ?? null,
       username: user.username ?? existing?.username ?? null,
-      avatar: (user.avatar ?? existing?.avatar ?? null) as JsonValue | null,
+      avatar: (user.avatarRemoved ? null : user.avatar ?? existing?.avatar ?? null) as JsonValue | null,
       metadata: { ...existing?.metadata, ...user.metadata },
       updatedAt: now,
     }
@@ -1744,6 +1744,7 @@ export class MessageStore {
         id: conversation.id,
         firstName: conversation.title,
         avatar: conversation.avatar,
+        avatarRemoved: conversation.avatarRemoved,
       }, now)
     }
     const [existing] = await database.get('mtproto_im_conversation', {
@@ -1756,7 +1757,7 @@ export class MessageStore {
       || existing.title !== conversation.title
       || existing.parentPlatformConversationId !== (conversation.parentId ?? null)
       || existing.spacePlatformId !== (conversation.spaceId ?? null)
-      || !jsonEquals(existing.avatar, conversation.avatar ?? existing.avatar ?? null)
+      || !jsonEquals(existing.avatar, conversation.avatarRemoved ? null : conversation.avatar ?? existing.avatar ?? null)
       || !jsonEquals(existing.metadata, metadata)
     const values = {
       platformSessionId: session.platformSessionId,
@@ -1765,7 +1766,7 @@ export class MessageStore {
       title: conversation.title,
       parentPlatformConversationId: conversation.parentId ?? null,
       spacePlatformId: conversation.spaceId ?? null,
-      avatar: (conversation.avatar ?? existing?.avatar ?? null) as JsonValue | null,
+      avatar: (conversation.avatarRemoved ? null : conversation.avatar ?? existing?.avatar ?? null) as JsonValue | null,
       metadata,
       unreadCount: unreadCount ?? existing?.unreadCount ?? 0,
       updatedAt: now,
@@ -2518,7 +2519,8 @@ function mergePlatformUser(existing: IMUser | undefined, incoming: IMUser): IMUs
     firstName: placeholder && existing ? existing.firstName : incoming.firstName,
     lastName: incoming.lastName ?? existing?.lastName,
     username: incoming.username ?? existing?.username,
-    avatar: incoming.avatar ?? existing?.avatar,
+    avatar: incoming.avatarRemoved ? undefined : incoming.avatar ?? existing?.avatar,
+    avatarRemoved: incoming.avatarRemoved,
     metadata: { ...existing?.metadata, ...incoming.metadata },
   }
 }

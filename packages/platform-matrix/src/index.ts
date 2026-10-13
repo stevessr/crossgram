@@ -4,11 +4,11 @@ import enUS from './locales/en-US.yml'
 import zhCN from './locales/zh-CN.yml'
 import type {
   IMConversation, IMConversationMember, IMConversationMemberPage, IMConversationRef, IMDialog,
-  IMDialogPage, IMChatFolder, IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia,
+  IMDialogPage, IMChatFolder, IMDownloadOptions, IMEvent, IMHistoryPage, IMHistoryQuery, IMMedia, IMMediaInput,
   IMInlineKeyboardButton, IMMessage, IMMessageInput, IMMessagePinMutation, IMMessageSearchPage, IMMessageSearchQuery, IMMessageTarget, IMPageQuery, IMPlatform, IMReadTarget,
   IMRequest, IMRequestAction, IMRequestPage, IMRequestQuery,
   IMReactionActorPage, IMReactionActorPageRequest, IMReactionContext, IMReactionDefinition, IMReactionTarget,
-  IMStickerSendPlan, IMTransferOptions, IMUser, PlatformCapabilities, PlatformSession, Unsubscribe,
+  IMSticker, IMStickerSendPlan, IMTransferOptions, IMUser, PlatformCapabilities, PlatformSession, Unsubscribe,
 } from '@mtproto-relay/bridge'
 import { resolvePlatformPluginId } from '@mtproto-relay/bridge'
 import { MatrixClient, MatrixHttpError, type MatrixClientOptions } from './client.js'
@@ -19,6 +19,7 @@ import type {
   MatrixDirectAccountData, MatrixEvent, MatrixInvitedRoom, MatrixJoinedRoom, MatrixMediaLocator, MatrixRoomMemberContent,
   MatrixAnnotation, MatrixRoomMessageContent, MatrixSyncResponse,
 } from './types.js'
+import { MatrixStickerProvider, USER_PACK_TYPES, GLOBAL_PACK_TYPES, PACK_TYPES, roomPacks, packId, type MatrixPackSource } from './stickers.js'
 import { isRecord } from './guards.js'
 
 const STANDARD_REACTIONS = ['👍', '👎', '❤️', '😂', '😮', '😢', '😡', '🔥', '🎉', '👏', '🤔'] as const
@@ -49,12 +50,13 @@ export const Config = z.object({
 })
 
 export const name = 'im-platform-matrix'
-export const inject = ['imPlatform']
+export const inject = ['imPlatform', 'imSticker']
 
 export function apply(ctx: Context, config: Config): void {
   const id = resolvePlatformPluginId(ctx, 'matrix')
-  const platform = new MatrixPlatform(config, ctx.logger('platform-matrix'))
+  const platform = new MatrixPlatform(config, ctx.logger('platform-matrix'), `${id}:stickers`, () => ctx.imSticker.touch(`${id}:stickers`))
   ctx.imPlatform.register(platform, id)
+  ctx.imSticker.register(new MatrixStickerProvider(platform.client, `${id}:stickers`, id, roomId => platform.getStickerSources(roomId), stickerId => platform.getObservedSticker(stickerId)), `${id}:stickers`)
   ctx.effect(() => () => platform.stop())
 }
 
@@ -81,7 +83,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       forward: { mode: 'unsupported', preservesAuthor: false },
       pin: { read: true, write: true },
     },
-    stickers: { native: false, upload: true, formats: ['static', 'animated'] },
+    stickers: { native: true, upload: true, formats: ['static', 'animated'] },
     reactions: { read: true, write: true, events: true, actorList: true, maxSelected: 20 },
     notifications: { read: true, mute: true },
   }
@@ -117,11 +119,94 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   /** Local state snapshots suppress our own /sync echoes without masking external changes. */
   private readonly pinSnapshots = new Map<string, string[]>()
 
-  constructor(config: Config, logger?: MatrixLogger) {
+  private readonly externalImagePacks = new Map<string, { expires: number, content: Promise<Record<string, unknown> | null> }>()
+  private readonly observedStickers = new Map<string, IMSticker>()
+  private readonly imagePackStates = new Map<string, Map<string, MatrixEvent>>()
+  private readonly stickerAccountData = new Map<string, Record<string, unknown>>()
+
+  constructor(config: Config, logger?: MatrixLogger, private readonly stickerProviderId = 'matrix:stickers', private readonly onStickerChange?: () => void) {
     this.client = new MatrixClient(config satisfies MatrixClientOptions)
     this.configuredUserId = config.userId
     this.syncTimeoutMs = config.syncTimeoutMs ?? 30_000
     this.logger = logger
+  }
+
+  async setAccountAvatar(_session: PlatformSession, avatar: IMMediaInput | null): Promise<IMUser<MatrixMediaLocator>> {
+    const userId = await this.getAccountUserId()
+    const mxc = avatar ? await this.uploadAvatar(avatar) : null
+    await this.client.setUserAvatar(userId, mxc)
+    const profile = await this.client.getProfile(userId).catch(() => ({}))
+    return this.mapUser(userId, { ...profile, avatar_url: mxc ?? '' })
+  }
+
+  async setConversationAvatar(_session: PlatformSession, conversation: IMConversationRef, avatar: IMMediaInput | null): Promise<IMConversation<MatrixMediaLocator>> {
+    const mxc = avatar ? await this.uploadAvatar(avatar) : null
+    const eventId = await this.client.setRoomAvatar(conversation.id, mxc)
+    this.ingestState(conversation.id, [{ type: 'm.room.avatar', state_key: '', event_id: eventId, content: mxc ? { url: mxc } : {} }])
+    this.invalidateDialogsSnapshot()
+    return this.updateConversation(conversation.id)
+  }
+
+  private uploadAvatar(avatar: IMMediaInput): Promise<string> {
+    if (avatar.kind !== 'image' || !avatar.mimeType?.startsWith('image/')) throw new Error('Matrix avatar must be an image')
+    return this.client.upload(avatar.source.stream(), { filename: avatar.name ?? 'avatar', contentType: avatar.mimeType })
+  }
+
+  async getConversationStickerPack(_session: PlatformSession, conversation: IMConversationRef) {
+    const sources = await this.getStickerSources(conversation.id)
+    return sources.some(source => source.roomId === conversation.id || (source.roomId && !source.global))
+      ? { providerId: this.stickerProviderId, packId: `room:${Buffer.from(conversation.id).toString('base64url')}` }
+      : undefined
+  }
+
+  getObservedSticker(id: string): IMSticker | undefined { return this.observedStickers.get(id) }
+
+  async getStickerSources(roomId?: string): Promise<MatrixPackSource[]> {
+    await this.loadJoinedDialogs()
+    const globalData = GLOBAL_PACK_TYPES.map(type => this.stickerAccountData.get(type)).filter(Boolean).at(-1)
+    const globals: Record<string, unknown> = isRecord(globalData?.rooms) ? globalData.rooms : {}
+    const visibleRooms = new Set(roomId ? [roomId] : [])
+    const pending = roomId ? [roomId] : []
+    while (pending.length && visibleRooms.size < 64) {
+      const current = pending.pop()!
+      for (const event of this.imagePackStates.get(current)?.values() ?? []) {
+        if (visibleRooms.size >= 64) break
+        if (event.type !== 'm.space.parent' || event.content.canonical !== true || !event.state_key
+          || !this.joinedRoomIds.has(event.state_key) || visibleRooms.has(event.state_key)) continue
+        visibleRooms.add(event.state_key); pending.push(event.state_key)
+      }
+    }
+    const sources: MatrixPackSource[] = []
+    // Globally selected packs can belong to rooms the account has not joined.
+    // Fetch only the explicit pack keys, with a bounded short-lived cache.
+    for (const [id, keys] of Object.entries(globals)) {
+      if (this.joinedRoomIds.has(id) || !isRecord(keys)) continue
+      for (const key of Object.keys(keys)) {
+        const cacheKey = packId(id, key)
+        let cached = this.externalImagePacks.get(cacheKey)
+        if (!cached || cached.expires < Date.now()) {
+          const content = (async () => {
+            for (const type of PACK_TYPES.toReversed()) {
+              try { return await this.client.getStateContent(id, type, key) }
+              catch (error) { if (!(error instanceof MatrixHttpError) || error.status !== 404) return null }
+            }
+            return null
+          })()
+          cached = { expires: Date.now() + 30_000, content }
+          this.externalImagePacks.set(cacheKey, cached)
+          if (this.externalImagePacks.size > 256) this.externalImagePacks.delete(this.externalImagePacks.keys().next().value!)
+        }
+        const content = await cached.content
+        if (content) sources.push({ roomId: id, id: cacheKey, title: id, content, global: true })
+      }
+    }
+    for (const [id, state] of this.imagePackStates) {
+      if (!this.joinedRoomIds.has(id)) continue
+      sources.push(...roomPacks(id, state.values(), globals).filter(pack => pack.global || visibleRooms.has(id)))
+    }
+    const personal = USER_PACK_TYPES.map(type => this.stickerAccountData.get(type)).filter(Boolean).at(-1)
+    if (personal) sources.push({ id: packId('@account', ''), title: 'Matrix stickers', content: personal, global: true })
+    return sources.sort((a, b) => Number(b.global) - Number(a.global) || a.id.localeCompare(b.id))
   }
 
   async stop(): Promise<void> {
@@ -219,7 +304,11 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
 
   async getChatFolders(_session: PlatformSession): Promise<IMChatFolder[]> {
     await this.loadJoinedDialogs()
-    return this.spaceFolders.map((folder) => ({ ...folder, conversationIds: [...folder.conversationIds] }))
+    return this.spaceFolders.map((folder) => {
+      const avatar = this.roomState.get(folder.id)?.get('m.room.avatar\0')?.content.url
+      return { ...folder, conversationIds: [...folder.conversationIds],
+        ...(typeof avatar === 'string' && avatar ? { avatar: avatarMedia(folder.id, avatar) } : {}) }
+    })
   }
 
   private isSpaceRoom(roomId: string): boolean {
@@ -583,7 +672,20 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         })
       } else {
         const sticker = part.sticker
-        if (sticker.type !== 'upload') throw new Error('Matrix cannot send native sticker references')
+        if (sticker.type === 'native') {
+          if (sticker.providerId !== this.stickerProviderId || !isRecord(sticker.reference)
+            || typeof sticker.reference.mxc !== 'string' || !sticker.reference.mxc.startsWith('mxc://')) throw new Error('Invalid native Matrix sticker')
+          sourceIds.push(await this.client.sendEvent(conversation.id, 'm.sticker', {
+            body: sticker.reference.body ?? sticker.stickerId, url: sticker.reference.mxc,
+            info: { mimetype: sticker.reference.mimeType, w: sticker.reference.width, h: sticker.reference.height },
+            ...(content.replyToId ? { 'm.relates_to': { 'm.in_reply_to': { event_id: content.replyToId } } } : {}),
+          }))
+          parts.push({ type: 'sticker', sticker: { providerId: this.stickerProviderId, stickerId: sticker.stickerId,
+            packId: sticker.packId, title: typeof sticker.reference.body === 'string' ? sticker.reference.body : undefined,
+            mimeType: typeof sticker.reference.mimeType === 'string' ? sticker.reference.mimeType : 'image/webp',
+            format: sticker.reference.format === 'animated' ? 'animated' : 'static', locator: { mxc: sticker.reference.mxc } } })
+          continue
+        }
         if (sticker.format === 'video') throw new Error('Matrix sticker events do not support video stickers')
         let transferredBytes = 0
         const mxc = await this.client.upload(sticker.source.stream({ signal: options.signal }), {
@@ -596,9 +698,8 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
           },
         })
         sourceIds.push(await this.client.sendEvent(conversation.id, 'm.sticker', stickerContent(sticker, mxc, content.replyToId)))
-        parts.push({ type: 'media', media: {
-          id: mxc, kind: sticker.mimeType.startsWith('image/') ? 'image' : 'file',
-          name: `${sticker.stickerId}.${mediaExtension(sticker.mimeType)}`, mimeType: sticker.mimeType,
+        parts.push({ type: 'sticker', sticker: {
+          providerId: this.stickerProviderId, stickerId: mxc, format: sticker.format, mimeType: sticker.mimeType,
           size: sticker.source.size, width: sticker.width, height: sticker.height, locator: { mxc },
         } })
       }
@@ -890,7 +991,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
 
   async getUser(_session: PlatformSession, userId: string): Promise<IMUser<MatrixMediaLocator> | null> {
     const profile = await this.client.getProfile(userId).catch(() => null)
-    return profile ? this.mapUser(userId, profile) : null
+    return profile ? this.mapUser(userId, { ...profile, avatar_url: profile.avatar_url ?? '' }) : null
   }
 
   async getConversationMembers(
@@ -1003,6 +1104,8 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     for (const roomId of Object.keys(response.rooms?.leave ?? {})) {
       if (this.joinedRoomIds.delete(roomId)) joinedMembershipChanged = true
       this.roomState.delete(roomId)
+      this.imagePackStates.delete(roomId)
+      this.onStickerChange?.()
       this.joinedMemberCounts.delete(roomId)
       this.conversations.delete(roomId)
       this.pinSnapshots.delete(roomId)
@@ -1177,6 +1280,12 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
   }
 
   private ingestAccountData(response: MatrixSyncResponse): boolean {
+    for (const event of response.account_data?.events ?? []) {
+      if ([...USER_PACK_TYPES, ...GLOBAL_PACK_TYPES].includes(event.type)) {
+        this.stickerAccountData.set(event.type, event.content)
+        this.onStickerChange?.()
+      }
+    }
     const events = [
       ...(response.account_data?.events ?? []),
       ...Object.values(response.rooms?.join ?? {}).flatMap((room) => room.account_data?.events ?? []),
@@ -1231,6 +1340,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     if (fullSnapshot) {
       this.joinedRoomIds.clear()
       this.roomState.clear()
+      this.imagePackStates.clear()
       this.joinedMemberCounts.clear()
       this.conversations.clear()
     }
@@ -1263,6 +1373,12 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     for (const event of events) {
       if (event.state_key === undefined) continue
       const key = `${event.type}\0${event.state_key}`
+      if (PACK_TYPES.includes(event.type) || event.type === 'm.room.name' || event.type === 'm.space.parent') {
+        let packs = this.imagePackStates.get(roomId)
+        if (!packs) this.imagePackStates.set(roomId, packs = new Map())
+        packs.set(key, event)
+        this.onStickerChange?.()
+      }
       if (event.type === 'm.room.member') {
         const before = (state.get(key)?.content as MatrixRoomMemberContent | undefined)?.membership === 'join'
         const after = (event.content as MatrixRoomMemberContent).membership === 'join'
@@ -1320,6 +1436,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       avatar: avatar?.url ? avatarMedia(roomId, avatar.url) : direct && hero?.avatar_url
         ? avatarMedia(heroId!, hero.avatar_url)
         : undefined,
+      avatarRemoved: !avatar?.url && !(direct && hero?.avatar_url),
       metadata: {
         matrixRoomId: roomId,
         matrixSpace: isSpace,
@@ -1362,8 +1479,17 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     const content = relation?.rel_type === 'm.replace' && raw['m.new_content'] ? raw['m.new_content'] : raw
     const parts: IMMessage<MatrixMediaLocator>['content']['parts'] = pollStart ? matrixPollParts(content)
       : pollEnd ? [{ type: 'text' as const, text: matrixEventText(event.content) || '投票已结束' }]
-        : matrixMessageParts(content)
+        : event.type === 'm.sticker' && content.url ? [{ type: 'sticker', sticker: {
+          providerId: this.stickerProviderId, stickerId: content.url, title: content.body,
+          format: /gif|apng/.test(content.info?.mimetype ?? '') ? 'animated' : 'static',
+          mimeType: content.info?.mimetype ?? 'image/webp', width: content.info?.w, height: content.info?.h,
+          size: content.info?.size, locator: { mxc: content.url },
+        } }] : matrixMessageParts(content)
     if (!parts.length) return
+    for (const part of parts) if (part.type === 'sticker') {
+      this.observedStickers.set(part.sticker.stickerId, part.sticker)
+      if (this.observedStickers.size > 10_000) this.observedStickers.delete(this.observedStickers.keys().next().value!)
+    }
     const mentionIds = matrixMentionUserIds(content)
     const messageId = relation?.rel_type === 'm.replace' && relation.event_id ? relation.event_id : event.event_id
     const pollKey = `${roomId}\0${messageId}`
@@ -1404,7 +1530,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
 
   private memberUser(roomId: string, userId: string): IMUser<MatrixMediaLocator> {
     const content = this.roomState.get(roomId)?.get(`m.room.member\0${userId}`)?.content as MatrixRoomMemberContent | undefined
-    return this.mapUser(userId, content)
+    return this.mapUser(userId, content ? { ...content, avatar_url: content.avatar_url ?? '' } : {})
   }
 
   private mapUser(
@@ -1417,6 +1543,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       firstName: profile.displayname || localpart,
       username: localpart,
       avatar: profile.avatar_url ? avatarMedia(userId, profile.avatar_url) : undefined,
+      ...(Object.hasOwn(profile, 'avatar_url') && !profile.avatar_url ? { avatarRemoved: true } : {}),
       metadata: { matrixUserId: userId },
     }
   }
@@ -1434,7 +1561,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     const owner = level >= 100
     const administrator = level >= 50
     return {
-      user: this.mapUser(userId, content),
+      user: this.mapUser(userId, { ...content, avatar_url: content.avatar_url ?? '' }),
       role: owner ? 'owner' : administrator ? 'administrator' : 'member',
       permissions: {
         manageConversation: level >= (power?.state_default ?? 50),

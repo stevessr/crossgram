@@ -12,6 +12,7 @@ export interface BareVector {
   /** Marker discriminant — distinguishes a bare vector from a TL object. */
   readonly _: 'vector'
   readonly items: readonly tl.TlObject[]
+  readonly longItems?: readonly Long[]
 }
 
 /** A bare Bool constructor serialized directly inside `rpc_result`. */
@@ -25,6 +26,11 @@ export type RpcResult = tl.TlObject | BareBool | BareVector | mtp.RawMt_rpc_erro
 /** Build a bare `Vector<X>` RPC result (e.g. for `users.getUsers`). */
 export function bareVector(items: readonly tl.TlObject[]): BareVector {
   return { _: 'vector', items }
+}
+
+/** Primitive longs must not pass through the TL object writer. */
+export function bareLongVector(items: readonly Long[]): BareVector {
+  return { _: 'vector', items: [], longItems: items }
 }
 
 /** Type guard for a {@link BareVector} result. */

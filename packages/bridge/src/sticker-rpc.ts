@@ -91,6 +91,14 @@ export class StickerRpc {
     }
   }
 
+  async getConversationSet(reference: { providerId: string, packId: string }): Promise<tl.RawStickerSet | undefined> {
+    const provider = this._registry.get(reference.providerId)
+    if (!provider) return
+    const context = { ...this._context() }
+    const pack = await provider.getPack(context, reference.packId)
+    return pack ? this._makeSet(pack, undefined, false) : undefined
+  }
+
   async getStickerSet(req: tl.messages.RawGetStickerSetRequest): Promise<tl.messages.TypeStickerSet> {
     this._refreshProjectionCache()
     if (req.stickerset._ === 'inputStickerSetAnimatedEmoji'

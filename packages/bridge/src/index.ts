@@ -7,7 +7,7 @@ import Long from 'long'
 import z from 'schemastery'
 import enUS from './locales/en-US.yml'
 import zhCN from './locales/zh-CN.yml'
-import { RpcError, bareVector, type ServerRpcContext } from '@mtproto-relay/mtproto'
+import { RpcError, bareLongVector, bareVector, type ServerRpcContext } from '@mtproto-relay/mtproto'
 import type { IMPlatform, PlatformSession } from './platform.js'
 import { defineModels } from './models.js'
 import { makeConfig, makeAppConfig, makeUser, parseEndpoint } from './synthetic.js'
@@ -1294,6 +1294,16 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     (await requireBridgeSession(rpc)).dialogs.getChannelParticipant(req as tl.channels.RawGetParticipantRequest))
   rpc.register('channels.getParticipants', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.getChannelParticipants(req as tl.channels.RawGetParticipantsRequest))
+  rpc.register('photos.uploadProfilePhoto', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.uploadProfilePhoto(req as tl.photos.RawUploadProfilePhotoRequest))
+  rpc.register('photos.deletePhotos', async (rpc, req) =>
+    bareLongVector(await (await requireBridgeSession(rpc)).dialogs.deleteProfilePhotos(req as tl.photos.RawDeletePhotosRequest)))
+  rpc.register('photos.updateProfilePhoto', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.updateProfilePhoto(req as tl.photos.RawUpdateProfilePhotoRequest))
+  rpc.register('photos.getUserPhotos', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.getUserPhotos(req as tl.photos.RawGetUserPhotosRequest))
+  rpc.register('channels.editPhoto', async (rpc, req) =>
+    (await requireBridgeSession(rpc)).dialogs.editChannelPhoto(req as tl.channels.RawEditPhotoRequest))
   rpc.register('channels.editAdmin', async (rpc, req) =>
     (await requireBridgeSession(rpc)).dialogs.editChannelAdmin(req as tl.channels.RawEditAdminRequest))
   rpc.register('channels.editBanned', async (rpc, req) =>

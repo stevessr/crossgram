@@ -1953,6 +1953,12 @@ export class ServerSession {
 
   /** Serialize a bare `Vector<X>`: `0x1cb5c415` + count + each item. */
   private _serializeBareVector(vec: BareVector): Uint8Array {
+    if (vec.longItems) {
+      const writer = TlBinaryWriter.manual(8 + vec.longItems.length * 8)
+      writer.uint(VECTOR_ID); writer.uint(vec.longItems.length)
+      for (const value of vec.longItems) writer.long(value)
+      return writer.result()
+    }
     const serialized: Uint8Array[] = []
     let size = 8 // constructor id + count
     for (const item of vec.items) {

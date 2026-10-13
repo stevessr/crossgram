@@ -116,11 +116,15 @@ export interface IMUser<TMediaLocator = unknown> {
   username?: string
   about?: string
   avatar?: IMMedia<TMediaLocator>
+  /** Explicit tombstone; absence of avatar alone remains a partial update. */
+  avatarRemoved?: boolean
   metadata?: JsonObject
 }
 
 /** A native platform container projected as a Telegram chat-list filter (folder). */
 export interface IMChatFolder {
+  /** Native container avatar; Telegram folder TL objects have no photo field. */
+  avatar?: IMMedia<unknown>
   /** Opaque, stable identifier scoped to one platform session. */
   id: string
   title: string
@@ -140,6 +144,8 @@ export interface IMConversation<TMediaLocator = unknown> extends IMConversationR
   /** Guild, workspace, or other top-level platform container. */
   spaceId?: string
   avatar?: IMMedia<TMediaLocator>
+  /** Explicit tombstone; absence of avatar alone remains a partial update. */
+  avatarRemoved?: boolean
   /** Current account's authoritative role in this conversation, when known. */
   selfRole?: IMConversationRole
   /** Current account's authoritative permissions, when known. */
@@ -881,6 +887,13 @@ export interface IMPlatform<TMediaLocator = unknown> {
   readonly flashTransfer?: IMFlashTransferProvider
   /** Optional expansion of finite archived message bundles embedded in messages. */
   readonly messageBundles?: IMMessageBundleProvider<TMediaLocator>
+
+  /** Change the authenticated account's avatar; null removes it. */
+  setAccountAvatar?(session: PlatformSession, avatar: IMMediaInput | null): Promise<IMUser<TMediaLocator>>
+  /** Change room/Space state; null removes its explicit avatar. */
+  setConversationAvatar?(session: PlatformSession, conversation: IMConversationRef, avatar: IMMediaInput | null): Promise<IMConversation<TMediaLocator>>
+  /** Native room pack, separate from globally installed sticker sets. */
+  getConversationStickerPack?(session: PlatformSession, conversation: IMConversationRef): Promise<{ providerId: string, packId: string } | undefined>
 
   /** Resolve the platform's current user; bridge never invents profile fields. */
   getAccount?(): Promise<IMPlatformAccount<TMediaLocator>>

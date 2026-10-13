@@ -1827,6 +1827,76 @@ export class DialogRpc {
     }
   }
 
+  private _avatarPhoto(media: IMMedia<any>): tl.RawPhoto {
+    const id = Long.fromNumber(stableId(`avatar:${media.id}`))
+    this._avatarMedia.set(id.toString(), media)
+    return { _: 'photo', id, accessHash: id, fileReference: new Uint8Array(),
+      date: Math.floor(Date.now() / 1000), dcId: this._dcId,
+      sizes: [{ _: 'photoSize', type: 'x', w: media.width ?? 640, h: media.height ?? 640, size: media.size ?? 0 }] }
+  }
+
+  async uploadProfilePhoto(req: tl.photos.RawUploadProfilePhotoRequest): Promise<tl.photos.RawPhoto> {
+    if (!this._platform.setAccountAvatar) throw new RpcError(400, 'METHOD_NOT_SUPPORTED')
+    if (!req.file || req.bot || req.fallback || req.video || req.videoEmojiMarkup) throw new RpcError(400, 'PHOTO_INVALID')
+    const resolved = await this._resolveUploadedMedia({ _: 'inputMediaUploadedPhoto', file: req.file })
+    const user = await this._platform.setAccountAvatar(this._session, resolved.media)
+    if (!user.avatar) throw new RpcError(400, 'PHOTO_INVALID')
+    await this._persistUsers([user])
+    this._selfUser = user
+    await this._uploads?.complete(resolved.upload)
+    return { _: 'photos.photo', photo: this._avatarPhoto(user.avatar), users: [this._makeSelfUser()] }
+  }
+
+  async deleteProfilePhotos(req: tl.photos.RawDeletePhotosRequest): Promise<Long[]> {
+    if (!this._platform.setAccountAvatar) throw new RpcError(400, 'METHOD_NOT_SUPPORTED')
+    const current = await this._platform.getUser?.(this._session, this._session.userId)
+    if (!current?.avatar) return []
+    const id = Long.fromNumber(stableId(`avatar:${current.avatar.id}`))
+    if (!req.id.some(photo => photo._ === 'inputPhoto' && photo.id.equals(id))) return []
+    const user = await this._platform.setAccountAvatar(this._session, null)
+    await this._persistUsers([user]); this._selfUser = user
+    this._avatarMedia.delete(id.toString())
+    return [id]
+  }
+
+  async updateProfilePhoto(req: tl.photos.RawUpdateProfilePhotoRequest): Promise<tl.photos.RawPhoto> {
+    if (!this._platform.setAccountAvatar) throw new RpcError(400, 'METHOD_NOT_SUPPORTED')
+    if (req.id._ !== 'inputPhotoEmpty' || req.bot || req.fallback) throw new RpcError(400, 'PHOTO_INVALID')
+    const user = await this._platform.setAccountAvatar(this._session, null)
+    await this._persistUsers([user]); this._selfUser = user
+    return { _: 'photos.photo', photo: { _: 'photoEmpty', id: Long.ZERO }, users: [this._makeSelfUser()] }
+  }
+
+  async getUserPhotos(req: tl.photos.RawGetUserPhotosRequest): Promise<tl.photos.RawPhotos> {
+    await this._hydratePeers()
+    const id = req.userId._ === 'inputUserSelf' ? this._session.userId
+      : req.userId._ === 'inputUser' ? this._tlToUser.get(req.userId.userId) : undefined
+    if (!id) throw new RpcError(400, 'USER_ID_INVALID')
+    const user = await this._platform.getUser?.(this._session, id)
+    if (!user) return { _: 'photos.photos', photos: [], users: [] }
+    await this._persistUsers([user])
+    const photo = user.avatar ? this._avatarPhoto(user.avatar) : undefined
+    return { _: 'photos.photos', photos: photo && req.offset === 0 && req.limit > 0
+      && (req.maxId.isZero() || photo.id.lessThan(req.maxId)) ? [photo] : [],
+      users: [id === this._session.userId ? this._makeSelfUser() : this._makePeerUser(user)] }
+  }
+
+  async editChannelPhoto(req: tl.channels.RawEditPhotoRequest): Promise<tl.RawUpdates> {
+    if (!this._platform.setConversationAvatar) throw new RpcError(400, 'METHOD_NOT_SUPPORTED')
+    await this._hydratePeers()
+    const conversation = this._resolveChannel(req.channel)
+    let resolved: ResolvedMediaUpload | undefined
+    if (req.photo._ === 'inputChatUploadedPhoto' && req.photo.file && !req.photo.video && !req.photo.videoEmojiMarkup) {
+      resolved = await this._resolveUploadedMedia({ _: 'inputMediaUploadedPhoto', file: req.photo.file })
+    } else if (req.photo._ !== 'inputChatPhotoEmpty') throw new RpcError(400, 'PHOTO_INVALID')
+    const updated = await this._platform.setConversationAvatar(this._session, conversation, resolved?.media ?? null)
+    await this._store?.upsertConversation(this._session, updated)
+    this._cacheConversation(updated.id, updated)
+    if (resolved) await this._uploads?.complete(resolved.upload)
+    return { _: 'updates', updates: [{ _: 'updateChannel', channelId: this._peerId(updated.id) }],
+      chats: [this._makeChat(updated)], users: [], date: Math.floor(Date.now() / 1000), seq: 0 }
+  }
+
   async getFullChannel(req: tl.channels.RawGetFullChannelRequest): Promise<tl.messages.RawChatFull> {
     await this._hydratePeers()
     const conversation = this._resolveChannel(req.channel)
@@ -1835,10 +1905,13 @@ export class DialogRpc {
     const reactionContext = await this._platform.getAvailableReactions?.(
       this._session, { conversationId: conversation.id },
     )
+    const stickerReference = await this._platform.getConversationStickerPack?.(this._session, conversation)
+    const stickerset = stickerReference ? await this._stickers?.getConversationSet(stickerReference) : undefined
     return {
       _: 'messages.chatFull',
       fullChat: {
         _: 'channelFull', id: this._peerId(conversation.id), about: '',
+        stickerset,
         canViewParticipants: true,
         participantsCount: Number(conversation.metadata?.participantsCount ?? 0),
         readInboxMaxId: 0, readOutboxMaxId: 0, unreadCount: 0,
@@ -2820,6 +2893,11 @@ export class DialogRpc {
       throw new RpcError(400, 'LOCATION_INVALID')
     }
     if (req.location._ === 'inputPhotoFileLocation') {
+      const avatar = this._avatarMedia.get(req.location.id.toString())
+      if (avatar && req.location.accessHash.equals(req.location.id) && this._platform.downloadMedia) return {
+        _: 'upload.file', type: { _: 'storage.fileUnknown' }, mtime: Math.floor(Date.now() / 1000),
+        bytes: await this._downloadMediaRange(avatar, offset, req.limit),
+      }
       const thumbnail = await getCardThumbnailFile(req.location, offset, req.limit)
       if (thumbnail) return {
         _: 'upload.file', type: storageFileType(thumbnail.mimeType),
@@ -7007,6 +7085,7 @@ function storedUserNeedsUpdate(existing: IMUser | undefined, incoming: IMUser): 
   if (!existing || existing.firstName !== incoming.firstName) return true
   if (incoming.lastName !== undefined && existing.lastName !== incoming.lastName) return true
   if (incoming.username !== undefined && existing.username !== incoming.username) return true
+  if (incoming.avatarRemoved && existing.avatar) return true
   if (incoming.avatar !== undefined && !jsonEquals(existing.avatar, incoming.avatar)) return true
   if (incoming.metadata !== undefined) {
     for (const [key, value] of Object.entries(incoming.metadata)) {
