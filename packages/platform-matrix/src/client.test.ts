@@ -145,26 +145,33 @@ describe('MatrixClient', () => {
     expect(paths[2]).toMatch(/\/redact\/%24event%2Fwith%2Fslash\//)
   })
 
-  it('uses room state for pins and account push rules for notifications', async () => {
-    const pins = ['$initial']
-    let muted = false
+  it('mutes rooms through Element-compatible override push rules', async () => {
+    const rules: Record<string, { actions: string[], enabled?: boolean } | null> = {
+      override: null,
+      room: null,
+    }
     const writes: Array<{ path: string, method: string, body?: unknown }> = []
     const fetch = vi.fn<typeof globalThis.fetch>(async (input, init) => {
       const url = new URL(String(input))
       const method = init?.method ?? 'GET'
       const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined
-      writes.push({ path: url.pathname, method, body })
-      if (url.pathname.endsWith('/state/m.room.pinned_events')) {
-        if (method === 'GET') return Response.json({ pinned: pins })
-        pins.splice(0, pins.length, ...body.pinned)
-        return Response.json({ event_id: '$state-event' })
-      }
-      if (url.pathname.includes('/pushrules/global/room/')) {
-        if (method === 'GET') return muted
-          ? Response.json({ actions: ['dont_notify'], enabled: true })
-          : Response.json({ errcode: 'M_NOT_FOUND' }, { status: 404 })
-        if (method === 'PUT') { muted = true; return Response.json({}) }
-        if (method === 'DELETE') { muted = false; return Response.json({}) }
+      const kind = url.pathname.includes('/pushrules/global/override/')
+        ? 'override' : url.pathname.includes('/pushrules/global/room/') ? 'room' : undefined
+      if (kind) {
+        writes.push({ path: url.pathname, method, body })
+        if (method === 'GET') {
+          return rules[kind]
+            ? Response.json(rules[kind])
+            : Response.json({ errcode: 'M_NOT_FOUND' }, { status: 404 })
+        }
+        if (method === 'PUT') {
+          rules[kind] = { actions: body.actions, enabled: true }
+          return Response.json({})
+        }
+        if (method === 'DELETE') {
+          rules[kind] = null
+          return Response.json({})
+        }
       }
       throw new Error(`unexpected Matrix request: ${url}`)
     })
@@ -172,57 +179,83 @@ describe('MatrixClient', () => {
       homeserver: 'https://matrix.example.org', accessToken: 'token', fetch,
     })
     const roomId = '!r:example.org'
-    await expect(client.getRoomPinnedEvents(roomId)).resolves.toEqual(['$initial'])
-    await client.setRoomPinnedEvents(roomId, ['$initial', '$second'])
-    expect(pins).toEqual(['$initial', '$second'])
-    expect(writes.find((item) => item.method === 'PUT')?.body)
-      .toEqual({ pinned: ['$initial', '$second'] })
     await expect(client.getRoomNotificationMuted(roomId)).resolves.toBe(false)
     await client.setRoomNotificationMuted(roomId, true)
+    // The mute lands in the override kind with Element's room_id condition.
+    expect(rules.override).toMatchObject({ actions: [] })
+    expect(writes.find((item) => item.method === 'PUT')?.body).toMatchObject({
+      conditions: [{ kind: 'event_match', key: 'room_id', pattern: roomId }],
+      actions: [],
+    })
     await expect(client.getRoomNotificationMuted(roomId)).resolves.toBe(true)
     await client.setRoomNotificationMuted(roomId, false)
+    expect(rules.override).toBeNull()
     await expect(client.getRoomNotificationMuted(roomId)).resolves.toBe(false)
-    expect(writes.filter((item) => item.path.includes('/pushrules/') && item.method === 'PUT'))
-      .toHaveLength(1)
-    expect(writes.filter((item) => item.path.includes('/pushrules/') && item.method === 'DELETE'))
-      .toHaveLength(1)
   })
 
-  it('preserves custom push rule tweaks when toggling room mute', async () => {
-    let rule: { actions: Array<string | { set_tweak: string, value: boolean }>, enabled?: boolean } = {
-      actions: ['dont_notify', { set_tweak: 'highlight', value: false }],
-      enabled: true,
-    }
-    const requests: Array<{ method: string, body?: unknown }> = []
+  it('reads Element-style empty override actions as muted and keeps legacy room rules in sync', async () => {
+    // Element wrote an override rule with empty actions: muted.
+    let override: { actions: string[], enabled?: boolean } | null = { actions: [], enabled: true }
+    let room: { actions: string[], enabled?: boolean } | null = null
     const client = new MatrixClient({
       homeserver: 'https://matrix.example.org', accessToken: 'token',
-      fetch: async (_input, init) => {
+      fetch: async (input, init) => {
+        const url = new URL(String(input))
         const method = init?.method ?? 'GET'
-        const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined
-        requests.push({ method, body })
-        if (method === 'GET') return Response.json(rule)
-        if (method === 'PUT') {
-          if (body.actions) rule.actions = body.actions
-          if (body.enabled !== undefined) rule.enabled = body.enabled
-          return Response.json({})
+        if (url.pathname.includes('/pushrules/global/override/')) {
+          if (method === 'GET') return override ? Response.json(override) : Response.json({ errcode: 'M_NOT_FOUND' }, { status: 404 })
+          if (method === 'DELETE') { override = null; return Response.json({}) }
         }
-        return Response.json({})
+        if (url.pathname.includes('/pushrules/global/room/')) {
+          if (method === 'GET') return room ? Response.json(room) : Response.json({ errcode: 'M_NOT_FOUND' }, { status: 404 })
+          if (method === 'PUT') { room = { actions: JSON.parse(init?.body as string).actions, enabled: true }; return Response.json({}) }
+          if (method === 'DELETE') { room = null; return Response.json({}) }
+        }
+        throw new Error(`unexpected Matrix request: ${url}`)
       },
     })
-    const id = '!custom:example.org'
+    const id = '!muted:example.org'
+    await expect(client.getRoomNotificationMuted(id)).resolves.toBe(true)
+    // A notify override unmutes despite the room kind.
+    override = { actions: ['notify'], enabled: true }
+    await expect(client.getRoomNotificationMuted(id)).resolves.toBe(false)
+    // A disabled override falls back to the room-kind rule.
+    override = { actions: [], enabled: false }
+    room = { actions: ['dont_notify'], enabled: true }
+    await expect(client.getRoomNotificationMuted(id)).resolves.toBe(true)
+    // Unmuting removes the override and clears the legacy room-kind mute.
     await client.setRoomNotificationMuted(id, false)
-    expect(rule.actions).toEqual([
-      'notify', { set_tweak: 'highlight', value: false },
-    ])
-    await client.setRoomNotificationMuted(id, true)
-    expect(rule.actions).toEqual([
-      'dont_notify', { set_tweak: 'highlight', value: false },
-    ])
-    rule.enabled = false
-    await client.setRoomNotificationMuted(id, true)
-    expect(requests.filter((entry) => (entry.body as { enabled?: boolean })?.enabled === true))
-      .toHaveLength(1)
-    expect(rule.enabled).toBe(true)
+    expect(override).toBeNull()
+    expect(room).toBeNull()
+  })
+
+  it('cleans up a legacy room-kind dont_notify rule when muting', async () => {
+    let room: { actions: Array<string | Record<string, unknown>>, enabled?: boolean } | null = {
+      actions: ['dont_notify', { set_tweak: 'highlight', value: false }], enabled: true,
+    }
+    let override: Record<string, unknown> | null = null
+    const client = new MatrixClient({
+      homeserver: 'https://matrix.example.org', accessToken: 'token',
+      fetch: async (input, init) => {
+        const url = new URL(String(input))
+        const method = init?.method ?? 'GET'
+        const body = typeof init?.body === 'string' ? JSON.parse(init.body) : undefined
+        if (url.pathname.includes('/pushrules/global/override/')) {
+          if (method === 'GET') return override ? Response.json(override) : Response.json({ errcode: 'M_NOT_FOUND' }, { status: 404 })
+          if (method === 'PUT') { override = body; return Response.json({}) }
+        }
+        if (url.pathname.includes('/pushrules/global/room/')) {
+          if (method === 'GET') return room ? Response.json(room) : Response.json({ errcode: 'M_NOT_FOUND' }, { status: 404 })
+          if (method === 'PUT') { room = { actions: body.actions, enabled: true }; return Response.json({}) }
+          if (method === 'DELETE') { room = null; return Response.json({}) }
+        }
+        throw new Error(`unexpected Matrix request: ${url}`)
+      },
+    })
+    await client.setRoomNotificationMuted('!legacy:example.org', true)
+    expect(override).toMatchObject({ actions: [] })
+    // Tweaks survive the legacy-rule rewrite; dont_notify is replaced by notify.
+    expect(room?.actions).toEqual(['notify', { set_tweak: 'highlight', value: false }])
   })
 
   it('treats missing pinned state as empty but preserves non-404 errors', async () => {

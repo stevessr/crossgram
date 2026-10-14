@@ -115,39 +115,56 @@ export class MatrixClient {
 
   /** Matrix push rules are private to the authenticated account, not room state. */
   async getRoomNotificationMuted(roomId: string): Promise<boolean> {
-    const rule = await this.getRoomPushRule(roomId)
+    // Element mutes rooms with an override rule keyed by the room ID; its empty
+    // action list (or the legacy dont_notify) silences every event in the room.
+    const override = await this.getPushRule('override', roomId)
+    if (override && override.enabled !== false) {
+      if (!override.actions.includes('notify')) return true
+      return false
+    }
+    const rule = await this.getPushRule('room', roomId)
     return Boolean(rule?.enabled !== false && rule?.actions.includes('dont_notify'))
   }
 
   async setRoomNotificationMuted(roomId: string, muted: boolean): Promise<void> {
-    const rule = await this.getRoomPushRule(roomId)
-    const currentlyMuted = Boolean(rule?.enabled !== false && rule?.actions.includes('dont_notify'))
-    const path = `/_matrix/client/v3/pushrules/global/room/${segment(roomId)}`
     if (muted) {
-      if (currentlyMuted) return
-      // Preserve existing per-room tweaks instead of discarding custom rules.
-      const tweaks = rule?.actions.filter((action) => typeof action !== 'string') ?? []
-      await this.request(path, {
-        method: 'PUT', body: { actions: ['dont_notify', ...tweaks] },
+      // Write the Element-compatible override form so other Matrix clients see
+      // the same mute. A stale room-kind mute is cleaned up to avoid two rules
+      // disagreeing about the same room.
+      await this.request(`/_matrix/client/v3/pushrules/global/override/${segment(roomId)}`, {
+        method: 'PUT',
+        body: { conditions: [{ kind: 'event_match', key: 'room_id', pattern: roomId }], actions: [] },
       })
-      if (rule?.enabled === false) {
-        await this.request(`${path}/enabled`, { method: 'PUT', body: { enabled: true } })
-      }
-    } else if (rule && currentlyMuted) {
-      const preserved = rule.actions.filter((action) => action !== 'dont_notify' && action !== 'notify')
-      if (preserved.length) {
-        await this.request(path, { method: 'PUT', body: { actions: ['notify', ...preserved] } })
-      } else {
-        await this.request(path, { method: 'DELETE' })
-      }
+      await this.clearRoomKindMute(roomId)
+      return
+    }
+    await this.request(`/_matrix/client/v3/pushrules/global/override/${segment(roomId)}`, {
+      method: 'DELETE',
+    }).catch((error: unknown) => {
+      if (error instanceof MatrixHttpError && error.status === 404) return
+      throw error
+    })
+    await this.clearRoomKindMute(roomId)
+  }
+
+  /** Remove a legacy room-kind dont_notify rule left by older bridge versions. */
+  private async clearRoomKindMute(roomId: string): Promise<void> {
+    const rule = await this.getPushRule('room', roomId)
+    if (!rule?.actions.includes('dont_notify')) return
+    const preserved = rule.actions.filter((action) => action !== 'dont_notify' && action !== 'notify')
+    const path = `/_matrix/client/v3/pushrules/global/room/${segment(roomId)}`
+    if (preserved.length) {
+      await this.request(path, { method: 'PUT', body: { actions: ['notify', ...preserved] } })
+    } else {
+      await this.request(path, { method: 'DELETE' })
     }
   }
 
-  private async getRoomPushRule(roomId: string): Promise<{
+  private async getPushRule(kind: 'room' | 'override', ruleId: string): Promise<{
     actions: Array<string | Record<string, unknown>>, enabled?: boolean
   } | null> {
     return this.request<{ actions: Array<string | Record<string, unknown>>, enabled?: boolean }>(
-      `/_matrix/client/v3/pushrules/global/room/${segment(roomId)}`,
+      `/_matrix/client/v3/pushrules/global/${kind}/${segment(ruleId)}`,
     ).catch((error: unknown) => {
       if (error instanceof MatrixHttpError && error.status === 404) return null
       throw error
