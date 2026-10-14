@@ -745,7 +745,8 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
           parts.push({ type: 'sticker', sticker: { providerId: this.stickerProviderId, stickerId: sticker.stickerId,
             packId: sticker.packId, title: typeof sticker.reference.body === 'string' ? sticker.reference.body : undefined,
             mimeType: typeof sticker.reference.mimeType === 'string' ? sticker.reference.mimeType : 'image/webp',
-            format: stickerFormat(sticker.reference.mimeType), locator: { mxc: sticker.reference.mxc } } })
+            format: stickerFormat(typeof sticker.reference.mimeType === 'string' ? sticker.reference.mimeType : undefined),
+            locator: { mxc: sticker.reference.mxc } } })
           continue
         }
         if (sticker.format === 'video') throw new Error('Matrix sticker events do not support video stickers')

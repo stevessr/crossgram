@@ -235,7 +235,7 @@ const REACTION_COALESCE_MS = 2_000
 const REACTION_COALESCE_MAX = 400
 
 interface ReactionBatch {
-  timer: { unref?(): unknown }
+  timer: ReturnType<typeof setTimeout>
   session: PlatformSession
   event: Extract<IMEvent, { type: 'message-reactions' }>
   options?: PlatformEventDeliveryOptions
