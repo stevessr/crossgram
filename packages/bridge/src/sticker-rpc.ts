@@ -817,7 +817,15 @@ export class StickerRpc {
       const found = packs.find(({ pack }) => this._shortName(pack) === input.shortName)
       if (found) return { providerId: found.providerId, packId: found.pack.packId }
     }
-    throw new RpcError(400, 'STICKERSET_INVALID')
+    // Carry the requested identity in the error text: the journal logs the
+    // rpc_error message verbatim, which is how a client's dangling set
+    // reference is diagnosed without an RPC-level capture.
+    const detail = input._ === 'inputStickerSetID'
+      ? `id=${input.id.toString()}`
+      : input._ === 'inputStickerSetShortName'
+        ? `short=${input.shortName}`
+        : input._
+    throw new RpcError(400, `STICKERSET_INVALID ${detail}`)
   }
 
   private async _providerSavedStickers(): Promise<ResolvedSticker[]> {
