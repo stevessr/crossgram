@@ -8,6 +8,14 @@ export const USER_PACK_TYPES = ['im.ponies.user_emotes', 'm.image_pack']
 export const GLOBAL_PACK_TYPES = ['im.ponies.emote_rooms', 'm.image_pack.rooms']
 export type MatrixPackSource = { roomId?: string, id: string, title: string, content: Record<string, unknown>, global: boolean }
 const object = (value: unknown): Record<string, any> => value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, any> : {}
+export type StickerFormat = 'static' | 'animated' | 'video'
+
+/** Sticker animation format from a MIME type; mirrors the pack-catalog rules. */
+export function stickerFormat(mimeType: string | undefined): StickerFormat {
+  if (/gif|apng/.test(mimeType ?? '')) return 'animated'
+  if (mimeType?.startsWith('video/')) return 'video'
+  return 'static'
+}
 export const packId = (room: string, key: string) => Buffer.from(JSON.stringify([room, key])).toString('base64url')
 export function roomPacks(roomId: string, state: Iterable<MatrixEvent>, globals: Record<string, unknown>): MatrixPackSource[] {
   const events = [...state]
@@ -29,11 +37,10 @@ export function mapPack(providerId: string, source: MatrixPackSource): IMSticker
     if (Array.isArray(usage) && usage.length && !usage.includes('sticker')) continue
     if (typeof image.url !== 'string' || !/^mxc:\/\/[^/]+\/.+/.test(image.url)) continue
     const metadata = object(image.info), mimeType = typeof metadata.mimetype === 'string' ? metadata.mimetype : 'image/webp'
-    if (!mimeType.startsWith('image/')) continue
+    if (!mimeType.startsWith('image/') && !mimeType.startsWith('video/')) continue
     stickers.push({ providerId, packId: source.id,
       stickerId: packId(source.id, key), title: typeof image.body === 'string' ? image.body : key,
-      keywords: [key], format: /gif|apng/.test(mimeType) ? 'animated' : mimeType.startsWith('video/') ? 'video' : 'static',
-      mimeType, width: metadata.w, height: metadata.h, size: metadata.size,
+      keywords: [key], format: stickerFormat(mimeType), mimeType, width: metadata.w, height: metadata.h, size: metadata.size,
       version: createHash('sha256').update(JSON.stringify([image.url, mimeType, metadata.w, metadata.h, metadata.size])).digest().readUInt32LE(0),
       locator: { mxc: image.url },
     })

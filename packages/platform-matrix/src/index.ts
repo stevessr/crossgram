@@ -21,7 +21,7 @@ import type {
   MatrixDirectAccountData, MatrixEvent, MatrixInvitedRoom, MatrixJoinedRoom, MatrixMediaLocator, MatrixRoomMemberContent,
   MatrixAnnotation, MatrixRoomMessageContent, MatrixSyncResponse,
 } from './types.js'
-import { MatrixStickerProvider, USER_PACK_TYPES, GLOBAL_PACK_TYPES, PACK_TYPES, roomPacks, mapPack, packId, type MatrixPackSource } from './stickers.js'
+import { MatrixStickerProvider, USER_PACK_TYPES, GLOBAL_PACK_TYPES, PACK_TYPES, roomPacks, mapPack, packId, stickerFormat, type MatrixPackSource } from './stickers.js'
 import { isRecord } from './guards.js'
 
 const STANDARD_REACTIONS = ['👍', '👎', '❤️', '😂', '😮', '😢', '😡', '🔥', '🎉', '👏', '🤔'] as const
@@ -745,7 +745,7 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
           parts.push({ type: 'sticker', sticker: { providerId: this.stickerProviderId, stickerId: sticker.stickerId,
             packId: sticker.packId, title: typeof sticker.reference.body === 'string' ? sticker.reference.body : undefined,
             mimeType: typeof sticker.reference.mimeType === 'string' ? sticker.reference.mimeType : 'image/webp',
-            format: sticker.reference.format === 'animated' ? 'animated' : 'static', locator: { mxc: sticker.reference.mxc } } })
+            format: stickerFormat(sticker.reference.mimeType), locator: { mxc: sticker.reference.mxc } } })
           continue
         }
         if (sticker.format === 'video') throw new Error('Matrix sticker events do not support video stickers')
@@ -1586,11 +1586,12 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     const content = stripReplyFallback(relation?.rel_type === 'm.replace' && raw['m.new_content'] ? raw['m.new_content'] : raw)
     const parts: IMMessage<MatrixMediaLocator>['content']['parts'] = pollStart ? matrixPollParts(content)
       : pollEnd ? [{ type: 'text' as const, text: matrixEventText(event.content) || '投票已结束' }]
-        : event.type === 'm.sticker' && content.url ? [{ type: 'sticker', sticker: {
-          providerId: this.stickerProviderId, stickerId: content.url, title: content.body,
-          format: /gif|apng/.test(content.info?.mimetype ?? '') ? 'animated' : 'static',
+        : event.type === 'm.sticker' && (content.url || content.file?.url) ? [{ type: 'sticker', sticker: {
+          providerId: this.stickerProviderId,
+          stickerId: content.url ?? content.file!.url!, title: content.body,
+          format: stickerFormat(content.info?.mimetype),
           mimeType: content.info?.mimetype ?? 'image/webp', width: content.info?.w, height: content.info?.h,
-          size: content.info?.size, locator: { mxc: content.url },
+          size: content.info?.size, locator: { mxc: content.url ?? content.file!.url! },
         } }] : matrixMessageParts(content)
     if (!parts.length) return
     for (const part of parts) if (part.type === 'sticker') {

@@ -261,7 +261,7 @@ export class PlatformSubscriptionManager {
   /** Sessions kept for lazy restarts after their subscription is disposed. */
   private readonly _retainedSessions = new Map<string, PlatformSession>()
   private readonly _reactionBatches = new Map<string, ReactionBatch>()
-  private _reaper?: { unref?(): unknown }
+  private _reaper?: ReturnType<typeof setInterval>
 
   constructor(
     private readonly _database: Database,

@@ -104,6 +104,24 @@ describe('automatic Matrix message-to-pack mapping', () => {
     await platform.stop()
   })
 
+  it('classifies video stickers and maps encrypted sticker events through file.url', async () => {
+    const { MatrixPlatform } = await import('./index.js')
+    const platform = new MatrixPlatform({ homeserver: 'https://matrix.test', accessToken: 'fixture' })
+    const internal = platform as any
+    const sticker = (content: Record<string, unknown>) => internal.mapTimelineMessage('!room:test', {
+      type: 'm.sticker', event_id: '$s', sender: '@me:test', origin_server_ts: 1000, content,
+    })?.content.parts[0]
+    expect(sticker({ url: 'mxc://test/webm', body: 'clip',
+      info: { mimetype: 'video/webm', w: 128, h: 128 } })?.sticker).toMatchObject({ format: 'video', mimeType: 'video/webm' })
+    expect(sticker({ url: 'mxc://test/gif', body: 'gif',
+      info: { mimetype: 'image/gif' } })?.sticker).toMatchObject({ format: 'animated' })
+    expect(sticker({ body: 'hidden', file: { url: 'mxc://test/encrypted' } })?.sticker).toMatchObject({
+      stickerId: 'mxc://test/encrypted', locator: { mxc: 'mxc://test/encrypted' }, format: 'static',
+    })
+    expect(sticker({ body: 'unreachable' })).toBeUndefined()
+    await platform.stop()
+  })
+
   it('inherits canonical Space packs and attaches global-only catalogs to rooms', async () => {
     const { MatrixPlatform } = await import('./index.js')
     const platform = new MatrixPlatform({ homeserver: 'https://matrix.test', accessToken: 'fixture' })
