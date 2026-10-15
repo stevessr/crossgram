@@ -713,12 +713,14 @@ describe('ServerSession decrypted RPC queue', () => {
       && ((call as unknown[])[1] as { _: string })._ === 'help.getNearestDc')).toBe(true)
 
     // Eight run, 64 wait in the download queue, and only the 8 beyond the
-    // queue fail fast; nothing queues in front of general RPCs.
+    // queue fail fast with a backoff-carrying FLOOD_WAIT (clients honor
+    // retry_after instead of retrying SERVER_BUSY immediately); nothing
+    // queues in front of general RPCs.
     const send = (session as unknown as { _sendEncryptedMessage: ReturnType<typeof vi.fn> })._sendEncryptedMessage
-    const busyReplies = send.mock.calls
+    const floodReplies = send.mock.calls
       .map(([frame]) => decodeRpcReply(frame as Buffer).result)
-      .filter(result => (result as { errorMessage?: string }).errorMessage === 'SERVER_BUSY')
-    expect(busyReplies).toHaveLength(8)
+      .filter(result => (result as { errorMessage?: string }).errorMessage === 'FLOOD_WAIT_2')
+    expect(floodReplies).toHaveLength(8)
 
     releaseDownloads()
     console.log('DEBUG: gate released')

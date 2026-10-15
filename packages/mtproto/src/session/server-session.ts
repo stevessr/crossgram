@@ -1549,11 +1549,15 @@ export class ServerSession {
     const afterResponseSettled: Array<() => void | Promise<void>> = []
     const execute = async (): Promise<RpcReply> => {
       const release = await this._acquireRpcSlot(method)
-      if (!release) {
+      if (!release || release === 'download-flood') {
         if (this._disposed || this._connection.closed) throw new RpcConnectionClosedError()
-        debugResult = {
-          _: 'mt_rpc_error', errorCode: 500, errorMessage: 'SERVER_BUSY',
-        } as mtp.RawMt_rpc_error
+        debugResult = release === 'download-flood'
+          ? ({
+              _: 'mt_rpc_error', errorCode: 420, errorMessage: 'FLOOD_WAIT_2',
+            } as mtp.RawMt_rpc_error)
+          : {
+              _: 'mt_rpc_error', errorCode: 500, errorMessage: 'SERVER_BUSY',
+            } as mtp.RawMt_rpc_error
         return this._buildRpcReply(msgId, debugResult, method)
       }
       try {
@@ -1725,7 +1729,7 @@ export class ServerSession {
     }
   }
 
-  private _acquireRpcSlot(method: string): Promise<(() => void) | null> {
+  private _acquireRpcSlot(method: string): Promise<(() => void) | 'download-flood' | null> {
     const isDownload = method === 'upload.getFile' || method === 'upload.getCdnFile'
     if (isDownload) {
       if (
@@ -1741,7 +1745,10 @@ export class ServerSession {
       // fast SERVER_BUSY turns every one of them into a slow retry loop. The
       // queue is private to downloads, so connect-time RPCs are never delayed.
       if (this._downloadRpcWaiters.length >= MAX_PENDING_DOWNLOAD_RPCS_PER_CONNECTION) {
-        return Promise.resolve(null)
+        // Beyond the queue the client must back off: FLOOD_WAIT carries a
+        // retry_after that official clients honor, while SERVER_BUSY is
+        // retried immediately and amplifies bulk-load storms.
+        return Promise.resolve('download-flood')
       }
       return new Promise(resolve => this._downloadRpcWaiters.push(resolve))
     }
