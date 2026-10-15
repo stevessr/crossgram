@@ -680,6 +680,48 @@ describe('ServerSession decrypted RPC queue', () => {
     expect(connection.resumeReading).toHaveBeenCalledOnce()
   })
 
+  it('keeps a dedicated download slice that general RPCs can never exhaust', async () => {
+    let releaseDownloads!: () => void
+    const gate = new Promise<void>(resolve => { releaseDownloads = resolve })
+    const dispatch = vi.fn(async (request: { _: string }) => {
+      if (request._ === 'upload.getFile') await gate
+      return { _: 'boolTrue' }
+    })
+    const { session } = createSession(dispatch)
+    const internal = session as unknown as QueuedSession & { _apiLayer: number }
+    internal._apiLayer = 228
+
+    // A reconnect burst: the connection-limit's worth of downloads plus the
+    // pending-queue tail, all gated on the download slot.
+    const downloadCalls = Array.from({ length: 70 }, (_, index) => internal._handleRpcCall(
+      Long.fromInt(2_000 + index),
+      {
+        _: 'upload.getFile', location: {
+          _: 'inputDocumentFileLocation', id: Long.fromInt(index),
+          accessHash: Long.ZERO, fileReference: new Uint8Array(), thumbSize: '',
+        }, offset: Long.ZERO, limit: 1024,
+      } as never,
+      Long.fromInt(9),
+    ))
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(4))
+    // The four in-flight downloads must not block a connect-time RPC.
+    await expect(internal._handleRpcCall(
+      Long.fromInt(3_000), { _: 'help.getNearestDc' } as never, Long.fromInt(9),
+    )).resolves.toBeUndefined()
+    expect(dispatch.mock.calls.some(call => (call as unknown[])[1] !== undefined
+      && ((call as unknown[])[1] as { _: string })._ === 'help.getNearestDc')).toBe(true)
+
+    // Downloads beyond the slice fail fast instead of queueing.
+    const send = (session as unknown as { _sendEncryptedMessage: ReturnType<typeof vi.fn> })._sendEncryptedMessage
+    const busyReplies = send.mock.calls
+      .map(([frame]) => decodeRpcReply(frame as Buffer).result)
+      .filter(result => (result as { errorMessage?: string }).errorMessage === 'SERVER_BUSY')
+    expect(busyReplies.length).toBeGreaterThanOrEqual(2)
+
+    releaseDownloads()
+    await Promise.all(downloadCalls)
+  })
+
   it('drops a queued RPC when its connection closes while waiting for dependencies', async () => {
     const dispatch = vi.fn().mockResolvedValue({ _: 'boolTrue' })
     const { session, connection } = createSession(dispatch)

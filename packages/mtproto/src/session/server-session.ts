@@ -40,6 +40,13 @@ const MAX_SHARED_RPC_INFLIGHT = 512
 const MAX_SHARED_RPC_INFLIGHT_PER_AUTH_KEY = 64
 const MAX_ACTIVE_RPCS_PER_CONNECTION = 16
 const MAX_PENDING_RPCS_PER_CONNECTION = 64
+/**
+ * Slow streaming downloads (upload.getFile) run for seconds each; a reconnect
+ * burst of them must not consume the whole per-connection RPC budget, or the
+ * connect-time handshake RPCs starve, the client sees no progress, and drops
+ * into a reconnect loop. Downloads get a small dedicated slice instead.
+ */
+const MAX_ACTIVE_DOWNLOAD_RPCS_PER_CONNECTION = 4
 const RPC_READ_PAUSE_THRESHOLD = 32
 const RPC_READ_RESUME_THRESHOLD = 16
 const FRAME_READ_PAUSE_COUNT = 32
@@ -357,6 +364,7 @@ export class ServerSession {
   private _processingMessages = new Map<string, Promise<void>>()
   private _completedMessageIds = new Map<string, true>()
   private _activeRpcCount = 0
+  private _activeDownloadRpcCount = 0
   private _rpcWaiters: Array<(release: (() => void) | null) => void> = []
   private _rpcReadPaused = false
   private _disposed = false
@@ -1536,7 +1544,7 @@ export class ServerSession {
     const afterResponse: Array<() => void | Promise<void>> = []
     const afterResponseSettled: Array<() => void | Promise<void>> = []
     const execute = async (): Promise<RpcReply> => {
-      const release = await this._acquireRpcSlot()
+      const release = await this._acquireRpcSlot(method)
       if (!release) {
         if (this._disposed || this._connection.closed) throw new RpcConnectionClosedError()
         debugResult = {
@@ -1713,11 +1721,25 @@ export class ServerSession {
     }
   }
 
-  private _acquireRpcSlot(): Promise<(() => void) | null> {
-    if (this._disposed || this._connection.closed) return Promise.resolve(null)
+  private _acquireRpcSlot(method: string): Promise<(() => void) | null> {
+    const isDownload = method === 'upload.getFile' || method === 'upload.getCdnFile'
+    // A slow download may only take a dedicated slot: never the general RPC
+    // budget that connect-time requests depend on, and at most a small slice
+    // of the connection so a reconnect burst cannot starve everything else.
+    if (isDownload) {
+      if (
+        this._activeDownloadRpcCount < MAX_ACTIVE_DOWNLOAD_RPCS_PER_CONNECTION
+        && this._activeRpcCount < MAX_ACTIVE_RPCS_PER_CONNECTION
+      ) {
+        this._activeRpcCount += 1
+        this._activeDownloadRpcCount += 1
+        return Promise.resolve(this._rpcSlotRelease(true))
+      }
+      return Promise.resolve(null)
+    }
     if (this._activeRpcCount < MAX_ACTIVE_RPCS_PER_CONNECTION) {
       this._activeRpcCount += 1
-      return Promise.resolve(this._rpcSlotRelease())
+      return Promise.resolve(this._rpcSlotRelease(false))
     }
     if (this._rpcWaiters.length >= MAX_PENDING_RPCS_PER_CONNECTION) {
       this._log.warn(
@@ -1734,14 +1756,15 @@ export class ServerSession {
     return new Promise(resolve => this._rpcWaiters.push(resolve))
   }
 
-  private _rpcSlotRelease(): () => void {
+  private _rpcSlotRelease(isDownload: boolean): () => void {
     let released = false
     return () => {
       if (released) return
       released = true
+      if (isDownload) this._activeDownloadRpcCount = Math.max(0, this._activeDownloadRpcCount - 1)
       const next = this._rpcWaiters.shift()
       if (next && !this._disposed && !this._connection.closed) {
-        next(this._rpcSlotRelease())
+        next(this._rpcSlotRelease(false))
       } else {
         this._activeRpcCount = Math.max(0, this._activeRpcCount - 1)
         next?.(null)
@@ -1756,6 +1779,7 @@ export class ServerSession {
   private _releasePendingRpcWaiters(): void {
     for (const resolve of this._rpcWaiters.splice(0)) resolve(null)
     this._activeRpcCount = 0
+    this._activeDownloadRpcCount = 0
     this._rpcReadPaused = false
   }
 
