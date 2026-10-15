@@ -220,10 +220,21 @@ export class DatabaseUpdateStoreBackend implements UpdateStoreBackend {
   async pruneExpired(now = Date.now()): Promise<number> {
     if (!this._retentionSeconds) return 0
     const cutoff = Math.floor(now / 1000) - this._retentionSeconds
-    const { removed } = await this._database.remove('mtproto_update_delivery', {
-      date: { $lt: cutoff },
-    })
-    return removed ?? 0
+    // Filter per platform session so each DELETE can seek the
+    // `platformSessionId+date` index; an age-only filter has no usable index
+    // and full-scans the delivery table on every sweep.
+    const sessions = await this._database
+      .select('mtproto_update_delivery', { date: { $lt: cutoff } })
+      .groupBy('platformSessionId').execute()
+    let removed = 0
+    for (const { platformSessionId } of sessions) {
+      const { removed: rows } = await this._database.remove('mtproto_update_delivery', {
+        platformSessionId,
+        date: { $lt: cutoff },
+      })
+      removed += rows ?? 0
+    }
+    return removed
   }
 }
 
