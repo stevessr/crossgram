@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { mapPack, roomPacks, packId } from './stickers.js'
+import { MatrixPlatform } from './index.js'
 import type { MatrixEvent } from './types.js'
 const event = (type: string, key: string, content: Record<string, unknown>): MatrixEvent => ({ type, state_key: key, content })
 const images = { cat: { url: 'mxc://test/cat', info: { mimetype: 'image/png', w: 128, h: 64 } } }
@@ -167,6 +168,41 @@ describe('coexisting stable and legacy sticker catalogs', () => {
       expect((await platform.getStickerSources()).map(s => s.id)).toContain(packId('!b:test', 'legacy'))
       internal.ingestAccountData({ account_data: { events: [{ type: 'im.ponies.emote_rooms', content: { rooms: {} } }] } })
       expect((await platform.getStickerSources()).map(s => s.id)).not.toContain(packId('!b:test', 'legacy'))
+    } finally { await platform.stop() }
+  })
+
+  it('warms every joined room with packs separately and prefetches external global packs once', async () => {
+    const platform = new MatrixPlatform({ homeserver: 'https://matrix.test', accessToken: 'fixture' })
+    const internal = platform as any
+    internal.loadJoinedDialogs = async () => []
+    internal.joinedRoomIds.add('!a:test')
+    internal.joinedRoomIds.add('!b:test')
+    internal.ingestState('!a:test', [event('m.room.image_pack', 'local', { images })])
+    internal.ingestState('!b:test', [event('im.ponies.room_emotes', 'legacy', { images })])
+    internal.ingestAccountData({ account_data: { events: [
+      { type: 'm.image_pack.rooms', content: { rooms: { '!b:test': { external: {} } } } },
+    ] } })
+    const fetched: string[] = []
+    platform.client.getStateContent = async (room, _type, key) => { fetched.push(`${room}/${key}`); return { images } }
+    try {
+      await platform.warmStickerCaches()
+      // Rooms with several packs keep distinct per-room media indexes.
+      expect(internal.stickerMediaIndexes.get('!a:test')?.size).toBe(1)
+      expect(internal.stickerMediaIndexes.get('!b:test')?.size).toBe(1)
+      // The external global pack was resolved during warm-up, exactly once:
+      // the room-less global pass must reuse the per-room prefetch.
+      expect(fetched).toEqual(['!b:test/external'])
+    } finally { await platform.stop() }
+  })
+
+  it('survives a failed dialog fetch during sticker warm-up', async () => {
+    const platform = new MatrixPlatform({ homeserver: 'https://matrix.test', accessToken: 'fixture' })
+    const internal = platform as any
+    internal.loadJoinedDialogs = async () => { throw new Error('homeserver down') }
+    internal.joinedRoomIds.add('!a:test')
+    internal.ingestState('!a:test', [event('m.room.image_pack', 'local', { images })])
+    try {
+      await expect(platform.warmStickerCaches()).resolves.toBeUndefined()
     } finally { await platform.stop() }
   })
 })

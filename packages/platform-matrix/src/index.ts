@@ -187,10 +187,18 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
 
   async getStickerSources(roomId?: string): Promise<MatrixPackSource[]> {
     await this.loadJoinedDialogs()
-    const globals = this.globalStickerRooms()
     const sources = this.localStickerSources(roomId)
-    // Globally selected packs can belong to rooms the account has not joined.
-    // Fetch only the explicit pack keys, with a bounded short-lived cache.
+    await this.resolveExternalGlobalPacks(sources)
+    if (roomId) this.indexStickerSources(roomId, sources)
+    return sources.sort((a, b) => Number(b.global) - Number(a.global) || a.id.localeCompare(b.id))
+  }
+
+  /**
+   * Resolve globally selected packs that belong to rooms the account has not
+   * joined: fetch only the explicit pack keys, with a bounded short-lived cache.
+   */
+  private async resolveExternalGlobalPacks(sources: MatrixPackSource[]): Promise<void> {
+    const globals = this.globalStickerRooms()
     for (const [id, keys] of Object.entries(globals)) {
       if (!isRecord(keys)) continue
       for (const key of Object.keys(keys)) {
@@ -213,8 +221,6 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         if (content) sources.push({ roomId: id, id: cacheKey, title: id, content, global: true })
       }
     }
-    if (roomId) this.indexStickerSources(roomId, sources)
-    return sources.sort((a, b) => Number(b.global) - Number(a.global) || a.id.localeCompare(b.id))
   }
 
   private globalStickerRooms(): Record<string, Record<string, unknown>> {
@@ -267,6 +273,49 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     await this.client.close()
   }
 
+  /**
+   * Prefetch every joined room's image packs right after the initial sync.
+   * Without this the first sticker RPC pays a full dialog fetch plus a
+   * homeserver round-trip per globally selected pack, which is exactly when
+   * the client shows an empty or stuck sticker panel. Each room is warmed
+   * separately so rooms with several packs keep distinct media indexes.
+   */
+  async warmStickerCaches(): Promise<void> {
+    try {
+      await this.loadJoinedDialogs()
+    } catch {
+      // The lazy dialog fetch already reports its own failures.
+      return
+    }
+    await this.warmStickerCachesFromState()
+  }
+
+  /**
+   * Warm pack caches from already-ingested sync state, without issuing
+   * another full-state sync: the initial subscribe snapshot has populated
+   * the joined rooms and image-pack state.
+   */
+  private async warmStickerCachesFromState(): Promise<void> {
+    for (const roomId of this.joinedRoomIds) {
+      if (!this.imagePackStates.get(roomId)?.size) continue
+      try {
+        const sources = this.localStickerSources(roomId)
+        await this.resolveExternalGlobalPacks(sources)
+        this.indexStickerSources(roomId, sources)
+      } catch (error) {
+        this.logger?.warn('Matrix sticker warm-up failed for %s: %s', roomId, formatError(error))
+      }
+    }
+    // The room-less pass also resolves globally selected packs from rooms the
+    // account has not joined, and warms the cross-room listing.
+    try {
+      const sources = this.localStickerSources()
+      await this.resolveExternalGlobalPacks(sources)
+    } catch (error) {
+      this.logger?.warn('Matrix sticker warm-up (global) failed: %s', formatError(error))
+    }
+  }
+
   async getAccount() {
     const userId = await this.getAccountUserId()
     const profile = await this.client.getProfile(userId).catch(() => ({}))
@@ -306,6 +355,10 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
       }
       this.pinSnapshots.set(roomId, this.cachedPinnedIds(roomId))
     }
+    // Prefetch room sticker packs off the critical path so the client's first
+    // sticker panel open never triggers a full dialog fetch at RPC time.
+    // Uses the just-ingested snapshot; no extra sync is issued.
+    void this.warmStickerCachesFromState()
     let since = initial.next_batch
     const running = (async () => {
       while (!controller.signal.aborted) {

@@ -1581,7 +1581,15 @@ describe('MatrixPlatform', () => {
         if (method === 'GET') return muted
           ? json({ actions: ['dont_notify'], enabled: true })
           : json({ errcode: 'M_NOT_FOUND' }, { status: 404 })
-        muted = method === 'PUT'
+        // The override rule is the mute source of truth; a room-kind DELETE
+        // is legacy cleanup and must not flip the state back.
+        if (method === 'PUT') muted = true
+        return json({})
+      }
+      if (url.pathname.includes('/pushrules/global/override/')) {
+        if (method === 'GET') return json({ errcode: 'M_NOT_FOUND' }, { status: 404 })
+        if (method === 'PUT') muted = true
+        if (method === 'DELETE') muted = false
         return json({})
       }
       throw new Error(`unexpected request: ${url}`)
