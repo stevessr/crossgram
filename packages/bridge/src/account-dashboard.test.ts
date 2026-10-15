@@ -73,4 +73,15 @@ describe('platform account dashboard projection', () => {
       /altEndpoints|privateKey|rsaKeyPath|token|credentials|totp/i,
     )
   })
+
+  it('advertises the public WSS front only when configured', () => {
+    const without = makeCrossGramServerConfig('203.0.113.8', 4430, 'key')
+    expect('web_socket_endpoint' in without).toBe(false)
+
+    const withWs = makeCrossGramServerConfig('203.0.113.8', 4430, 'key', {
+      webSocketEndpoint: 'wss://mt.example.org/mtproto',
+    })
+    expect(withWs.web_socket_endpoint).toBe('wss://mt.example.org/mtproto')
+    expect('web_socket_endpoint' in without).toBe(false)
+  })
 })

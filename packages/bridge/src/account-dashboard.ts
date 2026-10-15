@@ -9,6 +9,7 @@ export function makeCrossGramServerConfig(
   host: string,
   port: number,
   publicKeyPem: string,
+  extra: { webSocketEndpoint?: string } = {},
 ): CrossGramServerConfig {
   return {
     name: 'CrossGram',
@@ -17,6 +18,7 @@ export function makeCrossGramServerConfig(
     port,
     rsa_key: publicKeyPem.trim(),
     dcs: Array.from({ length: 5 }, (_, index) => ({ id: index + 1, ip: host, port })),
+    ...(extra.webSocketEndpoint ? { web_socket_endpoint: extra.webSocketEndpoint } : {}),
   }
 }
 

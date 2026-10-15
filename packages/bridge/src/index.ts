@@ -126,6 +126,12 @@ export interface BridgeConfig {
   altEndpoints?: string[]
   /** HTTP prefix for platform account assets (default: /api). */
   apiPrefix?: string
+  /**
+   * Public WebSocket endpoint advertised to clients and the WebUI, e.g.
+   * wss://mt.example.org/mtproto (a Cloudflare/CDN front for the WS port).
+   * Empty means clients use the TCP host:port only.
+   */
+  publicWsEndpoint?: string
   /** Generate login codes only on explicit requests, rather than rotating TOTP (default: true). */
   onDemandLoginCodes?: boolean
   /** Telegram attachment-menu Mini App for browsing platform-native group files. */
@@ -190,6 +196,8 @@ export const Config = z.object({
     }
   })).default([]),
   apiPrefix: z.string().default('/api'),
+  publicWsEndpoint: z.string().default('')
+    .description('Public WSS endpoint for the MTProto WebSocket transport, advertised in the server config.'),
   onDemandLoginCodes: z.boolean().default(true),
   groupFilesMiniApp: z.object({
     enabled: z.boolean().default(true),
@@ -603,6 +611,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     accounts: [],
     serverConfig: makeCrossGramServerConfig(
       config.serverHost ?? '127.0.0.1', config.serverPort ?? 4430, ctx.mtproto.rsaKey.publicKeyPem,
+      { webSocketEndpoint: config.publicWsEndpoint || undefined },
     ),
     loginTokenApprovalUrl: `${apiPrefix}/login-tokens`,
     onDemandLoginCodes,

@@ -33,6 +33,8 @@ export interface CrossGramServerConfig {
   port: number
   rsa_key: string
   dcs: CrossGramServerConfigDc[]
+  /** Public WSS front (CDN/tunnel) for the WebSocket transport, if configured. */
+  web_socket_endpoint?: string
 }
 
 export interface PlatformAccountDashboardData {

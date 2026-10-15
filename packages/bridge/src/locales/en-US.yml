@@ -2,6 +2,7 @@ dcId: Telegram data-center ID advertised by the bridge.
 serverHost: Public MTProto host advertised to Telegram clients.
 serverPort: Public MTProto port advertised to Telegram clients.
 altEndpoints: Alternate MTProto endpoints for the same data center, as host:port or [IPv6]:port strings, advertised after the primary endpoint.
+publicWsEndpoint: Public WSS front for the WebSocket transport (e.g. wss://mt.example.org/mtproto behind Cloudflare). Shown in the WebUI server config; empty advertises TCP only.
 apiPrefix: HTTP prefix used for platform account assets.
 onDemandLoginCodes: Issue login codes only on Telegram or WebUI requests instead of continuously rotating TOTP codes (recommended).
 groupFilesMiniApp: Telegram attachment-menu Mini App used to browse platform-native group files.

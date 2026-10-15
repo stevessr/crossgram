@@ -2,6 +2,7 @@ dcId: 网桥向 Telegram 客户端公布的数据中心 ID。
 serverHost: 向 Telegram 客户端公布的 MTProto 主机地址。
 serverPort: 向 Telegram 客户端公布的 MTProto 主端口。
 altEndpoints: 在同一数据中心中、紧随主地址向 Telegram 客户端公布的备用 MTProto 地址，格式为 host:port 或 [IPv6]:port。
+publicWsEndpoint: 客户端 WebSocket 传输的公网入口（如 wss://mt.example.org/mtproto，可经 Cloudflare 等代理）；留空则仅公布 TCP 地址。显示在 WebUI 服务器配置里。
 apiPrefix: 平台账户资源使用的 HTTP 路径前缀。
 onDemandLoginCodes: 按需签发验证码（推荐）：仅在 Telegram 客户端或 WebUI 发起请求时生成，不再自动轮换。
 groupFilesMiniApp: 用于浏览平台原生群文件的 Telegram 附件菜单小程序。
