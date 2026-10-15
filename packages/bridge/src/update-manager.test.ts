@@ -1364,6 +1364,63 @@ describe('UpdateManager', () => {
     for (const item of sent) expect(() => roundTrip(item.update)).not.toThrow()
   })
 
+  it('projects a peer read receipt as an outbox update without touching our unread', async () => {
+    const { store, manager, sent } = await createHarness()
+    const direct: IMConversation = { id: 'peer-read-room', kind: 'direct', title: 'Peer Read' }
+    const outgoing: IMMessage = {
+      id: 'peer-read-message', conversationId: direct.id, senderId: session.userId,
+      outgoing: true, timestamp: 44, content: { parts: [{ type: 'text', text: 'to peer' }] },
+    }
+    await store.ingest(session, direct, outgoing)
+    await store.incrementConversationUnread(session, direct, 3)
+    const projection = await store.getReadProjection(session, direct.id, outgoing.id)
+    if (!projection) throw new Error('missing read projection')
+
+    await manager.publish(session, {
+      event: {
+        type: 'read', conversationId: direct.id,
+        upToMessageId: outgoing.id, actorId: 'alice',
+      },
+      result: projection,
+    })
+
+    const [update] = sent.map(({ update }) => (update as tl.RawUpdates).updates[0])
+    expect(update).toMatchObject({
+      _: 'updateReadHistoryOutbox', peer: { _: 'peerUser' },
+      maxId: projection.tlMessageId,
+    })
+    expect((update as tl.RawUpdateReadHistoryOutbox).maxId).toEqual(projection.tlMessageId)
+    // The payload carries the reader profile for the client's peer cache.
+    const payload = sent[0]!.update as tl.RawUpdates
+    expect(payload.users.length).toBe(1)
+    // The account's own unread counter stays untouched by a peer receipt.
+    await expect(store.listDialogs(session.platformSessionId)).resolves.toMatchObject([
+      { conversation: { id: 'peer-read-room' }, unreadCount: 3 },
+    ])
+    expect(() => roundTrip(sent[0]!.update)).not.toThrow()
+  })
+
+  it('drops a peer read receipt for group conversations', async () => {
+    const { store, manager, sent } = await createHarness()
+    const group: IMConversation = { id: 'peer-read-group', kind: 'group', title: 'Peer Read Group' }
+    const outgoing: IMMessage = {
+      id: 'peer-read-group-message', conversationId: group.id, senderId: session.userId,
+      outgoing: true, timestamp: 45, content: { parts: [{ type: 'text', text: 'to group' }] },
+    }
+    await store.ingest(session, group, outgoing)
+    const projection = await store.getReadProjection(session, group.id, outgoing.id)
+    if (!projection) throw new Error('missing read projection')
+
+    await manager.publish(session, {
+      event: {
+        type: 'read', conversationId: group.id,
+        upToMessageId: outgoing.id, actorId: 'alice',
+      },
+      result: projection,
+    })
+    expect(sent).toEqual([])
+  })
+
   it('fans a local read update out through every bound auth key except the requesting connection', async () => {
     const { ctx, store, manager, sent } = await createHarness()
     await ctx.database.create('mtproto_auth_binding', {

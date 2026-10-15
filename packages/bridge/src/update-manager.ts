@@ -595,7 +595,29 @@ export class UpdateManager {
     if (delivery.published) return
 
     let update: tl.TypeUpdate
-    if (channelId !== undefined) {
+    let outboxUser: tl.RawUser | undefined
+    if (event.actorId && channelId !== undefined) {
+      // Telegram exposes no per-user read state in groups/channels: drop it.
+      return
+    }
+    if (event.actorId) {
+      // The peer read OUR outgoing messages: Telegram shows ✓✓ via outbox.
+      // The reader's platform user id is the receipt actor, not the room id.
+      const platform = this._registry.require(session.platformId)
+      const row = await this._store.getUser(session.platformId, event.actorId)
+        ?? await this._store.upsertUser(session, await platform.getUser?.(session, event.actorId)
+          ?? { id: event.actorId, firstName: event.actorId })
+      const profile = toUser(row)
+      outboxUser = makeUser({
+        id: row.id, firstName: profile.firstName,
+        lastName: profile.lastName, username: profile.username,
+      })
+      update = {
+        _: 'updateReadHistoryOutbox', peer: { _: 'peerUser', userId: row.id },
+        maxId: result.tlMessageId,
+        pts: delivery.pts, ptsCount: delivery.ptsCount,
+      }
+    } else if (channelId !== undefined) {
       update = {
         _: 'updateReadChannelInbox', channelId,
         maxId: result.tlMessageId, stillUnreadCount: result.unreadCount,
@@ -615,7 +637,9 @@ export class UpdateManager {
       }
     }
     const payload: tl.RawUpdates = {
-      _: 'updates', updates: [update], users: [],
+      _: 'updates',
+      updates: [update],
+      users: event.actorId ? [outboxUser!] : [],
       chats: channelId === undefined ? [] : [this._makeChat(session.platformSessionId, displayConversation)],
       date: delivery.date, seq: delivery.seq,
     }

@@ -797,6 +797,15 @@ export class PlatformSubscriptionManager {
         result: stored.message,
       }, event.delivery === 'recovery' ? { ...options, forceDelivery: true } : options)
     } else if (event.type === 'read') {
+      if (event.actorId) {
+        // A peer's receipt for our outgoing messages: never touch this
+        // account's own unread state, just project the outbox read.
+        const result = await this._store.getReadProjection(
+          session, event.conversationId, event.upToMessageId,
+        )
+        if (result) return this._publishCommitted(eventCtx, session, { event, result }, options)
+        return
+      }
       const result = await this._store.markRead(session, event.conversationId, event.upToMessageId)
       if (result) return this._publishCommitted(eventCtx, session, { event, result }, options)
     } else if (event.type === 'voice-call') {
@@ -847,7 +856,7 @@ function platformEventSummary(event: IMEvent): string {
     return `type=message-reactions conversation=${event.conversation.id} eventId=${event.eventId} message=${event.target.messageId} reactions=${event.context.reactions.length}`
   }
   if (event.type === 'read') {
-    return `type=read conversation=${event.conversationId} upToMessage=${event.upToMessageId}`
+    return `type=read conversation=${event.conversationId} upToMessage=${event.upToMessageId} actor=${event.actorId ?? 'self'}`
   }
   if (event.type === 'voice-call') {
     return `type=voice-call signal=${event.signal} media=${event.media} conversation=${event.conversation.id}`

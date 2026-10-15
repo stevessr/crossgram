@@ -683,7 +683,7 @@ describe('ServerSession decrypted RPC queue', () => {
   it('keeps a dedicated download slice that general RPCs can never exhaust', async () => {
     let releaseDownloads!: () => void
     const gate = new Promise<void>(resolve => { releaseDownloads = resolve })
-    const dispatch = vi.fn(async (request: { _: string }) => {
+    const dispatch = vi.fn(async (_ctx: unknown, request: { _: string }) => {
       if (request._ === 'upload.getFile') await gate
       return { _: 'boolTrue' }
     })
@@ -691,9 +691,8 @@ describe('ServerSession decrypted RPC queue', () => {
     const internal = session as unknown as QueuedSession & { _apiLayer: number }
     internal._apiLayer = 228
 
-    // A reconnect burst: the connection-limit's worth of downloads plus the
-    // pending-queue tail, all gated on the download slot.
-    const downloadCalls = Array.from({ length: 70 }, (_, index) => internal._handleRpcCall(
+    // A bulk media load: far more concurrent ranges than the download slice.
+    const downloadCalls = Array.from({ length: 80 }, (_, index) => internal._handleRpcCall(
       Long.fromInt(2_000 + index),
       {
         _: 'upload.getFile', location: {
@@ -704,22 +703,28 @@ describe('ServerSession decrypted RPC queue', () => {
       Long.fromInt(9),
     ))
     await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(8))
+    console.log('DEBUG: 8 in flight')
     // The eight in-flight downloads must not block a connect-time RPC.
     await expect(internal._handleRpcCall(
       Long.fromInt(3_000), { _: 'help.getNearestDc' } as never, Long.fromInt(9),
     )).resolves.toBeUndefined()
+    console.log('DEBUG: general rpc done')
     expect(dispatch.mock.calls.some(call => (call as unknown[])[1] !== undefined
       && ((call as unknown[])[1] as { _: string })._ === 'help.getNearestDc')).toBe(true)
 
-    // Downloads beyond the slice fail fast instead of queueing.
+    // Eight run, 64 wait in the download queue, and only the 8 beyond the
+    // queue fail fast; nothing queues in front of general RPCs.
     const send = (session as unknown as { _sendEncryptedMessage: ReturnType<typeof vi.fn> })._sendEncryptedMessage
     const busyReplies = send.mock.calls
       .map(([frame]) => decodeRpcReply(frame as Buffer).result)
       .filter(result => (result as { errorMessage?: string }).errorMessage === 'SERVER_BUSY')
-    expect(busyReplies.length).toBeGreaterThanOrEqual(2)
+    expect(busyReplies).toHaveLength(8)
 
     releaseDownloads()
+    console.log('DEBUG: gate released')
     await Promise.all(downloadCalls)
+    console.log('DEBUG: all settled')
+    expect(dispatch).toHaveBeenCalledTimes(8 + 64 + 1)
   })
 
   it('drops a queued RPC when its connection closes while waiting for dependencies', async () => {

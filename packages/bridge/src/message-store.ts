@@ -656,6 +656,40 @@ export class MessageStore {
     }))
   }
 
+  /**
+   * Resolve a read target to its ReadResult without mutating unread state.
+   * Used for peer receipts (another user read our outgoing messages); the
+   * account's own unread counter must stay untouched in that case.
+   */
+  async getReadProjection(
+    session: PlatformSession,
+    conversationId: string,
+    upToMessageId: string,
+  ): Promise<ReadResult | undefined> {
+    const [conversation] = await this._database.get('mtproto_im_conversation', {
+      platformSessionId: session.platformSessionId,
+      platformConversationId: conversationId,
+    })
+    if (!conversation) return
+    const [alias] = await this._database.get('mtproto_im_message_alias', {
+      platformSessionId: session.platformSessionId,
+      conversationId: conversation.id,
+      platformMessageId: upToMessageId,
+    })
+    if (!alias) return
+    const [message] = await this._database.get('mtproto_im_message', { id: alias.messageId })
+    if (!message || message.deleted) return
+    const parts = await this._database.select('mtproto_tl_message_part', { messageId: message.id })
+      .orderBy('ordinal').execute()
+    if (!parts.length) return
+    return {
+      conversation: toConversation(conversation),
+      message: await this._hydrateMessage(message),
+      tlMessageId: Math.max(...parts.map((part) => part.tlMessageId)),
+      unreadCount: conversation.unreadCount,
+    }
+  }
+
   async upsertConversation(
     session: PlatformSession,
     conversation: IMConversation,

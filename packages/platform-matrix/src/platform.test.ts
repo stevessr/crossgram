@@ -517,6 +517,46 @@ describe('MatrixPlatform', () => {
     expect(internal.updateConversation(room).title).toBe('User 0')
   })
 
+  it('emits the direct peer read receipt with its actor alongside the self receipt', async () => {
+    const platform = createPlatform(routeFetch(() => { throw new Error('unexpected request') }), {
+      userId: '@me:example.org',
+    })
+    const internal = platform as any
+    const room = '!dm:example.org'
+    internal.ingestState(room, [
+      event('m.room.create', {}, { stateKey: '' }),
+      event('m.room.member', { membership: 'join', displayname: 'Me' }, {
+        stateKey: '@me:example.org', sender: '@me:example.org',
+      }),
+      event('m.room.member', { membership: 'join', displayname: 'Alice' }, {
+        stateKey: '@alice:example.org', sender: '@alice:example.org',
+      }),
+    ])
+    internal.directRoomIds.add(room)
+    internal.updateConversation(room)
+    const events: IMEvent[] = []
+    await internal.dispatchSync({
+      next_batch: 'next',
+      rooms: { join: { [room]: {
+        ephemeral: { events: [{
+          type: 'm.receipt', content: {
+            '$out': { 'm.read': { '@me:example.org': { ts: 1_000 } } },
+            '$in': { 'm.read': { '@alice:example.org': { ts: 2_000 } } },
+          },
+        }] },
+      } } },
+    }, '@me:example.org', (value) => { events.push(value) })
+    const reads = events.filter((value) => value.type === 'read')
+    expect(reads).toHaveLength(2)
+    // Self receipt: no actor (Telegram inbox semantics).
+    expect(reads[0]).toMatchObject({ conversationId: room, upToMessageId: '$out' })
+    expect((reads[0] as { actorId?: string }).actorId).toBeUndefined()
+    // Peer receipt: actor recorded (Telegram outbox semantics).
+    expect(reads[1]).toMatchObject({
+      conversationId: room, upToMessageId: '$in', actorId: '@alice:example.org',
+    })
+  })
+
   it('avoids rewriting every other joined room on message-only syncs and updates direct room mappings', async () => {
     const platform = createPlatform(routeFetch(() => { throw new Error('unexpected request') }), {
       userId: '@me:example.org',

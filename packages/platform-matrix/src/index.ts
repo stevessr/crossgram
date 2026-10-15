@@ -1366,8 +1366,21 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
         }
       }
       const receipt = room.ephemeral?.events?.find((event) => event.type === 'm.receipt')
-      const receiptEventId = receipt && latestReadReceipt(receipt.content, userId)
-      if (receiptEventId) await handler({ type: 'read', conversationId: roomId, upToMessageId: receiptEventId })
+      if (receipt) {
+        const receiptEventId = latestReadReceipt(receipt.content, userId)
+        if (receiptEventId) await handler({ type: 'read', conversationId: roomId, upToMessageId: receiptEventId })
+        // A direct peer's read receipt is the Telegram outbox ✓✓: the peer
+        // read OUR outgoing messages. Group receipts have no Telegram
+        // counterpart (Telegram shows no per-user read state in groups).
+        const conversation = this.conversations.get(roomId)
+        if (conversation?.kind === 'direct') {
+          const peerReceipt = latestPeerReadReceipt(receipt.content, userId)
+          if (peerReceipt) await handler({
+            type: 'read', conversationId: roomId,
+            upToMessageId: peerReceipt.eventId, actorId: peerReceipt.userId,
+          })
+        }
+      }
     }
     // Message-only syncs cannot alter other rooms' hierarchy or direct state.
     // Previously this rebuilt every room conversation on every /sync batch.
@@ -2028,6 +2041,27 @@ function latestReadReceipt(content: unknown, userId: string): string | undefined
     if (!latest || ts >= latest.ts) latest = { eventId, ts }
   }
   return latest?.eventId
+}
+
+/** Latest m.read receipt from anyone other than `selfUserId`, with its reader. */
+function latestPeerReadReceipt(
+  content: unknown,
+  selfUserId: string,
+): { userId: string, eventId: string } | undefined {
+  if (!content || typeof content !== 'object' || Array.isArray(content)) return
+  let latest: { userId: string, eventId: string, ts: number } | undefined
+  for (const [eventId, receiptTypes] of Object.entries(content as Record<string, unknown>)) {
+    if (!receiptTypes || typeof receiptTypes !== 'object' || Array.isArray(receiptTypes)) continue
+    const read = (receiptTypes as Record<string, unknown>)['m.read']
+    if (!read || typeof read !== 'object' || Array.isArray(read)) continue
+    for (const [receiptUserId, receipt] of Object.entries(read as Record<string, unknown>)) {
+      if (receiptUserId === selfUserId) continue
+      if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt)) continue
+      const ts = Number((receipt as Record<string, unknown>).ts ?? 0)
+      if (!latest || ts >= latest.ts) latest = { userId: receiptUserId, eventId, ts }
+    }
+  }
+  return latest ? { userId: latest.userId, eventId: latest.eventId } : undefined
 }
 
 function requestPageStart(cursor?: string): number {

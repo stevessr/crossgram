@@ -845,7 +845,16 @@ export type IMEvent<TMediaLocator = unknown> =
       /** Re-attempt delivery for an already persisted request projection. */
       delivery?: 'recovery'
     }
-  | { type: 'read', conversationId: string, upToMessageId: string }
+  | {
+      type: 'read', conversationId: string, upToMessageId: string
+      /**
+       * Who read up to this message. Omitted when the platform account itself
+       * read the conversation (self read, syncs Telegram inbox state). When
+       * set to a peer's platform user id, the read is the peer's receipt for
+       * OUR outgoing messages and projects as a Telegram outbox read instead.
+       */
+      actorId?: string
+    }
   | {
       type: 'message-reactions'
       eventId: string

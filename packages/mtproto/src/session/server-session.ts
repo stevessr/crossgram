@@ -49,6 +49,7 @@ const MAX_PENDING_RPCS_PER_CONNECTION = 64
  * media throughput against a ~1s-per-file upstream.
  */
 const MAX_ACTIVE_DOWNLOAD_RPCS_PER_CONNECTION = 8
+const MAX_PENDING_DOWNLOAD_RPCS_PER_CONNECTION = 64
 const RPC_READ_PAUSE_THRESHOLD = 32
 const RPC_READ_RESUME_THRESHOLD = 16
 const FRAME_READ_PAUSE_COUNT = 32
@@ -368,6 +369,7 @@ export class ServerSession {
   private _activeRpcCount = 0
   private _activeDownloadRpcCount = 0
   private _rpcWaiters: Array<(release: (() => void) | null) => void> = []
+  private _downloadRpcWaiters: Array<(release: (() => void) | null) => void> = []
   private _rpcReadPaused = false
   private _disposed = false
   // Only authorization transitions form a barrier. Serializing every API RPC
@@ -1725,9 +1727,6 @@ export class ServerSession {
 
   private _acquireRpcSlot(method: string): Promise<(() => void) | null> {
     const isDownload = method === 'upload.getFile' || method === 'upload.getCdnFile'
-    // A slow download may only take a dedicated slot: never the general RPC
-    // budget that connect-time requests depend on, and at most a small slice
-    // of the connection so a reconnect burst cannot starve everything else.
     if (isDownload) {
       if (
         this._activeDownloadRpcCount < MAX_ACTIVE_DOWNLOAD_RPCS_PER_CONNECTION
@@ -1737,7 +1736,14 @@ export class ServerSession {
         this._activeDownloadRpcCount += 1
         return Promise.resolve(this._rpcSlotRelease(true))
       }
-      return Promise.resolve(null)
+      // Queue inside the download slice instead of rejecting: a client bulk-
+      // loading media issues far more concurrent ranges than the slice, and a
+      // fast SERVER_BUSY turns every one of them into a slow retry loop. The
+      // queue is private to downloads, so connect-time RPCs are never delayed.
+      if (this._downloadRpcWaiters.length >= MAX_PENDING_DOWNLOAD_RPCS_PER_CONNECTION) {
+        return Promise.resolve(null)
+      }
+      return new Promise(resolve => this._downloadRpcWaiters.push(resolve))
     }
     if (this._activeRpcCount < MAX_ACTIVE_RPCS_PER_CONNECTION) {
       this._activeRpcCount += 1
@@ -1763,14 +1769,38 @@ export class ServerSession {
     return () => {
       if (released) return
       released = true
-      if (isDownload) this._activeDownloadRpcCount = Math.max(0, this._activeDownloadRpcCount - 1)
-      const next = this._rpcWaiters.shift()
-      if (next && !this._disposed && !this._connection.closed) {
-        next(this._rpcSlotRelease(false))
+      const closed = this._disposed || this._connection.closed
+      if (isDownload) {
+        const downloadWaiter = !closed && this._downloadRpcWaiters.shift()
+        if (downloadWaiter) {
+          downloadWaiter(this._rpcSlotRelease(true))
+          return
+        }
+        const generalWaiter = !closed && this._rpcWaiters.shift()
+        if (generalWaiter) {
+          // The freed download slot becomes a general slot for the waiter.
+          this._activeDownloadRpcCount = Math.max(0, this._activeDownloadRpcCount - 1)
+          generalWaiter(this._rpcSlotRelease(false))
+          return
+        }
       } else {
-        this._activeRpcCount = Math.max(0, this._activeRpcCount - 1)
-        next?.(null)
+        const generalWaiter = !closed && this._rpcWaiters.shift()
+        if (generalWaiter) {
+          generalWaiter(this._rpcSlotRelease(false))
+          return
+        }
+        const downloadWaiter = !closed && this._activeDownloadRpcCount < MAX_ACTIVE_DOWNLOAD_RPCS_PER_CONNECTION
+          ? this._downloadRpcWaiters.shift()
+          : undefined
+        if (downloadWaiter) {
+          // The freed general slot becomes a download slot for the waiter.
+          this._activeDownloadRpcCount += 1
+          downloadWaiter(this._rpcSlotRelease(true))
+          return
+        }
       }
+      this._activeRpcCount = Math.max(0, this._activeRpcCount - 1)
+      if (isDownload) this._activeDownloadRpcCount = Math.max(0, this._activeDownloadRpcCount - 1)
       if (this._rpcReadPaused && this._rpcWaiters.length <= RPC_READ_RESUME_THRESHOLD) {
         this._rpcReadPaused = false
         if (!this._frameReadPaused) this._connection.resumeReading()
@@ -1780,6 +1810,7 @@ export class ServerSession {
 
   private _releasePendingRpcWaiters(): void {
     for (const resolve of this._rpcWaiters.splice(0)) resolve(null)
+    for (const resolve of this._downloadRpcWaiters.splice(0)) resolve(null)
     this._activeRpcCount = 0
     this._activeDownloadRpcCount = 0
     this._rpcReadPaused = false
