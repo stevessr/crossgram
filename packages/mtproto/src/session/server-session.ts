@@ -44,9 +44,11 @@ const MAX_PENDING_RPCS_PER_CONNECTION = 64
  * Slow streaming downloads (upload.getFile) run for seconds each; a reconnect
  * burst of them must not consume the whole per-connection RPC budget, or the
  * connect-time handshake RPCs starve, the client sees no progress, and drops
- * into a reconnect loop. Downloads get a small dedicated slice instead.
+ * into a reconnect loop. Downloads get a dedicated slice: half of the general
+ * budget, which still leaves eight slots for connect-time work while doubling
+ * media throughput against a ~1s-per-file upstream.
  */
-const MAX_ACTIVE_DOWNLOAD_RPCS_PER_CONNECTION = 4
+const MAX_ACTIVE_DOWNLOAD_RPCS_PER_CONNECTION = 8
 const RPC_READ_PAUSE_THRESHOLD = 32
 const RPC_READ_RESUME_THRESHOLD = 16
 const FRAME_READ_PAUSE_COUNT = 32

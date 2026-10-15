@@ -703,8 +703,8 @@ describe('ServerSession decrypted RPC queue', () => {
       } as never,
       Long.fromInt(9),
     ))
-    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(4))
-    // The four in-flight downloads must not block a connect-time RPC.
+    await vi.waitFor(() => expect(dispatch).toHaveBeenCalledTimes(8))
+    // The eight in-flight downloads must not block a connect-time RPC.
     await expect(internal._handleRpcCall(
       Long.fromInt(3_000), { _: 'help.getNearestDc' } as never, Long.fromInt(9),
     )).resolves.toBeUndefined()

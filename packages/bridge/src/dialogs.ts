@@ -3231,7 +3231,25 @@ export class DialogRpc {
     }
   }
 
+  private readonly _inflightMediaDownloads = new Map<string, Promise<Uint8Array>>()
+
   private async _downloadMediaRange(media: IMMedia<any>, offset: number, limit: number): Promise<Uint8Array> {
+    if (!this._platform.downloadMedia) throw new RpcError(400, 'FILE_DOWNLOAD_UNAVAILABLE')
+    // Telegram clients commonly issue the same file range several times in a
+    // burst (sticker grids, TDLib range retries). Coalesce concurrent
+    // identical ranges so the upstream - a slow Matrix homeserver - serves
+    // each unique range once. Entries exist only while the download runs.
+    const key = `${media.id}\0${offset}\0${limit}`
+    const pending = this._inflightMediaDownloads.get(key)
+    if (pending) return pending
+    const download = this._downloadMediaRangeOnce(media, offset, limit).finally(() => {
+      if (this._inflightMediaDownloads.get(key) === download) this._inflightMediaDownloads.delete(key)
+    })
+    this._inflightMediaDownloads.set(key, download)
+    return download
+  }
+
+  private async _downloadMediaRangeOnce(media: IMMedia<any>, offset: number, limit: number): Promise<Uint8Array> {
     if (!this._platform.downloadMedia) throw new RpcError(400, 'FILE_DOWNLOAD_UNAVAILABLE')
     const chunks: Uint8Array[] = []
     let size = 0

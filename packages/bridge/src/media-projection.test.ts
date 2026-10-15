@@ -1080,6 +1080,49 @@ describe('rich-media projection', () => {
     ]))
   })
 
+  it('coalesces concurrent identical getFile ranges into one upstream download', async () => {
+    const { store, peerId } = await createStore()
+    let downloads = 0
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const gatedPlatform: IMPlatform = {
+      ...platform,
+      async *downloadMedia(session_, media, options) {
+        downloads += 1
+        await gate
+        yield* platform.downloadMedia!(session_, media, options)
+      },
+    }
+    const uploadPath = await mkdtemp(join(tmpdir(), 'bridge-media-coalesce-'))
+    disposals.push(() => rm(uploadPath, { recursive: true, force: true }))
+    const rpc = new DialogRpc(gatedPlatform, session, store, new UploadManager(uploadPath))
+    const history = await rpc.getHistory(historyRequest(peerId)) as tl.messages.RawMessages
+    const media = history.messages
+      .filter((message) => message._ === 'message')
+      .map((message) => (message as tl.RawMessage).media)
+      .find((item): item is tl.RawMessageMediaDocument =>
+        item?._ === 'messageMediaDocument' && item.document?._ === 'document')
+    if (!media || media.document?._ !== 'document') throw new Error('expected projected document')
+    const location = {
+      _: 'inputDocumentFileLocation' as const, id: media.document.id,
+      accessHash: media.document.accessHash, fileReference: media.document.fileReference, thumbSize: '',
+    }
+    const request = {
+      _: 'upload.getFile' as const, precise: false, cdnSupported: false, location, offset: 0, limit: 1024,
+    }
+    const pending = Promise.all([rpc.getFile(request), rpc.getFile(request)])
+    release()
+    const [first, second] = await pending
+    // Both consumers share one upstream download of the same range.
+    expect(downloads).toBe(1)
+    if (first._ !== 'upload.file' || second._ !== 'upload.file') throw new Error('expected files')
+    expect(new TextDecoder().decode(first.bytes)).toBe('document')
+    expect(new TextDecoder().decode(second.bytes)).toBe('document')
+    // A different range is a distinct download.
+    await rpc.getFile({ ...request, offset: 1 })
+    expect(downloads).toBe(2)
+  })
+
   it('serves an advertised native photo preview for Telegram thumb_size m requests', async () => {
     const { store, peerId } = await createStore()
     const uploadPath = await mkdtemp(join(tmpdir(), 'bridge-preview-'))
