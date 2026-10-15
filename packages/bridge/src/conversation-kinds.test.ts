@@ -2239,6 +2239,44 @@ describe('conversation kinds', () => {
     }
   })
 
+  it('self-heals a forum topic whose seed sender is missing from the projection cache', async () => {
+    const { rpc, store } = await createRpc()
+    await rpc.getDialogs(dialogsRequest())
+    // Ingest the subchannel history so the topic seed is served from the
+    // stored projection instead of a live history load.
+    const subchannel = conversations.find((item) => item.id === 'subchannel')!
+    const ingested = await store.ingest(session, subchannel, source(subchannel))
+    const seedTlId = ingested.projection[0]!.tlMessageId
+
+    const parentPeer = {
+      _: 'inputPeerChannel' as const, channelId: peerTlId('parent-channel'), accessHash: Long.ONE,
+    }
+    // Previously this threw 500 INTERNAL "platform user was not persisted
+    // before projection", stalling the client's sync loop on every retry.
+    const byId = await rpc.getForumTopics({
+      _: 'messages.getForumTopicsByID', peer: parentPeer, topics: [seedTlId],
+    })
+    expect(byId).toMatchObject({
+      _: 'messages.forumTopics', count: 1,
+      topics: [{ id: seedTlId, title: 'Discord / support' }],
+    })
+    expect(() => roundTrip(byId)).not.toThrow()
+  })
+
+  it('projects stored history whose sender row was purged from the user table', async () => {
+    const { ctx, rpc, store } = await createRpc()
+    await rpc.getDialogs(dialogsRequest())
+    const group = conversations.find((item) => item.id === 'group')!
+    const ingested = await store.ingest(session, group, source(group))
+    // Drop every user row: the durable history now references a sender the
+    // user table no longer knows about (deleted platform account).
+    await ctx.database.remove('mtproto_im_user', {})
+    const history = await rpc.getHistory(historyRequest({
+      _: 'inputPeerChannel', channelId: peerTlId('group'), accessHash: Long.ZERO,
+    })) as tl.messages.RawChannelMessages
+    expect(history.messages.some((message) => message.id === ingested.projection[0]!.tlMessageId)).toBe(true)
+  })
+
   it('shows empty Space child channels as accessible Telegram forum topics', async () => {
     const emptyChildPlatform: IMPlatform = {
       ...platform,

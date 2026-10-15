@@ -799,7 +799,10 @@ export class MessageStore {
     const sendersById = new Map(senders.map((sender) => [sender.id, sender]))
     return rows.map((row) => {
       const sender = sendersById.get(row.senderUserId)
-      if (!sender) throw new Error(`message references missing user ${row.senderUserId}`)
+        // Self-heal a purged/deleted platform user instead of failing the
+        // whole history read: the placeholder keeps a deterministic platform
+        // id so downstream TL id allocation stays stable across restarts.
+        ?? placeholderUserRow(row.senderUserId)
       return {
         source: hydrateMessage(
           row,
@@ -838,8 +841,8 @@ export class MessageStore {
     const conversationsById = new Map(conversations.map((conversation) => [conversation.id, conversation]))
     return rows.map((row) => {
       const sender = sendersById.get(row.senderUserId)
+        ?? placeholderUserRow(row.senderUserId)
       const conversation = conversationsById.get(row.conversationId)
-      if (!sender) throw new Error(`message references missing user ${row.senderUserId}`)
       if (!conversation) throw new Error(`message references missing conversation ${row.conversationId}`)
       return {
         source: hydrateMessage(
@@ -2134,7 +2137,7 @@ export class MessageStore {
     }
     return rows.map((row) => {
       const sender = sendersById.get(row.senderUserId)
-      if (!sender) throw new Error(`message references missing user ${row.senderUserId}`)
+        ?? placeholderUserRow(row.senderUserId)
       const conversationId = conversationIds.get(row.conversationId)
       if (!conversationId) throw new Error(`message references missing conversation ${row.conversationId}`)
       return hydrateMessage(
@@ -2503,6 +2506,19 @@ export function toUser(row: IMUserRow): IMUser {
 
 function uniquePlatformUsers(users: readonly IMUser[]): IMUser[] {
   return [...new Map(users.map((user) => [user.id, user])).values()]
+}
+
+/**
+ * A message whose sender row was purged (deleted platform user) still needs
+ * to project. The placeholder keeps the numeric row id as a deterministic
+ * platform id so TL id allocation stays stable across restarts.
+ */
+function placeholderUserRow(senderUserId: number): IMUserRow {
+  return {
+    id: senderUserId, platformId: '', platformUserId: `deleted:${senderUserId}`,
+    firstName: 'Deleted User', lastName: null, username: null, avatar: null,
+    metadata: {}, updatedAt: new Date(0),
+  }
 }
 
 function messageSender(message: IMMessage): IMUser {

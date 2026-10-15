@@ -4705,13 +4705,14 @@ export class DialogRpc {
   private _userId(platformUserId: string): number {
     const id = this._userToTl.get(platformUserId)
     if (id !== undefined) return id
-    if (!this._store) {
-      const allocated = this._allocate(peerTlSeed(this._session.platformSessionId, platformUserId), this._tlToUser)
-      this._userToTl.set(platformUserId, allocated)
-      this._tlToUser.set(allocated, platformUserId)
-      return allocated
-    }
-    throw new Error(`platform user was not persisted before projection: ${platformUserId}`)
+    // Self-heal instead of failing the whole RPC: a projection may reference
+    // a user whose durable row is gone (deleted platform user, historical
+    // message from a pruned sync). Allocate the deterministic seed id so the
+    // projection stays stable across restarts, exactly like the store-less path.
+    const allocated = this._allocate(peerTlSeed(this._session.platformSessionId, platformUserId), this._tlToUser)
+    this._userToTl.set(platformUserId, allocated)
+    this._tlToUser.set(allocated, platformUserId)
+    return allocated
   }
 
   private async _hydratePeers(force = false): Promise<void> {
@@ -6156,6 +6157,9 @@ export class DialogRpc {
     // Telegram still needs a topic seed to display and open them.
     const top = history[0] ?? this._emptyTopicSeed(child)
     const oldest = history.at(-1) ?? top
+    // The seed sender must be mapped before projection; other history paths
+    // perform the same hydration step (see _syncStoredUsers callers).
+    await this._syncStoredUsers([oldest.source.senderId])
     // A previously advertised topic ID must survive the first real message
     // (or a subsequent history backfill). Otherwise Telegram's stored topic
     // references break when an initially empty Space child starts receiving data.
