@@ -816,6 +816,23 @@ export class StickerRpc {
     } else if (input._ === 'inputStickerSetShortName') {
       const found = packs.find(({ pack }) => this._shortName(pack) === input.shortName)
       if (found) return { providerId: found.providerId, packId: found.pack.packId }
+      // No installed pack carries this short name: ask on-demand providers
+      // (e.g. the official Bot API catalog) to resolve it live.
+      for (const [providerId, provider] of this._registry.entries) {
+        if (!provider.resolveShortName) continue
+        const pack = await provider.resolveShortName(this._context(), input.shortName).catch(() => null)
+        if (!pack) continue
+        const packId = pack.packId
+        const setId = this._setId(providerId, packId)
+        this._sets.set(setId, { providerId, packId })
+        // Persist the identity so a later request by Telegram set id (and a
+        // restart) can resolve the same set without the Bot API round-trip.
+        await this._database.upsert('mtproto_sticker_set_reference', [{
+          platformSessionId: this._session.platformSessionId, setId: setId.toString(),
+          providerId, providerPackId: packId,
+        }], ['platformSessionId', 'setId'])
+        return { providerId, packId }
+      }
     }
     // Carry the requested identity in the error text: the journal logs the
     // rpc_error message verbatim, which is how a client's dangling set

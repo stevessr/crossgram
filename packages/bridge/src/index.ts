@@ -16,6 +16,9 @@ import {
   type LegacyGetForumTopicsByIdRequest, type LegacyGetForumTopicsRequest,
 } from './dialogs.js'
 import { startupRpcHandlers } from './startup.js'
+import {
+  TELEGRAM_OFFICIAL_STICKER_PROVIDER_ID, TelegramOfficialStickerProvider,
+} from './official-stickers.js'
 import { androidRpcHandlers } from './android-rpc.js'
 import { MessageStore } from './message-store.js'
 import {
@@ -136,6 +139,14 @@ export interface BridgeConfig {
   uploadPath?: string
   /** Mute group chats by default unless the Telegram user explicitly enables them. */
   autoMuteGroupChats?: boolean
+  /**
+   * Telegram Bot token for the on-demand official sticker catalog. When set,
+   * getStickerSet requests for unknown short names resolve live through the
+   * Bot API instead of failing with STICKERSET_INVALID.
+   */
+  officialStickerBotToken?: string
+  /** Base URL of a hosted or local Telegram Bot API server. */
+  officialStickerApiBase?: string
   /** Visibility policy for users blocked through Telegram. */
   blockedContentMode?: BlockedContentMode
   /** Whether QQ recalled messages remain visible as marked messages or are hidden. */
@@ -195,6 +206,10 @@ export const Config = z.object({
   }),
   uploadPath: z.string().default('data/bridge-uploads'),
   autoMuteGroupChats: z.boolean().default(true),
+  officialStickerBotToken: z.string().role('secret').default('')
+    .description('Telegram Bot token enabling the on-demand official sticker catalog.'),
+  officialStickerApiBase: z.string().default('https://api.telegram.org')
+    .description('Base URL of the hosted or local Telegram Bot API server.'),
   blockedContentMode: z.union([
     z.const('show'), z.const('hide-user'), z.const('hide-related'),
   ]).default('hide-user'),
@@ -231,6 +246,12 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const generation = {}
   const platforms = new IMPlatformService(ctx)
   const stickerProviders = new IMStickerService(ctx)
+  if (config.officialStickerBotToken) {
+    stickerProviders.register(
+      new TelegramOfficialStickerProvider(config.officialStickerBotToken, config.officialStickerApiBase),
+      TELEGRAM_OFFICIAL_STICKER_PROVIDER_ID,
+    )
+  }
   const resources = new TelegramResourceService(ctx)
   const systemPeers = new SystemPeerService(ctx)
   new SpeechPipeline(ctx)

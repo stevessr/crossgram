@@ -138,6 +138,12 @@ export interface IMStickerProvider {
     context: StickerProviderContext,
     sticker: IMSticker,
   ): Promise<IMDirectDownload | undefined>
+  /**
+   * Resolve a Telegram set short name on demand (getStickerSet by short
+   * name). Used as a fallback when no installed pack carries the short
+   * name, e.g. an official Bot API-backed catalog.
+   */
+  resolveShortName?(context: StickerProviderContext, shortName: string): Promise<IMStickerPack | null>
   /** Open the static thumbnail advertised by IMSticker.thumbnail. */
   openThumbnail?(context: StickerProviderContext, sticker: IMSticker): Promise<IMStickerAsset | null>
   prepareSend?(

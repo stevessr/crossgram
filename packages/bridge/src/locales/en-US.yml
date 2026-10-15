@@ -7,6 +7,8 @@ onDemandLoginCodes: Issue login codes only on Telegram or WebUI requests instead
 groupFilesMiniApp: Telegram attachment-menu Mini App used to browse platform-native group files.
 uploadPath: Directory used to store uploads received from Telegram clients.
 autoMuteGroupChats: Mute group chats by default; per-chat Telegram settings can override this.
+officialStickerBotToken: "Telegram Bot token; when set, requests for official sticker sets resolve live through the Bot API."
+officialStickerApiBase: Base URL of the Telegram Bot API server used for official stickers.
 blockedContentMode: "Blocked-user visibility: show keeps Telegram's default group behavior; hide-user hides their messages and reactions; hide-related also hides messages replying to or mentioning them."
 recalledMessageMode: "QQ recalled-message visibility: show keeps the message with a recalled marker; hide removes it from visible history."
 voiceWorkerSocketPath: Local Unix socket path for the Rust voice worker; leave empty to disable voice calls.
