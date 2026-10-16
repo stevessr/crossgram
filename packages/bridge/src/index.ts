@@ -34,6 +34,7 @@ import { TelegramResourceService } from './resource-provider.js'
 import {
   migrateLegacyVirtualPhones, PlatformAccountProvisioner, type ProvisionedPlatformAccount,
 } from './platform-account.js'
+import { registerMatrixLoginRoute } from './matrix-login.js'
 import { ON_DEMAND_LOGIN_CODE_TTL_MS, OnDemandLoginCodeStore, verifyLoginCode } from './login-code.js'
 import {
   SRP_PRIME_HEX, SrpChallengeStore, generateSrpVerifier, isValidSrpVerifier, verifySrpChallenge,
@@ -855,6 +856,11 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     }
     res.json({ ok: true })
   })
+
+  // Browser CORS blocks direct homeserver logins, so password and SSO token
+  // exchanges run through the relay. Credentials are forwarded once and never
+  // stored server-side; the browser writes the token via the loader boundary.
+  registerMatrixLoginRoute(ctx, apiPrefix)
 
   ctx.server.get(`${apiPrefix}/platforms/:platform/avatar`, async (req, res) => {
     const platformId = (req.params as { platform: string }).platform
