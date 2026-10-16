@@ -848,6 +848,25 @@ describe('e2e: obfuscated transport + PFS + RPC', () => {
     }
   })
 
+  it('returns Matrix Space folder titles to a layer-193 client and permits subsequent difference requests', async () => {
+    await crypto.initialize?.()
+    const { port, pubKey, register, stop } = await startServer()
+    register('messages.getDialogFilters', async () => ({ _: 'messages.dialogFilters', filters: [{
+      _: 'dialogFilter', id: 2, title: { _: 'textWithEntities', text: 'Matrix Space', entities: [] }, pinnedPeers: [], includePeers: [], excludePeers: [],
+    }] }) as never)
+    register('updates.getDifference', async () => ({ _: 'updates.differenceEmpty', date: 1700000000, seq: 1 }))
+    const client = await TestClient.connect(port)
+    try {
+      const perm = await doClientHandshake(client, pubKey, false)
+      const session = Long.fromInt(1235)
+      const readers = { ...__tlReaderMap, ...getApiLayerReaderMap(193) }
+      await client.send(clientEncrypt(perm, serializeInitializedRpc({ _: 'messages.getDialogFilters' }, 193), perm.salt, session, 1))
+      expect(await within(readRpcResult(client, perm, readers), 3000, 'folder response')).toMatchObject({ _: 'messages.dialogFilters', filters: [{ title: 'Matrix Space' }] })
+      await client.send(clientEncrypt(perm, serializeInitializedRpc({ _: 'updates.getDifference', pts: 1, date: 1700000000, qts: 0 }, 193), perm.salt, session, 3))
+      expect(await within(readRpcResult(client, perm, readers), 3000, 'difference response')).toMatchObject({ _: 'updates.differenceEmpty' })
+    } finally { client.close(); await stop() }
+  })
+
   it('answers a malformed result with an RPC error and keeps the encrypted connection usable', async () => {
     await crypto.initialize?.()
     const { port, pubKey, register, stop } = await startServer()

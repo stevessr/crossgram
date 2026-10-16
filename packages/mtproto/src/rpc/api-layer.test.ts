@@ -44,6 +44,32 @@ const message = {
 } as tl.RawMessage & { toId: { _: 'peerUser', userId: number } }
 
 describe('API layer response writers', () => {
+  it.each([193, 198, 200])('downgrades rich folder titles according to layer %i without mutating cached values', (layer) => {
+    const input = { _: 'messages.dialogFilters', filters: [
+      { _: 'dialogFilter', id: 2, title: { _: 'textWithEntities', text: '😀 Space', entities: [] }, pinnedPeers: [], includePeers: [], excludePeers: [] },
+      { _: 'dialogFilterChatlist', id: 3, title: { _: 'textWithEntities', text: 'Shared', entities: [] }, pinnedPeers: [], includePeers: [] },
+    ] }
+    const adapted = getApiLayerResponseAdapter(layer).adapt(input)
+    const bytes = TlBinaryWriter.serializeObject(getApiLayerWriterMap(__tlWriterMap, layer), adapted)
+    const restored = new TlBinaryReader(getApiLayerReaderMap(layer)!, bytes).object() as any
+    // The selected schema, not the client's brand, decides the title shape.
+    const oldSchema = readFileSync(resolve(schemaDirectory, schemaManifest.layers[String(resolveApiSchemaLayer(layer))].file), 'utf8')
+    const expectsString = /^dialogFilter#.*title:string/mu.test(oldSchema)
+    expect(restored.filters[0].title).toEqual(expectsString ? '😀 Space' : input.filters[0].title)
+    expect(restored.filters[1].title).toEqual(expectsString ? 'Shared' : input.filters[1].title)
+    expect(input.filters[0].title).toMatchObject({ _: 'textWithEntities', text: '😀 Space' })
+    expect(getApiLayerResponseAdapter(CURRENT_API_LAYER).adapt(input).filters[0].title).toEqual(input.filters[0].title)
+  })
+
+  it('adapts nested legacy folder updates and chatlist invites but leaves unrelated strings untouched', () => {
+    const title = { _: 'textWithEntities', text: 'Space', entities: [] }
+    const input = [{ _: 'updateDialogFilter', filter: { _: 'dialogFilter', title } }, { _: 'chatlists.chatlistInvite', title }, { _: 'user', firstName: title }]
+    const adapted = getApiLayerResponseAdapter(193).adapt(input) as any[]
+    expect(adapted[0].filter.title).toBe('Space')
+    expect(adapted[1].title).toBe('Space')
+    expect(adapted[2].firstName).toBe(title)
+  })
+
   it('loads the pre-generated historical reader union once', () => {
     const first = getHistoricalApiLayerReaderMap()
     const second = getHistoricalApiLayerReaderMap()
@@ -327,67 +353,5 @@ describe('API layer response downgrade', () => {
         ] }],
       } }],
     })
-  })
-
-  it('converts TextWithEntities folder titles to strings for legacy schemas', () => {
-    const adapter = getApiLayerResponseAdapter(193)
-    expect(adapter.schemaLayer).toBe(193)
-    const response = {
-      _: 'messages.dialogFilters',
-      filters: [
-        { _: 'dialogFilterDefault' },
-        {
-          _: 'dialogFilter', id: 2, title: { _: 'textWithEntities', text: 'Space', entities: [] },
-          pinnedPeers: [], includePeers: [], excludePeers: [],
-        },
-        {
-          _: 'dialogFilterChatlist', id: 3, title: { _: 'textWithEntities', text: 'Group', entities: [] },
-          pinnedPeers: [], includePeers: [], excludePeers: [],
-        },
-      ],
-    } as unknown as tl.messages.RawDialogFilters
-
-    // The legacy wire shape (string titles) is not representable in the
-    // current typings, so read the converted fields through a structural view.
-    const adapted = adapter.adapt(response) as unknown as { filters: Array<{ title: unknown }> }
-    expect(adapted.filters[1]?.title).toBe('Space')
-    expect(adapted.filters[2]?.title).toBe('Group')
-  })
-
-  it('serializes an adapted folder list that a layer 193 client can parse', () => {
-    const adapter = getApiLayerResponseAdapter(193)
-    const response = {
-      _: 'messages.dialogFilters',
-      filters: [
-        { _: 'dialogFilterDefault' },
-        {
-          _: 'dialogFilter', id: 2, title: { _: 'textWithEntities', text: 'Space', entities: [] },
-          pinnedPeers: [], includePeers: [], excludePeers: [],
-        },
-      ],
-    } as unknown as tl.messages.RawDialogFilters
-
-    // Without the downgrade the layer-229 TextWithEntities title reaches a
-    // string field and the whole getDialogFilters answer fails to serialize.
-    const writer = getApiLayerWriterMap(__tlWriterMap, 193)
-    expect(() => TlBinaryWriter.serializeObject(writer, response)).toThrow()
-
-    const bytes = TlBinaryWriter.serializeObject(writer, adapter.adapt(response))
-    const decoded = new TlBinaryReader(getApiLayerReaderMap(193)!, bytes).object() as unknown as tl.messages.RawDialogFilters
-    expect(decoded._).toBe('messages.dialogFilters')
-    expect(decoded.filters[0]).toEqual({ _: 'dialogFilterDefault' })
-    expect(decoded.filters[1]).toMatchObject({
-      _: 'dialogFilter', id: 2, title: 'Space', pinnedPeers: [], includePeers: [], excludePeers: [],
-    })
-  })
-
-  it('keeps folder titles untouched for clients on the newest schema', () => {
-    const adapter = getApiLayerResponseAdapter(CURRENT_API_LAYER)
-    expect(adapter.schemaLayer).toBe(CURRENT_API_LAYER)
-    const filter = {
-      _: 'dialogFilter', id: 2, title: { _: 'textWithEntities', text: 'Space', entities: [] },
-      pinnedPeers: [], includePeers: [], excludePeers: [],
-    }
-    expect(adapter.adapt(filter)).toBe(filter)
   })
 })
