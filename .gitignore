@@ -15,6 +15,10 @@ external
 !.yarn/sdks
 !.yarn/versions
 
+# Local scratch: ad-hoc probes and agent workspace files.
+/.omp/
+/work/
+
 package-lock.json
 pnpm-lock.yaml
 node_modules
