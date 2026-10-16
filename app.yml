@@ -142,6 +142,12 @@
         path: ./data/cordis.db
         journalMode: wal
         busyTimeout: 5000
+        # `normal` drops the fsync of every WAL commit (see the driver patch in
+        # .yarn/patches); the two size limits bound the adaptive cache and the
+        # memory-mapped window on a small host.
+        synchronous: normal
+        cacheSizeKiB: 32768
+        mmapSizeMiB: 192
     - id: 0cb55d6c
       name: '@cordisjs/plugin-database-mysql'
       disabled: true

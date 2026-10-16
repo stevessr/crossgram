@@ -47,6 +47,8 @@ describe('Crossgram Linux deployment', () => {
     expect(unit).toContain('NoNewPrivileges=true')
     expect(unit).toContain('ProtectSystem=full')
     expect(unit).toContain('ReadWritePaths=/var/lib/crossgram /opt/crossgram/.runtime')
+    expect(unit).toContain('IOSchedulingClass=best-effort')
+    expect(unit).toContain('IOSchedulingPriority=0')
 
     const config = readFileSync(join(root, 'deploy', 'app.production.yml'), 'utf8')
     expect(config).toContain('host: 0.0.0.0')

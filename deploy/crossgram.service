@@ -18,6 +18,12 @@ ExecStart=/usr/bin/env corepack yarn cordis run /opt/crossgram/.runtime/app.yml
 Restart=always
 RestartSec=5s
 TimeoutStopSec=30s
+# A relay keeps very little data in flight, so its latency is decided by where
+# its few reads and writes land in the block layer's queue. On a host that
+# shares one disk with bulk tenants, best-effort class at priority 0 keeps a
+# Telegram request from waiting behind someone else's backup write.
+IOSchedulingClass=best-effort
+IOSchedulingPriority=0
 UMask=0077
 NoNewPrivileges=true
 PrivateTmp=true
