@@ -17,7 +17,8 @@ interface PageMeta {
   path: string
   title: string
   icon: string
-  group: string
+  group?: string
+  hidden?: boolean
 }
 export interface RegisteredPage extends PageMeta {
   entryId: string
@@ -25,6 +26,7 @@ export interface RegisteredPage extends PageMeta {
   /** Human label for the plugin that contributes the page. */
   source: string
 }
+
 const known: Record<string, PageMeta[]> = {
   loader: [
     { path: '/plugins', title: 'Plugins', icon: 'plugins', group: 'Manage' },
@@ -148,7 +150,7 @@ export function listPages(
       })
     }
   }
-  return pages.sort((left, right) => orderOf(left.group) - orderOf(right.group))
+  return pages.sort((left, right) => orderOf(left.group ?? 'Extensions') - orderOf(right.group ?? 'Extensions'))
 }
 
 const extensions = new Map<

@@ -1,10 +1,10 @@
 /** @jsxImportSource solid-js */
-import { createMemo, createSignal, For, Show } from 'solid-js'
+import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 import { Modal, ActionError, useAction } from 'cordis-webui-solidjs/components'
 import { useConnection } from 'cordis-webui-solidjs/client'
 import {
-  ACCOUNT_PROVIDERS, buildAccountConfiguration, createPlatformPlugin,
-  findLoaderEntry, initialAccountDraft,
+  ACCOUNT_PROVIDERS, beginMatrixSso, buildAccountConfiguration, consumeMatrixSsoState,
+  createPlatformPlugin, findLoaderEntry, initialAccountDraft, matrixAccountLogin,
   type AccountDraft, type AccountPlatform,
 } from './account-creation-model.js'
 
@@ -58,6 +58,118 @@ export default function AddAccount(props: {
   const change = (key: keyof AccountDraft, value: string) =>
     setDraft((current) => ({ ...current, [key]: value }))
   const disabled = () => action.busy()
+  const [matrixMethod, setMatrixMethod] = createSignal<'password' | 'sso' | 'token'>('password')
+  const [matrixBusy, setMatrixBusy] = createSignal(false)
+  const [matrixError, setMatrixError] = createSignal('')
+  const [matrixNotice, setMatrixNotice] = createSignal('')
+  const matrixStatus = () => matrixError() || matrixNotice()
+  const matrixLoginDisabled = () => disabled() || matrixBusy() || !draft().homeserver.trim()
+  const resetMatrixMessages = () => {
+    setMatrixError('')
+    setMatrixNotice('')
+  }
+
+  const applyLoginResult = (result: { userId: string, deviceId: string }) => {
+    setDraft((current) => ({
+      ...current,
+      accessToken: current.accessToken,
+      userId: result.userId || current.userId,
+    }))
+    setMatrixNotice('登录成功，已获取访问令牌。')
+  }
+
+  const matrixPasswordLogin = async () => {
+    resetMatrixMessages()
+    if (!draft().userId.trim() || !draft().matrixPassword) {
+      setMatrixError('请填写 Matrix 用户名与密码。')
+      return
+    }
+    setMatrixBusy(true)
+    try {
+      const draftSnapshot = { ...draft() }
+      await matrixAccountLogin(draftSnapshot, 'password')
+      // The helper wrote the token into its snapshot; carry it over.
+      setDraft((current) => ({
+        ...current,
+        accessToken: draftSnapshot.accessToken,
+        userId: draftSnapshot.userId || current.userId,
+      }))
+      setMatrixNotice('登录成功，已获取访问令牌。')
+    } catch (error) {
+      setMatrixError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setMatrixBusy(false)
+    }
+  }
+
+  const ssoWindow = new AbortController()
+  const onSsoMessage = (event: MessageEvent) => {
+    if (event.origin !== location.origin) return
+    const data = event.data as {
+      source?: unknown, state?: unknown, loginToken?: unknown,
+    } | undefined
+    if (data?.source !== 'crossgram-matrix-sso') return
+    const state = consumeMatrixSsoState(typeof data.state === 'string' ? data.state : undefined)
+    if (state === 'missing' || state === 'expired') {
+      setMatrixError('SSO 回调状态无效或已过期，请重新发起登录。')
+      setMatrixBusy(false)
+      return
+    }
+    const loginToken = typeof data.loginToken === 'string' ? data.loginToken : ''
+    if (!loginToken) {
+      setMatrixError('回调未携带一次性登录令牌，请重新发起。')
+      setMatrixBusy(false)
+      return
+    }
+    window.removeEventListener('message', onSsoMessage)
+    ssoWindow.abort()
+    setMatrixBusy(true)
+    void action.run(async () => {
+      const draftSnapshot = { ...draft() }
+      const result = await matrixAccountLogin(draftSnapshot, 'sso', loginToken)
+      setDraft((current) => ({
+        ...current,
+        accessToken: draftSnapshot.accessToken,
+        userId: result.userId || current.userId,
+      }))
+      setMatrixNotice('SSO 登录成功，已获取访问令牌。')
+      event.source?.postMessage?.({ source: 'crossgram-matrix-sso-result', ok: true }, { targetOrigin: location.origin })
+    }).catch((error) => {
+      setMatrixError(error instanceof Error ? error.message : String(error))
+      event.source?.postMessage?.({
+        source: 'crossgram-matrix-sso-result', ok: false,
+        message: error instanceof Error ? error.message : String(error),
+      }, { targetOrigin: location.origin })
+    }).finally(() => setMatrixBusy(false))
+  }
+
+  const startMatrixSso = () => {
+    resetMatrixMessages()
+    if (!draft().homeserver.trim()) {
+      setMatrixError('请先填写 Matrix 服务器地址。')
+      return
+    }
+    window.removeEventListener('message', onSsoMessage)
+    window.addEventListener('message', onSsoMessage)
+    setMatrixBusy(true)
+    setMatrixNotice('已打开登录窗口，等待身份提供方回调…')
+    const popup = window.open(
+      beginMatrixSso(draft().homeserver, connection.config.uiPath ?? ''),
+      'crossgram-matrix-sso',
+      'width=520,height=680',
+    )
+    if (!popup) {
+      setMatrixError('浏览器拦截了弹出窗口，请允许弹出后重试。')
+      setMatrixBusy(false)
+      window.removeEventListener('message', onSsoMessage)
+    }
+  }
+
+  onCleanup(() => {
+    window.removeEventListener('message', onSsoMessage)
+    ssoWindow.abort()
+  })
+
   const submit = () => {
     setTouched(true)
     if (issue() || !loaderId()) return
@@ -114,10 +226,53 @@ export default function AddAccount(props: {
         <Show when={draft().platform === 'matrix'}>
           <Field label="Matrix Homeserver" value={draft().homeserver} disabled={disabled()}
             onInput={(value) => change('homeserver', value)} placeholder="https://matrix.example.org" />
-          <Field label="Matrix Access Token" value={draft().accessToken} secret disabled={disabled()}
-            onInput={(value) => change('accessToken', value)} />
-          <Field label="Matrix 用户 ID（可选）" value={draft().userId} disabled={disabled()}
-            onInput={(value) => change('userId', value)} placeholder="@alice:example.org" />
+          <div class="matrix-login-methods" role="radiogroup" aria-label="Matrix 登录方式">
+            <button type="button" class="button outlined" disabled={disabled()}
+              aria-pressed={matrixMethod() === 'password'}
+              onClick={() => setMatrixMethod('password')}>账号密码登录</button>
+            <button type="button" class="button outlined" disabled={disabled()}
+              aria-pressed={matrixMethod() === 'sso'}
+              onClick={() => setMatrixMethod('sso')}>SSO 回调登录</button>
+            <button type="button" class="button outlined" disabled={disabled()}
+              aria-pressed={matrixMethod() === 'token'}
+              onClick={() => setMatrixMethod('token')}>粘贴访问令牌</button>
+          </div>
+          <Show when={matrixMethod() === 'password'}>
+            <Field label="Matrix 用户名" value={draft().userId} disabled={disabled()}
+              onInput={(value) => change('userId', value)} placeholder="@alice:example.org"
+              hint="完整 Matrix ID，例如 @alice:example.org。" />
+            <Field label="Matrix 密码" value={draft().matrixPassword} secret disabled={disabled()}
+              onInput={(value) => change('matrixPassword', value)}
+              hint="仅用于向 Homeserver 换取访问令牌，CrossGram 不会保存密码。" />
+            <button type="button" class="button filled" disabled={matrixLoginDisabled()}
+              onClick={() => void matrixPasswordLogin()}>
+              {matrixBusy() ? '正在登录…' : '登录并获取令牌'}
+            </button>
+          </Show>
+          <Show when={matrixMethod() === 'sso'}>
+            <button type="button" class="button filled" disabled={matrixLoginDisabled()}
+              onClick={() => startMatrixSso()}>
+              {matrixBusy() ? '等待 SSO 回调…' : '通过 Homeserver 登录（弹出窗口）'}
+            </button>
+            <p class="muted" role="note">
+              弹出身份提供方页面完成登录后，一次性令牌会自动回传并换取访问令牌。
+              请允许本站弹出窗口。
+            </p>
+          </Show>
+          <Show when={matrixMethod() === 'token'}>
+            <Field label="Matrix Access Token" value={draft().accessToken} secret disabled={disabled()}
+              onInput={(value) => change('accessToken', value)}
+              hint="来自其它客户端的令牌；更推荐用上面的登录方式自动获取。" />
+          </Show>
+          <Show when={matrixStatus()}>
+            <p class={matrixError() ? 'notice error' : 'notice'} role="status">{matrixStatus()}</p>
+          </Show>
+          <Show when={draft().accessToken && matrixMethod() !== 'token'}>
+            <p class="muted" role="status">已获取访问令牌，可直接添加账号。</p>
+          </Show>
+          <Field label="Matrix 用户 ID（可选，自动获取）" value={draft().userId} disabled={disabled()}
+            onInput={(value) => change('userId', value)} placeholder="@alice:example.org"
+            hint={matrixMethod() === 'password' || matrixMethod() === 'sso' ? '登录后自动回填，可留空。' : undefined} />
           <Field label="HTTP(S) 代理地址（可选）" value={draft().proxy} disabled={disabled()}
             onInput={(value) => change('proxy', value)} placeholder="http://127.0.0.1:7890" />
         </Show>

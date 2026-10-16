@@ -1,9 +1,8 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
-  buildAccountConfiguration,
-  createPlatformPlugin,
-  findLoaderEntry,
-  initialAccountDraft,
+  beginMatrixSso, buildAccountConfiguration, consumeMatrixSsoState,
+  createPlatformPlugin, findLoaderEntry, initialAccountDraft, matrixAccountLogin,
+  MATRIX_SSO_KEY,
 } from './account-creation-model.js'
 
 describe('WebUI account onboarding', () => {
@@ -113,5 +112,73 @@ describe('WebUI account onboarding', () => {
       ...initialAccountDraft(), platform: 'discord', token: '',
     })).rejects.toThrow('Discord 用户令牌')
     expect(rpc).not.toHaveBeenCalled()
+  })
+
+  it('mints a Matrix access token through the relay login proxy and fills the draft', async () => {
+    const fetch = vi.fn(async (input: unknown, init?: { body?: string }) => {
+      expect(String(input)).toBe('/api/matrix/login')
+      expect(JSON.parse(init?.body ?? '{}')).toMatchObject({
+        homeserver: 'https://matrix.example.org',
+        userId: '@alice:example.org',
+        password: 'pw',
+      })
+      return Response.json({ accessToken: 'syt-x', userId: '@alice:example.org', deviceId: 'DEV' })
+    })
+    vi.stubGlobal('fetch', fetch)
+    try {
+      const draft = {
+        ...initialAccountDraft('matrix'),
+        homeserver: 'https://matrix.example.org',
+        userId: '@alice:example.org',
+        matrixPassword: 'pw',
+      }
+      await expect(matrixAccountLogin(draft, 'password')).resolves.toEqual({
+        userId: '@alice:example.org', deviceId: 'DEV',
+      })
+      expect(draft.accessToken).toBe('syt-x')
+      // A token obtained through login satisfies the configuration builder.
+      expect(buildAccountConfiguration(draft).config).toMatchObject({ accessToken: 'syt-x' })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('surfaces relay login failures with the server-provided message', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json(
+      { error: 'M_FORBIDDEN', message: 'Invalid username or password' },
+      { status: 401 },
+    )))
+    try {
+      const draft = {
+        ...initialAccountDraft('matrix'),
+        homeserver: 'https://matrix.example.org',
+        userId: '@alice:example.org',
+        matrixPassword: 'bad',
+      }
+      await expect(matrixAccountLogin(draft, 'password')).rejects.toThrow('Invalid username or password')
+      expect(draft.accessToken).toBe('')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('correlates Matrix SSO state and rejects unsolicited or stale callbacks', () => {
+    const redirect = beginMatrixSso('https://matrix.example.org/', '')
+    expect(redirect).toContain('https://matrix.example.org/_matrix/client/v3/login/sso/redirect?redirectUrl=')
+    const callback = new URL(decodeURIComponent(redirect.split('redirectUrl=')[1]!))
+    expect(callback.pathname).toBe('/matrix-sso')
+    // A fresh flow only matches its own state once; wrong states never match.
+    beginMatrixSso('https://matrix.example.org/', '')
+    const state = new URLSearchParams(sessionStorage.getItem(MATRIX_SSO_KEY) ?? '{}').get('state')!
+    expect(consumeMatrixSsoState('wrong-state')).toBe('expired')
+    expect(consumeMatrixSsoState(state)).toBe('missing')
+    sessionStorage.clear()
+    beginMatrixSso('https://matrix.example.org/', '')
+    const raw = sessionStorage.getItem(MATRIX_SSO_KEY)
+    expect(raw).toBeTruthy()
+    const fresh = JSON.parse(raw!).state as string
+    expect(consumeMatrixSsoState(fresh)).toBe(fresh)
+    expect(consumeMatrixSsoState(fresh)).toBe('missing')
+    sessionStorage.clear()
   })
 })

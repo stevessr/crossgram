@@ -5,6 +5,8 @@ export interface PageMeta {
   title: string
   icon: string
   group?: string
+  /** Utility pages (SSO callbacks) that must not appear in navigation. */
+  hidden?: boolean
 }
 export interface EntryFiles {
   pages?: PageMeta[]

@@ -50,6 +50,8 @@ export interface PageDefinition {
   title: string
   icon: string
   group?: string
+  /** Utility pages (SSO callbacks) stay routable but out of navigation. */
+  hidden?: boolean
   component: Component<PageProps>
 }
 export interface ClientModule {

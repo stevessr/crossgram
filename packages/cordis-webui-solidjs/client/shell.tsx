@@ -82,8 +82,10 @@ export function App(props: { initialNotice?: string } = {}) {
   onCleanup(() => window.removeEventListener('popstate', updatePath))
   const go = (route: string) => navigate(connection.config.uiPath + route)
   const pages = createMemo(() => listPages(connection.state.entries))
+  // Utility pages (e.g. the Matrix SSO callback) stay routable but out of nav.
+  const visiblePages = createMemo(() => pages().filter((page) => !page.hidden))
   const groups = createMemo(() =>
-    [...new Set(pages().map((page) => page.group))].sort(
+    [...new Set(visiblePages().map((page) => page.group ?? 'Extensions'))].sort(
       (left, right) => orderOf(left) - orderOf(right),
     ),
   )
@@ -155,7 +157,7 @@ export function App(props: { initialNotice?: string } = {}) {
             {(group) => (
               <>
                 <div class="nav-label">{t(group)}</div>
-                <For each={pages().filter((page) => page.group === group)}>
+                <For each={visiblePages().filter((page) => page.group === group)}>
                   {(page) => (
                     <button
                       class="nav-item"
@@ -304,7 +306,7 @@ export function App(props: { initialNotice?: string } = {}) {
                   <span class="eyebrow">{t("Extensions")}</span>
                   <strong>{entries().length}</strong>
                   <span>
-                    {pages().length} {pages().length === 1 ? t("page") : t("pages")}{' '}
+                    {visiblePages().length} {visiblePages().length === 1 ? t("page") : t("pages")}{' '}
                     available
                   </span>
                 </div>
@@ -319,7 +321,7 @@ export function App(props: { initialNotice?: string } = {}) {
               </article>
             </section>
             <Show
-              when={pages().length}
+              when={visiblePages().length}
               fallback={
                 <section class="panel empty-state">
                   <Icon name="plugins" size={22} />
@@ -335,8 +337,8 @@ export function App(props: { initialNotice?: string } = {}) {
                     <div class="section-heading">
                       <h2>{t(group)}</h2>
                       <span class="muted">
-                        {pages().filter((page) => page.group === group).length}{' '}
-                        {pages().filter((page) => page.group === group)
+                        {visiblePages().filter((page) => page.group === group).length}{' '}
+                        {visiblePages().filter((page) => page.group === group)
                           .length === 1
                           ? 'page'
                           : 'pages'}
@@ -344,7 +346,7 @@ export function App(props: { initialNotice?: string } = {}) {
                     </div>
                     <div class="page-grid">
                       <For
-                        each={pages().filter((page) => page.group === group)}
+                        each={visiblePages().filter((page) => page.group === group)}
                       >
                         {(page) => (
                           <button

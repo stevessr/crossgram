@@ -11,6 +11,8 @@ export interface AccountDraft {
   homeserver: string
   accessToken: string
   userId: string
+  /** Matrix account password, used only to mint an access token; never persisted. */
+  matrixPassword: string
   proxy: string
   callbackPort: string
   apiId: string
@@ -45,6 +47,7 @@ export const initialAccountDraft = (platform: AccountPlatform = 'qqnt'): Account
   homeserver: '',
   accessToken: '',
   userId: '',
+  matrixPassword: '',
   proxy: '',
   callbackPort: '',
   apiId: '',
@@ -109,6 +112,8 @@ export function buildAccountConfiguration(draft: AccountDraft): {
       if (parsed.pathname !== '/' || parsed.search)
         throw new Error('Matrix 服务器地址请使用根地址，例如 https://matrix.example.org')
       config.homeserver = parsed.origin
+      // The token is normally minted by the password/SSO login above, but a
+      // manually pasted token from another client is still accepted.
       config.accessToken = requireText(draft.accessToken, 'Matrix Access Token')
       if (draft.userId.trim()) config.userId = requireText(draft.userId, 'Matrix User ID', 255)
       optionalProxy()
@@ -138,6 +143,92 @@ export function buildAccountConfiguration(draft: AccountDraft): {
     }
   }
   return { name: provider.packageName, label: label || provider.title, config }
+}
+
+/**
+ * The relay proxies the homeserver's `/_matrix/client/v3/login`: browsers
+ * cannot call it cross-origin. The credentials are forwarded once, and the
+ * returned access token fills the draft so the ordinary "create plugin"
+ * boundary persists it — this module never stores the token itself.
+ */
+export async function matrixAccountLogin(
+  draft: AccountDraft,
+  kind: 'password' | 'sso',
+  ssoLoginToken?: string,
+): Promise<{ userId: string, deviceId: string }> {
+  const homeserver = draft.homeserver.trim()
+  if (!homeserver) throw new Error('请先填写 Matrix 服务器地址')
+  const body: Record<string, string> = kind === 'sso'
+    ? { homeserver, loginToken: ssoLoginToken ?? '' }
+    : { homeserver, userId: draft.userId.trim(), password: draft.matrixPassword }
+  const response = await fetch('/api/matrix/login', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+    credentials: 'same-origin',
+  })
+  const payload = await response.json().catch(() => ({})) as {
+    accessToken?: unknown, userId?: unknown, deviceId?: unknown, message?: unknown, error?: unknown
+  }
+  if (!response.ok || typeof payload.accessToken !== 'string' || !payload.accessToken) {
+    throw new Error(
+      typeof payload.message === 'string' && payload.message
+        ? payload.message
+        : typeof payload.error === 'string' && payload.error
+          ? payload.error
+          : 'Matrix 登录失败：HTTP ' + response.status,
+    )
+  }
+  setDraftToken(draft, payload.accessToken)
+  return {
+    userId: typeof payload.userId === 'string' ? payload.userId : '',
+    deviceId: typeof payload.deviceId === 'string' ? payload.deviceId : '',
+  }
+}
+
+/** The draft is a plain object; mutating it here keeps credentials out of this module's scope. */
+function setDraftToken(draft: AccountDraft, accessToken: string): void {
+  draft.accessToken = accessToken
+}
+
+/**
+ * The homeserver redirects back to `${location.origin}${uiPath}/matrix-sso?state=…&loginToken=…`
+ * (spec: the login token rides in the query; the state protects against CSRF).
+ * The callback page forwards it to the opener via postMessage; this helper
+ * builds that URL and remembers the expected state.
+ */
+export function beginMatrixSso(homeserver: string, uiPath = ''): string {
+  const state = crypto.randomUUID()
+  sessionStorage.setItem(MATRIX_SSO_KEY, JSON.stringify({ state, homeserver, started: Date.now() }))
+  const origin = homeserver.trim().replace(/\/+$/, '')
+  const redirect = new URL(location.origin + uiPath + '/matrix-sso')
+  redirect.searchParams.set('state', state)
+  return `${origin}/_matrix/client/v3/login/sso/redirect?redirectUrl=${encodeURIComponent(redirect.href)}`
+}
+
+export const MATRIX_SSO_KEY = 'crossgram:matrix-sso-pending'
+
+export function consumeMatrixSsoState(candidate: string | undefined): string | 'expired' | 'missing' {
+  let pending: { state?: unknown, started?: unknown } | undefined
+  try {
+    pending = JSON.parse(sessionStorage.getItem(MATRIX_SSO_KEY) ?? 'null') ?? undefined
+  } catch {
+    pending = undefined
+  }
+  sessionStorage.removeItem(MATRIX_SSO_KEY)
+  if (!pending || typeof pending.state !== 'string' || typeof pending.started !== 'number') return 'missing'
+  if (!Number.isFinite(pending.started) || Date.now() - pending.started > 10 * 60_000) return 'expired'
+  if (typeof candidate !== 'string' || !candidate || !sameStateSafe(candidate, pending.state)) return 'expired'
+  return pending.state
+}
+
+function sameStateSafe(candidate: string, expected: string): boolean {
+  if (candidate.length !== expected.length) return false
+  let mismatch = 0
+  for (let index = 0; index < expected.length; index++) {
+    mismatch |= candidate.charCodeAt(index) ^ expected.charCodeAt(index)
+  }
+  return mismatch === 0
 }
 
 /** The loader RPC is the same management boundary used by the Plugins page. */
