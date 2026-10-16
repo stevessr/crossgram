@@ -7,23 +7,29 @@
  * The probe takes a real CPU profile through the inspector session Bun exposes
  * as `node:inspector` — no `--inspect` flag, restart, or rebuild needed — and
  * publishes the hottest frames together with the thread-level CPU split, the
- * event loop lag, the RSS, and the heap object counts. Those four together
- * separate an allocation loop from a blocking read from a hot microtask queue.
+ * event loop lag, and the memory gauges. Those together separate an allocation
+ * loop from a blocking read from a hot microtask queue.
  *
  * It samples every ten seconds and only profiles once the process is already
- * burning, so it stays quiet on a healthy relay. `heapStats()` walks the heap,
- * so it is sampled once a minute instead of on every tick. Published results:
+ * burning, so it stays quiet on a healthy relay. Published results:
  *
  * - `heartbeat`: ratio, threads, rssMiB, lagPeakMs (every five minutes).
  * - `pulse`: the same plus `samples` and `frames` (self-time percentages) and
  *   the warning/error lines that were logged while the pulse was running.
+ *
+ * Deliberately absent: `bun:jsc`'s `heapStats()`. It walks the heap, which
+ * costs seconds once the process holds a few hundred megabytes, and calling it
+ * once a minute adds a multi-second event loop stall and a visible chunk of CPU
+ * to the very pulse being measured. `process.memoryUsage()` is enough for the
+ * trend, and the profile frames name the allocator when that matters.
  *
  * Raw profiles are written to `<debug results>/cpu-pulse/pulse-<epoch>.cpuprofile`
  * so callers can inspect callers of the hot frames; the {@link aggregate}
  * output is what the control plane prints.
  */
 import { Session } from 'node:inspector'
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import type { Context } from 'cordis'
 
@@ -32,11 +38,6 @@ const PULSE_RATIO = 0.35
 const PULSE_STREAK = 2
 const PROFILE_MS = 15_000
 const HEARTBEAT_MS = 300_000
-const HEAP_INTERVAL_MS = 60_000
-
-interface HeapStats {
-  objectTypeCounts?: Record<string, number>
-}
 
 interface ProfileNode {
   hitCount?: number
@@ -104,27 +105,12 @@ async function capture(ms: number) {
   }
 }
 
-export async function apply(ctx: Context) {
-  const jsc = await import('bun:jsc').catch(() => undefined)
-  const heapCounts = (): Record<string, number> => {
-    const counts = (jsc as { heapStats?: () => HeapStats } | undefined)?.heapStats?.()?.objectTypeCounts
-    if (!counts) return {}
-    return Object.fromEntries(Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, 12))
-  }
-  const resourceCounts = (): Record<string, number> => {
-    const info = (process as unknown as { getActiveResourcesInfo?: () => string[] }).getActiveResourcesInfo
-    if (!info) return {}
-    const counts: Record<string, number> = {}
-    for (const name of info()) counts[name] = (counts[name] ?? 0) + 1
-    return counts
-  }
+export function apply(ctx: Context) {
   const profileDir = join(ctx.debugScripts.resultsRoot, 'cpu-pulse')
 
   let previousCpu = process.cpuUsage()
   let previousAt = Date.now()
   let previousThreads = threadCpu()
-  let previousHeap: Record<string, number> = {}
-  let lastHeapAt = 0
   let streak = 0
   let profiling = false
   let pulses = 0
@@ -151,26 +137,20 @@ export async function apply(ctx: Context) {
     const elapsed = now - previousAt
     const cpu = process.cpuUsage(previousCpu)
     const threads = threadCpu()
-    const wantHeap = now - lastHeapAt >= HEAP_INTERVAL_MS
-    const heap = wantHeap ? heapCounts() : previousHeap
-    const ratio = (cpu.user + cpu.system) / 1000 / elapsed
     const memory = process.memoryUsage()
+    const ratio = (cpu.user + cpu.system) / 1000 / elapsed
     const payload = {
       at: new Date(now).toISOString(),
       ratio: +ratio.toFixed(3),
       threads: diff(previousThreads, threads),
       rssMiB: +(memory.rss / 1048576).toFixed(1),
+      heapUsedMiB: +(memory.heapUsed / 1048576).toFixed(1),
+      externalMiB: +(memory.external / 1048576).toFixed(1),
       lagPeakMs: lagPeak,
-      heapDelta: wantHeap ? diff(previousHeap, heap) : undefined,
-      resources: resourceCounts(),
     }
     previousCpu = process.cpuUsage()
     previousAt = now
     previousThreads = threads
-    if (wantHeap) {
-      previousHeap = heap
-      lastHeapAt = now
-    }
     lagPeak = 0
 
     if (ratio < PULSE_RATIO) {
@@ -189,9 +169,6 @@ export async function apply(ctx: Context) {
       const profile = await capture(PROFILE_MS)
       pulses++
       const { total, frames } = aggregate(profile)
-      const heapDelta = diff(previousHeap, heapCounts())
-      previousHeap = heapCounts()
-      lastHeapAt = Date.now()
       mkdirSync(profileDir, { recursive: true })
       writeFileSync(join(profileDir, `pulse-${now}.cpuprofile`), JSON.stringify(profile))
       const recentWarnings = ctx.logger.buffer
@@ -210,7 +187,6 @@ export async function apply(ctx: Context) {
         frames: frames.map(([name, hits]) => `${((hits / total) * 100).toFixed(1)}%  ${name}`),
         recentWarnings,
         ...payload,
-        heapDelta,
       })
     } catch (error) {
       await ctx.debugScript.publish({ kind: 'pulse-failed', error: String(error) })
