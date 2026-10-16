@@ -630,6 +630,30 @@ describe('DiscordPlatform userbot', () => {
     await unsubscribe()
   })
 
+  it('bounds a reaction event to the actors the pushed update carries', async () => {
+    const channel = dmChannel()
+    const client = fakeClient([channel])
+    const platform = new DiscordPlatform({ token: 'token' }, { client })
+    const events: IMEvent[] = []
+    const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
+
+    const target = message(channel, { reactions: { cache: new Collection() } })
+    const fetchUsers = vi.fn(async () => new Collection())
+    const reaction = {
+      emoji: { id: null, name: '👍', animated: false },
+      message: target, count: 97, me: true,
+      users: { cache: new Collection(), fetch: fetchUsers },
+    }
+    target.reactions.cache.set('👍', reaction)
+
+    ;(client as unknown as EventEmitter).emit('messageReactionAdd', reaction, user('200', 'Alice'))
+    await vi.waitFor(() => expect(events.map((event) => event.type)).toEqual(['message-reactions']))
+    // The update keeps three avatars; paging the whole reaction list stays a
+    // detail RPC (`getMessageReactions`) instead of event work.
+    expect(fetchUsers).toHaveBeenCalledWith({ limit: 3 })
+    await unsubscribe()
+  })
+
   it('marks an exact Discord message read through the user-account API', async () => {
     const channel = dmChannel()
     const target = message(channel)

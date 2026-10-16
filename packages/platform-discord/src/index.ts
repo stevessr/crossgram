@@ -71,6 +71,14 @@ interface DiscordDialogRoot {
 
 const COMMON_REACTIONS = ['👍', '👎', '❤️', '😂', '😮', '😢', '😡', '🔥', '🎉', '👏', '🤔'] as const
 const MAX_PAGE_SIZE = 100
+/**
+ * Actors a pushed reaction update needs. The Telegram projection keeps three
+ * per reaction (`dialogs.ts`, `reaction-rpc.ts`), so an event never has to page
+ * through a hundred users to fill it.
+ */
+const REACTION_UPDATE_ACTORS = 3
+/** Actors the on-demand reaction list may page through, mirroring the detail RPC. */
+const REACTION_DETAIL_ACTORS = 100
 const DIALOG_MAPPING_CONCURRENCY = 8
 const GUILD_PROJECTION_TTL_MS = 2_000
 const CHANNEL_ACCESS_PERMISSIONS = Permissions.FLAGS.VIEW_CHANNEL | Permissions.FLAGS.READ_MESSAGE_HISTORY
@@ -237,7 +245,12 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
       // the channel now and pass it through instead of re-reading the getter.
       const channel = message.channel as DiscordChannel | null
       if (!channel) return
-      const context = await this.mapReactionContext(message, true, channel)
+      // A pushed update carries three actors per reaction (`dialogs.ts` slices
+      // the same three), so asking Discord for up to a hundred of them per
+      // reaction turned one reaction into hundreds of REST calls and a
+      // structure-cache storm on every event. The full list still comes from
+      // `getMessageReactions` when a client opens the reaction details.
+      const context = await this.mapReactionContext(message, true, channel, REACTION_UPDATE_ACTORS)
       const key = reactionKey(reaction)
       const conversation = this.mapConversation(channel)
       this.dispatch(handler, {
@@ -1125,11 +1138,12 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     message: Message,
     fetchActors: boolean,
     channel: DiscordChannel | null = (message.channel ?? null) as DiscordChannel | null,
+    actorLimit = REACTION_DETAIL_ACTORS,
   ): Promise<IMReactionContext> {
     const reactions = []
     for (const reaction of message.reactions.cache.values()) {
       const users = fetchActors
-        ? await reaction.users.fetch({ limit: Math.min(reaction.count, 100) }).catch(() => reaction.users.cache)
+        ? await reaction.users.fetch({ limit: Math.min(reaction.count, actorLimit) }).catch(() => reaction.users.cache)
         : reaction.users.cache
       reactions.push({
         key: reactionKey(reaction), count: reaction.count, selected: reaction.me,
