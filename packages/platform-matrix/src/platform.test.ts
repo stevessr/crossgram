@@ -2216,6 +2216,45 @@ describe('MatrixPlatform', () => {
     } }] } })
   })
 
+  it('stops the sync loop on an invalid token and respects rate-limit backoff otherwise', async () => {
+    let failures = 0
+    let syncs = 0
+    const fetch = routeFetch((url) => {
+      if (url.pathname.endsWith('/account/whoami')) return json({ user_id: '@me:example.org' })
+      if (url.pathname.endsWith('/sync')) {
+        syncs++
+        // First incremental sync fails with a rate limit including a retry hint,
+        // then with an invalid token, which must end the loop for good.
+        if (syncs === 2) {
+          failures++
+          return json({ errcode: 'M_LIMIT_EXCEEDED', error: 'Too many requests', retry_after_ms: 30 }, { status: 429 })
+        }
+        if (syncs > 2) {
+          failures++
+          return json({ errcode: 'M_UNKNOWN_TOKEN', error: 'Invalid Macaroon passed.' }, { status: 401 })
+        }
+        return json({
+          next_batch: `batch-${syncs}`,
+          rooms: { join: {
+            '!room:example.org': { state: { events: [] }, timeline: { events: [], limited: false }, account_data: { events: [] } },
+          } },
+        })
+      }
+      return json({})
+    })
+    const platform = createPlatform(fetch)
+    const events: IMEvent<never>[] = []
+    const unsubscribe = await platform.subscribe(session, (event) => { events.push(event as IMEvent<never>) })
+    await vi.waitFor(() => expect(syncs).toBeGreaterThanOrEqual(3), { timeout: 5_000 })
+    // Give any (wrong) immediate retry loop a chance to spin.
+    await new Promise((resolve) => setTimeout(resolve, 200))
+    const syncCountAtTokenFailure = syncs
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(syncs).toBe(syncCountAtTokenFailure)
+    expect(failures).toBeGreaterThanOrEqual(2)
+    unsubscribe()
+    await platform.stop()
+  })
 })
 
 function createPlatform(fetch: typeof globalThis.fetch, extra: Record<string, unknown> = {}) {

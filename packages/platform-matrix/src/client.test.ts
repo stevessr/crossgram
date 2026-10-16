@@ -280,4 +280,79 @@ describe('MatrixClient', () => {
     expect(parseMxc('mxc://example.org/a/b')).toEqual({ serverName: 'example.org', mediaId: 'a/b' })
     expect(() => parseMxc('https://example.org/a')).toThrow(/invalid Matrix content URI/)
   })
+
+  it('logs in with a password and reports a fresh token without storing it', async () => {
+    const requests: Array<{ path: string, body: unknown, auth?: string }> = []
+    const client = new MatrixClient({
+      homeserver: 'https://matrix.example.org', accessToken: 'stale-token',
+      fetch: async (input, init) => {
+        const url = new URL(String(input))
+        requests.push({
+          path: url.pathname,
+          body: init?.body ? JSON.parse(init.body as string) : undefined,
+          auth: new Headers(init?.headers).get('authorization') ?? undefined,
+        })
+        if (url.pathname.endsWith('/login')) {
+          return Response.json({ user_id: '@me:example.org', access_token: 'syt-fresh', device_id: 'DEVICE1' })
+        }
+        if (url.pathname.endsWith('/logout')) return new Response(null, { status: 204 })
+        if (url.pathname.endsWith('/devices')) {
+          return Response.json({ devices: [{ device_id: 'DEVICE1', display_name: 'CrossGram relay' }] })
+        }
+        throw new Error(`unexpected ${url.pathname}`)
+      },
+    })
+
+    const login = await client.loginWithPassword('@me:example.org', 'hunter2')
+    expect(login).toEqual({ user_id: '@me:example.org', access_token: 'syt-fresh', device_id: 'DEVICE1' })
+    expect(requests.at(-1)).toMatchObject({
+      path: '/_matrix/client/v3/login',
+      body: {
+        type: 'm.login.password',
+        identifier: { type: 'm.id.user', user: '@me:example.org' },
+        password: 'hunter2',
+        initial_device_display_name: 'CrossGram relay',
+      },
+      // Login must not carry the stale configured token.
+      auth: 'Bearer stale-token',
+    })
+
+    const tokenLogin = await client.loginWithToken('sso-verification-token', 'CrossGram relay')
+    expect(tokenLogin.access_token).toBe('syt-fresh')
+    expect(requests.at(-1)).toMatchObject({
+      path: '/_matrix/client/v3/login',
+      body: { type: 'm.login.token', token: 'sso-verification-token', initial_device_display_name: 'CrossGram relay' },
+    })
+
+    await client.logout('syt-fresh')
+    expect(requests.at(-1)).toMatchObject({ path: '/_matrix/client/v3/logout', auth: 'Bearer syt-fresh' })
+
+    const devices = await client.getDevices('syt-fresh')
+    expect(devices.devices[0]).toMatchObject({ device_id: 'DEVICE1', display_name: 'CrossGram relay' })
+    expect(requests.at(-1)).toMatchObject({ path: '/_matrix/client/v3/devices', auth: 'Bearer syt-fresh' })
+  })
+
+  it('builds the SSO redirect URL with an encoded callback', async () => {
+    const client = new MatrixClient({
+      homeserver: 'https://matrix.example.org', accessToken: 'token',
+      fetch: async () => Response.json({}),
+    })
+    expect(client.ssoRedirectUrl('https://relay.example.org/matrix/sso?next=/a b'))
+      .toBe('https://matrix.example.org/_matrix/client/v3/login/sso/redirect?redirectUrl=https%3A%2F%2Frelay.example.org%2Fmatrix%2Fsso%3Fnext%3D%2Fa%20b')
+    await client.close()
+  })
+
+  it('surfaces homeserver rate limiting as a retry-after hint', async () => {
+    const client = new MatrixClient({
+      homeserver: 'https://matrix.example.org', accessToken: 'token',
+      fetch: async () => Response.json(
+        { errcode: 'M_LIMIT_EXCEEDED', error: 'Too many requests', retry_after_ms: 7500 },
+        { status: 429 },
+      ),
+    })
+    await expect(client.whoAmI()).rejects.toMatchObject({
+      status: 429, errcode: 'M_LIMIT_EXCEEDED', retryAfterMs: 7500,
+    })
+    await client.close()
+  })
 })

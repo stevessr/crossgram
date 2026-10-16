@@ -365,8 +365,19 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
           since = response.next_batch
         } catch (error) {
           if (controller.signal.aborted) return
+          if (isInvalidTokenError(error)) {
+            // A revoked token keeps failing until a human rotates it; a tight
+            // retry loop would only burn requests and hide the problem. Stop
+            // the loop so the dashboard reports the stale token instead.
+            this.logger?.warn('Matrix access token was rejected (M_UNKNOWN_TOKEN); sync stopped until the token is updated in the WebUI.')
+            return
+          }
           this.logger?.warn('Matrix sync failed: %s', formatError(error))
-          await abortableDelay(1_000, controller.signal)
+          // Respect the homeserver's own backoff hint (M_LIMIT_EXCEEDED).
+          const backoff = error instanceof MatrixHttpError && error.retryAfterMs && error.retryAfterMs > 0
+            ? Math.min(error.retryAfterMs, 60_000)
+            : 1_000
+          await abortableDelay(backoff, controller.signal)
         }
       }
     })()
@@ -2098,6 +2109,15 @@ async function abortableDelay(ms: number, signal: AbortSignal): Promise<void> {
 function formatError(error: unknown): string {
   if (!(error instanceof Error)) return String(error)
   return error.stack ?? `${error.name}: ${error.message}`
+}
+
+/**
+ * 401 M_UNKNOWN_TOKEN (or the soft-logout variant) means the configured token
+ * can never recover on its own: only a re-authentication or a rotated token
+ * fixes it.
+ */
+export function isInvalidTokenError(error: unknown): boolean {
+  return error instanceof MatrixHttpError && error.errcode === 'M_UNKNOWN_TOKEN'
 }
 
 interface MatrixLogger {

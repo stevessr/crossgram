@@ -18,6 +18,8 @@ export class MatrixHttpError extends Error {
     readonly status: number,
     readonly errcode: string | undefined,
     message: string,
+    /** Homeserver-advertised backoff (M_LIMIT_EXCEEDED) in milliseconds. */
+    readonly retryAfterMs?: number,
   ) {
     super(message)
     this.name = 'MatrixHttpError'
@@ -348,6 +350,71 @@ export class MatrixClient {
     })
   }
 
+  /**
+   * Sign in with the account password and return a fresh access token. The
+   * token is returned, never stored on the client: the caller decides where it
+   * is persisted (the WebUI writes it into the platform configuration).
+   * `initial_device_display_name` keeps the session identifiable in the
+   * homeserver's device list so users can revoke exactly this relay session.
+   */
+  loginWithPassword(userId: string, password: string, deviceDisplayName = 'CrossGram relay'): Promise<MatrixLoginResponse> {
+    return this.request('/_matrix/client/v3/login', {
+      method: 'POST',
+      body: {
+        type: 'm.login.password',
+        identifier: { type: 'm.id.user', user: userId },
+        password,
+        initial_device_display_name: deviceDisplayName,
+      },
+    })
+  }
+
+  /**
+   * Exchange a Single Sign-On login verification token for an access token.
+   * Browsers cannot read the token from the redirect fragment, so the SSO
+   * provider hands it to the user (or a relay endpoint) to paste back.
+   */
+  loginWithToken(loginToken: string, deviceDisplayName = 'CrossGram relay'): Promise<MatrixLoginResponse> {
+    return this.request('/_matrix/client/v3/login', {
+      method: 'POST',
+      body: {
+        type: 'm.login.token',
+        token: loginToken,
+        initial_device_display_name: deviceDisplayName,
+      },
+    })
+  }
+
+  /** The URL a browser must open to start the homeserver's SSO flow. */
+  ssoRedirectUrl(redirectUrl: string): string {
+    return `${this.homeserver}/_matrix/client/v3/login/sso/redirect?redirectUrl=${encodeURIComponent(redirectUrl)}`
+  }
+
+  /** Invalidate a token the account no longer wants to keep alive. */
+  logout(token: string): Promise<void> {
+    return this.unauthenticatedRequest('/_matrix/client/v3/logout', {
+      method: 'POST',
+      token,
+      body: {},
+    }).then(() => undefined)
+  }
+
+  /** List this account's devices so a named relay session can be revoked. */
+  getDevices(token: string): Promise<MatrixDevicesResponse> {
+    return this.unauthenticatedRequest('/_matrix/client/v3/devices', { token })
+  }
+
+  private async unauthenticatedRequest<T>(path: string, options: RequestOptions & { token?: string } = {}): Promise<T> {
+    let headers: Headers | undefined
+    if (options.token) {
+      headers = options.headers ? new Headers(options.headers) : new Headers()
+      headers.set('authorization', `Bearer ${options.token}`)
+    }
+    const response = await this.rawRequest(path, { ...options, headers })
+    if (response.status === 204) return undefined as T
+    return response.json() as Promise<T>
+  }
+
   private async request<T>(path: string, options: RequestOptions = {}): Promise<T> {
     const response = await this.rawRequest(path, options)
     if (response.status === 204) return undefined as T
@@ -362,7 +429,7 @@ export class MatrixClient {
     const timeout = AbortSignal.timeout(options.timeoutMs ?? this.requestTimeoutMs)
     const signal = options.signal ? AbortSignal.any([options.signal, timeout]) : timeout
     const headers = new Headers(options.headers)
-    headers.set('authorization', `Bearer ${this.accessToken}`)
+    if (!headers.has('authorization')) headers.set('authorization', `Bearer ${this.accessToken}`)
     let body: BodyInit | undefined
     if (options.binaryBody !== undefined) {
       body = options.binaryBody
@@ -374,11 +441,14 @@ export class MatrixClient {
     if (body instanceof ReadableStream) init.duplex = 'half'
     const response = await this.fetch(url, init)
     if (response.ok) return response
-    const error = await response.json().catch(() => ({})) as { errcode?: string, error?: string }
+    const error = await response.json().catch(() => ({})) as { errcode?: string, error?: string, retry_after_ms?: number }
     throw new MatrixHttpError(
       response.status,
       error.errcode,
       error.error ?? `Matrix request failed with HTTP ${response.status}`,
+      typeof error.retry_after_ms === 'number' && error.retry_after_ms >= 0
+        ? error.retry_after_ms
+        : undefined,
     )
   }
 }
@@ -391,6 +461,25 @@ interface RequestOptions {
   binaryBody?: BodyInit
   signal?: AbortSignal
   timeoutMs?: number
+}
+
+export interface MatrixLoginResponse {
+  user_id: string
+  access_token: string
+  device_id: string
+  home_server?: string
+  expires_in_ms?: number
+}
+
+export interface MatrixDevice {
+  device_id: string
+  display_name?: string
+  last_seen_ip?: string
+  last_seen_ts?: number
+}
+
+export interface MatrixDevicesResponse {
+  devices: MatrixDevice[]
 }
 
 function segment(value: string): string {

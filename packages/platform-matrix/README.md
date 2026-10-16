@@ -17,6 +17,18 @@ to one named Cordis platform entry and exposes joined rooms to Telegram clients.
     requestTimeoutMs: 30000
 ```
 
+### Getting an access token
+
+The WebUI's "Platform accounts" page can mint the token for you; the
+"添加账号" dialog accepts account password or homeserver SSO login in addition
+to a manually pasted token. Password and SSO flows run through the relay's
+bounded `POST /api/matrix/login` proxy (browsers cannot call the homeserver
+cross-origin); the credentials are forwarded once and never stored, and the
+minted token is written into this plugin's configuration through the loader
+management boundary. When a token is revoked the sync loop stops with a
+"M_UNKNOWN_TOKEN" warning and the account card shows the error until the token
+is replaced in the WebUI.
+
 The adapter supports account profiles, direct and group rooms, Matrix Spaces
 (projected as Telegram chat folders rather than forum topics),
 room history, room-scoped message search, incremental `/sync`, text/image/file/audio/video messages, replies,
