@@ -113,13 +113,68 @@ PostgreSQL 18 driver, which the repository already supports
 `@cordisjs/plugin-database-postgres`) and which would move all database I/O off
 the event loop entirely.
 
+## Root cause of the pulses
+
+The probe paid for itself on its first run. A pump of 44.7% of a core with an
+11.2 s event loop stall profiled a Discord re-sync (`structures/User._patch`,
+`managers/ReactionUserManager.fetch`), and the subscription tracer named the
+caller exactly:
+
+```
+ensure platform=discord session=867403e4
+  _enqueueNow        (packages/bridge/src/platform-manager.ts:644)
+  _flushReactionBatch (packages/bridge/src/platform-manager.ts:628)
+```
+
+Two independent defects made a single Discord reaction re-sync a whole platform
+session, forever, while no Telegram client was connected:
+
+1. `_flushReactionBatch` runs two seconds after the event that created the
+   batch. The idle reaper can pause the session inside that window, and the
+   flush then found no subscription and called `ensure()` — reopening the
+   session that was deliberately paused. Each reopen reconnected Discord, the
+   reaper paused it again a minute later, and the next reaction repeated it.
+   Fixed in `a1d2a4e6`: a coalesced platform update settles without delivery
+   when its session is paused, keeping resumption tied to client activity.
+2. Every `messageReactionAdd` mapped the reaction context with up to a hundred
+   actors per reaction, and each actor is a user fetch plus a discord.js
+   structure-cache entry, while a pushed update only carries three. Fixed in
+   `2de599a0`: reaction events ask for those three, and paging the full list
+   stays a `getMessageReactions` detail RPC.
+
+The bridge's idle warm-up also re-subscribed every paused session hourly to keep
+it warm, which on this host costs about a minute of CPU per platform per hour,
+so the runtime configuration now sets
+`bridge.config.lazySync.idleSyncIntervalMs: 86400000` with a one-minute window:
+a session still starts on the first client RPC that needs it, and the hourly
+storm is gone.
+
+Verified afterwards: zero subscription lifecycle events in the 11 minutes that
+followed (previously 5–25 per burst), worker CPU back to ~15% of a core, WebUI
+responses at 2 ms, and no `ensure` call from the flush path in the tracer.
+
+## Measurement trap
+
+`bun:jsc`'s `heapStats()` walks the heap: 20–100 ms on a small heap, but seconds
+once the relay holds a few hundred megabytes. Sampling it once a minute added a
+multi-second event loop stall and a visible slice of CPU (31% of one captured
+profile was the probe's own `heapStats` call), which is exactly the symptom the
+probe was built to measure. The shipped probe therefore uses
+`process.memoryUsage()` and lets the profile frames name the allocator.
+
 ## Still open
 
-The CPU pulse still reproduces (one burst of 47–75% of a core for about four
-minutes was observed during this work, together with 37% disk utilisation and
-2.4–5.0 s WebUI responses). It is no longer continuous, so it needs in-process
-attribution rather than more guessing: the `inspect-relay` skill now ships
-`probes/cpu-pulse.ts`, which profiles the worker through Bun's `node:inspector`
-session while the burn is happening — no restart and no `--inspect` flag — and
-publishes the hottest frames next to the thread-level CPU split, the event loop
-lag, and the heap object counts.
+- The shared rotational disk still produces multi-second stalls of its own:
+  during the post-fix baseline the volume sat at 82–98% utilisation for five
+  minutes while the relay's own CPU stayed low, and WebUI requests timed out at
+  six seconds. Those minutes belong to whichever tenant is writing, not to the
+  relay, and no application change removes them.
+- The Matrix platform session aborts with `MatrixHttpError: M_UNKNOWN_TOKEN`, so
+  the configured `MATRIX_ACCESS_TOKEN` is stale. It retries once per session
+  start rather than looping, but the platform stays unusable until the token is
+  replaced or the platform is disabled the way QQNT was.
+- PostgreSQL 18 with `io_method=io_uring` remains the only route to real
+  asynchronous disk I/O for the database, and it would move every database call
+  off the event loop. It needs roughly 250 MiB more memory than the SQLite
+  driver and a driver migration the repository already supports.
+
