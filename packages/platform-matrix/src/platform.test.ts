@@ -790,9 +790,11 @@ describe('MatrixPlatform', () => {
     await vi.waitFor(() => expect(events.some((value) => value.type === 'message')).toBe(true))
     await unsubscribe()
 
-    // Space membership changes the folder only, not the room's chat identity.
-    expect(events.map((value) => value.type)).toEqual(['message'])
-    expect(events[0]).toMatchObject({
+    // The bootstrap snapshot emits the child's conversation; the Space link
+    // changes folder membership only, never the room's chat identity.
+    expect(events.map((value) => value.type)).toEqual(['conversation', 'message'])
+    expect(events[0]).toMatchObject({ conversation: { id: child, kind: 'group' } })
+    expect(events[1]).toMatchObject({
       type: 'message', conversation: { id: child, kind: 'group' },
       message: { id: '$child-message' },
     })
@@ -829,7 +831,10 @@ describe('MatrixPlatform', () => {
     await vi.waitFor(() => expect((platform as any).joinedRoomIds.has(space)).toBe(false))
     await unsubscribe()
 
-    expect(events).toEqual([])
+    // The bootstrap snapshot emits the child's conversation; leaving the
+    // Space must not touch the chat itself.
+    expect(events.map((value) => value.type)).toEqual(['conversation'])
+    expect(events[0]).toMatchObject({ conversation: { id: child } })
     const roots = await platform.getDialogs(session)
     expect(roots.dialogs.map((dialog) => dialog.conversation.id)).toEqual([child])
     expect(await platform.getChatFolders(session)).toEqual([])
@@ -909,7 +914,8 @@ describe('MatrixPlatform', () => {
       id: space, title: space, conversationIds: [],
     }]))
     await unsubscribe()
-    expect(events).toEqual([])
+    expect(events.map((value) => value.type)).toEqual(['conversation'])
+    expect(events[0]).toMatchObject({ conversation: { id: child } })
     // Removing a Space relationship updates only folder membership.
     expect((platform as any).conversations.get(child)).toMatchObject({
       id: child, kind: 'group', parentId: undefined,
@@ -1187,9 +1193,12 @@ describe('MatrixPlatform', () => {
         requests.push({ state: value.request.state, roomId: value.request.group?.id })
       }
     })
-    await vi.waitFor(() => expect(requests).toHaveLength(3))
+    await vi.waitFor(() => expect(requests).toHaveLength(4))
     await unsubscribe()
+    // The bootstrap snapshot delivers the already-pending invite too, so the
+    // bridge stores it even if its own request-inbox reconciliation is slower.
     expect(requests).toEqual([
+      { state: 'pending', roomId: '!old:example.org' },
       { state: 'pending', roomId: '!new:example.org' },
       { state: 'accepted', roomId: '!old:example.org' },
       { state: 'rejected', roomId: '!new:example.org' },
@@ -1264,16 +1273,19 @@ describe('MatrixPlatform', () => {
     const platform = createPlatform(fetch, { syncTimeoutMs: 50, userId: '@me:example.org' })
     const events: IMEvent[] = []
     const unsubscribe = await platform.subscribe(session, (value) => { events.push(value) })
-    await vi.waitFor(() => expect(events).toHaveLength(5))
+    await vi.waitFor(() => expect(events).toHaveLength(6))
     await unsubscribe()
 
     expect(events.map((value) => value.type)).toEqual([
-      'conversation', 'message', 'message-edit', 'message-delete', 'read',
+      'conversation', 'conversation', 'message', 'message-edit', 'message-delete', 'read',
     ])
-    expect(events[0]).toMatchObject({ conversation: { title: 'Renamed' } })
-    expect(events[2]).toMatchObject({ eventId: '$edit', message: { id: '$new', content: { parts: [{ text: 'fixed' }] } } })
-    expect(events[3]).toMatchObject({ messageIds: ['$old'] })
-    expect(events[4]).toMatchObject({ upToMessageId: '$new' })
+    // The bootstrap snapshot emits the state-derived conversation before the
+    // incremental batch renames it.
+    expect(events[0]).toMatchObject({ conversation: { title: 'Team Room' } })
+    expect(events[1]).toMatchObject({ conversation: { title: 'Renamed' } })
+    expect(events[3]).toMatchObject({ eventId: '$edit', message: { id: '$new', content: { parts: [{ text: 'fixed' }] } } })
+    expect(events[4]).toMatchObject({ messageIds: ['$old'] })
+    expect(events[5]).toMatchObject({ upToMessageId: '$new' })
   })
   it('shows Matrix invites in the request inbox, paginates them, and accepts or rejects rooms', async () => {
     const actions: Array<{ path: string, method: string }> = []
@@ -1547,9 +1559,12 @@ describe('MatrixPlatform', () => {
         requests.push({ state: value.request.state, roomId: value.request.group?.id })
       }
     })
-    await vi.waitFor(() => expect(requests).toHaveLength(3))
+    await vi.waitFor(() => expect(requests).toHaveLength(4))
     await unsubscribe()
+    // The bootstrap snapshot delivers the already-pending invite too, so the
+    // bridge stores it even if its own request-inbox reconciliation is slower.
     expect(requests).toEqual([
+      { state: 'pending', roomId: '!old:example.org' },
       { state: 'pending', roomId: '!new:example.org' },
       { state: 'accepted', roomId: '!old:example.org' },
       { state: 'rejected', roomId: '!new:example.org' },
@@ -1825,16 +1840,19 @@ describe('MatrixPlatform', () => {
     const platform = createPlatform(fetch, { syncTimeoutMs: 50, userId: '@me:example.org' })
     const events: IMEvent[] = []
     const unsubscribe = await platform.subscribe(session, (value) => { events.push(value) })
-    await vi.waitFor(() => expect(events).toHaveLength(5))
+    await vi.waitFor(() => expect(events).toHaveLength(6))
     await unsubscribe()
 
     expect(events.map((value) => value.type)).toEqual([
-      'conversation', 'message', 'message-edit', 'message-delete', 'read',
+      'conversation', 'conversation', 'message', 'message-edit', 'message-delete', 'read',
     ])
-    expect(events[0]).toMatchObject({ conversation: { title: 'Renamed' } })
-    expect(events[2]).toMatchObject({ eventId: '$edit', message: { id: '$new', content: { parts: [{ text: 'fixed' }] } } })
-    expect(events[3]).toMatchObject({ messageIds: ['$old'] })
-    expect(events[4]).toMatchObject({ upToMessageId: '$new' })
+    // The bootstrap snapshot emits the state-derived conversation before the
+    // incremental batch renames it.
+    expect(events[0]).toMatchObject({ conversation: { title: 'Team Room' } })
+    expect(events[1]).toMatchObject({ conversation: { title: 'Renamed' } })
+    expect(events[3]).toMatchObject({ eventId: '$edit', message: { id: '$new', content: { parts: [{ text: 'fixed' }] } } })
+    expect(events[4]).toMatchObject({ messageIds: ['$old'] })
+    expect(events[5]).toMatchObject({ upToMessageId: '$new' })
   })
   it('projects stable and legacy Matrix polls without showing individual votes as messages', async () => {
     const fetch = routeFetch((url) => {
@@ -2094,10 +2112,11 @@ describe('MatrixPlatform', () => {
     const platform = createPlatform(fetch, { userId: '@me:example.org' })
     const events: IMEvent[] = []
     const unsubscribe = await platform.subscribe(session, (event) => { events.push(event) })
-    await vi.waitFor(() => expect(events).toHaveLength(3))
+    await vi.waitFor(() => expect(events).toHaveLength(4))
     await unsubscribe()
-    expect(events.map((event) => event.type)).toEqual(['message', 'message', 'message-edit'])
-    const opened = events[0], closed = events[2]
+    // The bootstrap snapshot emits the room conversation first.
+    expect(events.map((event) => event.type)).toEqual(['conversation', 'message', 'message', 'message-edit'])
+    const opened = events[1], closed = events[3]
     if (opened?.type !== 'message' || closed?.type !== 'message-edit') throw new Error('wrong event types')
     expect(opened.message.content.inlineKeyboard?.rows).toHaveLength(1)
     expect(closed.message).toMatchObject({ id: '$poll' })

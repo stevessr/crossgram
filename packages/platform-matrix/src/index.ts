@@ -332,28 +332,20 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     const userId = await this.getAccountUserId()
     const controller = new AbortController()
     const initial = await this.client.sync({ timeout: 0, fullState: true, signal: controller.signal })
-    this.ingestAccountData(initial)
-    this.invalidateDialogsSnapshot()
+    // Replace stale membership state wholesale; the dispatch below treats the
+    // snapshot as an ordinary batch against the fresh room map.
     this.refreshJoinedRoomState(initial.rooms?.join ?? {}, true)
-    for (const [roomId, room] of Object.entries(initial.rooms?.invite ?? {})) {
-      const request = this.mapRoomInvite(roomId, room, userId)
-      if (!request) continue
-      const resolved = this.locallyResolvedInvites.get(roomId)
-      if (resolved?.id === request.id) continue
-      if (resolved) this.locallyResolvedInvites.delete(roomId)
-      this.pendingInvites.set(roomId, request)
-    }
-    for (const [roomId, room] of Object.entries(initial.rooms?.join ?? {})) {
-      if (this.isSpaceRoom(roomId)) continue
-      this.updateConversation(roomId, room)
-      // Bridge startup reconciliation persists the complete room list in pages.
-      for (const event of room.timeline?.events ?? []) {
-        const relation = event.type === 'm.reaction' ? relationFromValue(event.content['m.relates_to']) : undefined
-        if (event.event_id && relation?.rel_type === 'm.annotation' && relation.event_id) {
-          this.rememberReaction(event.event_id, relation.event_id)
-        }
-      }
-      this.pinSnapshots.set(roomId, this.cachedPinnedIds(roomId))
+    // Route the full-state snapshot through the same pipeline as an
+    // incremental batch: its per-room timeline carries the newest messages,
+    // so anything received while no incremental /sync was open — a relay
+    // restart or a lazily paused subscription — is fetched from the
+    // homeserver and delivered instead of being discarded. A bootstrap
+    // failure must not take the subscription down; the incremental loop and
+    // the bridge-side dialog reconciliation still recover previews.
+    try {
+      await this.dispatchSync(initial, userId, handler)
+    } catch (error) {
+      this.logger?.warn('Matrix bootstrap sync dispatch failed: %s', formatError(error))
     }
     // Prefetch room sticker packs off the critical path so the client's first
     // sticker panel open never triggers a full dialog fetch at RPC time.
