@@ -105,6 +105,28 @@ export async function apply(ctx) {
 
 Inspect services through the same `ctx` received by normal plugins. Do not serialize whole Context, Fiber, socket, request, or database objects; select the exact scalar fields needed.
 
+## Attribute a CPU pulse
+
+When the relay burns tens of percent of a core in bursts and clients show
+"connecting", deploy the bundled pulse probe instead of guessing. It samples the
+worker every ten seconds, profiles the process for fifteen seconds once it is
+actually burning, and publishes the hottest self-time frames with the
+thread-level CPU split, the event loop lag, the RSS, and the heap object counts:
+
+```sh
+node .agents/skills/inspect-relay/scripts/probe-relay.mjs deploy \
+  .agents/skills/inspect-relay/probes/cpu-pulse.ts --name issue/cpu-pulse.ts
+node .agents/skills/inspect-relay/scripts/probe-relay.mjs wait issue/cpu-pulse.ts \
+  --result --timeout 900000
+```
+
+A `heartbeat` result every five minutes is the baseline; a `pulse` result means
+the probe caught the burn. Raw profiles land in
+`<debug results>/cpu-pulse/pulse-<epoch>.cpuprofile` for caller analysis. The
+profiler uses Bun's `node:inspector` session, so no restart or `--inspect` flag
+is involved, but the probe does add a bounded sampling cost while it is
+deployed — remove it once the evidence is collected.
+
 ## Deploy and collect
 
 For a one-shot probe that publishes at least one result:
