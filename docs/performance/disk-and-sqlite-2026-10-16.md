@@ -175,6 +175,12 @@ probe was built to measure. The shipped probe therefore uses
   replaced or the platform is disabled the way QQNT was.
 - PostgreSQL 18 with `io_method=io_uring` remains the only route to real
   asynchronous disk I/O for the database, and it would move every database call
-  off the event loop. It needs roughly 250 MiB more memory than the SQLite
-  driver and a driver migration the repository already supports.
+  off the event loop. **Decision (2026-10-17): deferred.** The post-fix host has
+  roughly 315 MiB available; PostgreSQL 18 needs about 250 MiB more, which
+  would push the box back into swap — the exact failure mode this round
+  removed. The remaining stalls trace to co-tenant disk saturation, which
+  io_uring does not fix, and the tuned SQLite driver now keeps the WAL bounded
+  (8 MiB) with mmap-served reads. Revisit if the database is ever shown to
+  stall (e.g. DB-call latency percentiles in a probe) or the host gets more
+  memory.
 
