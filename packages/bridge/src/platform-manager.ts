@@ -623,6 +623,15 @@ export class PlatformSubscriptionManager {
     const batch = this._reactionBatches.get(key)
     if (!batch) return
     this._reactionBatches.delete(key)
+    // The batch was coalesced while the session was subscribed, and the reaper
+    // may have paused it in the two seconds since. A platform-originated update
+    // must not resume a paused session: doing so re-subscribed Discord for a
+    // single reaction, which then got paused again a minute later, forever.
+    // Resume stays tied to real client activity (`ensure` from an RPC).
+    if (!this._subscriptions.has(batch.session.platformSessionId)) {
+      batch.settle(undefined)
+      return
+    }
     // Delivery failures are already reported through _onError and the durable
     // delivery journal, so the waiting callers settle undefined on failure.
     this._enqueueNow(batch.session, batch.event, batch.options)

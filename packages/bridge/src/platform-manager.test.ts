@@ -1936,6 +1936,38 @@ describe('PlatformSubscriptionManager lazy sync', () => {
     await manager.stop()
   })
 
+  it('does not resume a paused session for a coalesced reaction update', async () => {
+    const database = await createDatabase()
+    const platform = new PushPlatform()
+    const store = new MessageStore(database)
+    const clock = { value: 1_000_000 }
+    const errors: unknown[] = []
+    const manager = new PlatformSubscriptionManager(
+      database, new PlatformRegistry([['push', platform]]), store,
+      error => { errors.push(error) }, undefined, undefined, new Context(), 'show',
+      () => clock.value, {}, 50,
+    )
+    await manager.ensure(session)
+    expect(platform.subscribeCalls).toBe(1)
+
+    const conversation: IMConversation = { id: 'late-room', kind: 'group', title: 'Late' }
+    const batch = manager.ingestLocalEvent(session, {
+      type: 'message-reactions', eventId: 'late-1', conversation,
+      target: { conversationId: conversation.id, messageId: 'msg-late', targetId: 'msg-late' },
+      context: { available: [], reactions: [], maxSelected: 20 }, timestamp: 1,
+    })
+    // The reaper pauses the session inside the coalescing window, so the flush
+    // runs with no subscription: a platform-originated update must not reopen
+    // one, or Discord re-subscribes and the reaper pauses it again, forever.
+    clock.value += 11 * 60_000
+    await manager.reapLazySync()
+    expect(platform.unsubscribeCalls).toBe(1)
+    expect(await batch).toBeUndefined()
+    expect(errors).toEqual([])
+    expect(platform.subscribeCalls).toBe(1)
+    await manager.stop()
+  })
+
   it('never restarts subscriptions for platforms that were explicitly stopped', async () => {
     const clock = { value: 3_000_000 }
     const platform = new PushPlatform()
