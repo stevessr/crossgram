@@ -4,7 +4,7 @@ import z from 'schemastery'
 import { HttpsProxyAgent } from 'https-proxy-agent'
 import { fetch as undiciFetch, ProxyAgent as UndiciProxyAgent } from 'undici'
 import {
-  Client, type AnyChannel, type ClientEvents, type DMChannel, type Guild, type GuildBasedChannel,
+  Client, Options, type AnyChannel, type ClientEvents, type DMChannel, type Guild, type GuildBasedChannel,
   type GuildEmoji, type GuildMember, type GroupDMChannel, type Message, type MessageAttachment,
   type MessageReaction, type NewsChannel, type PartialGuildMember, type PartialMessage,
   Permissions, type Role, type TextChannel, type ThreadChannel, type User,
@@ -161,6 +161,37 @@ export class DiscordPlatform implements IMPlatform<DiscordMediaLocator> {
     this.client = dependencies.client ?? new Client({
       allowedMentions: { parse: [], repliedUser: false },
       failIfNotExists: false,
+      // The account can see every channel of every guild (10k+ on this one)
+      // and the selfbot client defaults to all intents, so gateway traffic
+      // grows the member, presence, and per-channel message caches without
+      // bound over days — ~180 MiB of heap in 19 hours on the production
+      // host. Keep a small recent-message window per channel and sweep the
+      // rest by age: every read path already refetches by id on a cache
+      // miss, and the self member/user is pinned because the permission
+      // snapshot and reaction bookkeeping read them.
+      makeCache: Options.cacheWithLimits({
+        ...Options.defaultMakeCacheSettings,
+        MessageManager: 25,
+      }),
+      sweepers: {
+        ...Options.defaultSweeperSettings,
+        messages: { interval: 300, lifetime: 1_800 },
+        presences: { interval: 600, filter: () => () => true },
+        users: {
+          interval: 1_800,
+          filter: () => {
+            const selfId = this.client.user?.id
+            return (user) => user.id !== selfId
+          },
+        },
+        guildMembers: {
+          interval: 3_600,
+          filter: () => {
+            const selfId = this.client.user?.id
+            return (member) => member.id !== selfId
+          },
+        },
+      },
       ...(proxy ? {
         http: { agent: { uri: proxy } },
         ws: { agent: createWebSocketProxyAgent(proxy) },

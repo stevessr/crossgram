@@ -1265,6 +1265,11 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
     const hierarchyChanged = this.refreshJoinedRoomState(
       response.rooms?.join ?? {}, false, joinedMembershipChanged,
     )
+    // The bridge handles every event with synchronous SQLite work on the same
+    // turn. A bootstrap or limited batch can therefore monopolize the event
+    // loop for seconds; hand control back to timers and sockets periodically
+    // so concurrent RPCs and other platform sessions keep making progress.
+    let dispatched = 0
     for (const [roomId, room] of Object.entries(response.rooms?.join ?? {})) {
       const invite = this.pendingInvites.get(roomId)
       const settled = this.locallyResolvedInvites.get(roomId)
@@ -1367,6 +1372,9 @@ export class MatrixPlatform implements IMPlatform<MatrixMediaLocator> {
             })
           }
         }
+        // Hand the event loop back periodically; the handler's SQLite work is
+        // synchronous and a large batch must not starve sockets and timers.
+        if (++dispatched % 25 === 0) await new Promise((resolve) => setImmediate(resolve))
       }
       const receipt = room.ephemeral?.events?.find((event) => event.type === 'm.receipt')
       if (receipt) {
