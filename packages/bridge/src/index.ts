@@ -667,7 +667,7 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     baseUrl: import.meta.url,
     source: '../client/index.ts',
     manifest: '../dist/manifest.json',
-    routes: ['/platform-accounts', '/sticker-packs', '/bots'],
+    routes: ['/platform-accounts', '/sticker-packs', '/bots', '/matrix-sso'],
   }, dashboard)
 
   const currentAccounts = (now = Date.now()) => registry.ids.sort().map((platformId) => {
