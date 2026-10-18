@@ -667,6 +667,15 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     baseUrl: import.meta.url,
     source: '../client/index.ts',
     manifest: '../dist/manifest.json',
+    // Self-register the routes: `pages` (with the hidden SSO callback) beats
+    // the package.json declaration, so a stale deployed package.json can never
+    // strand the Matrix SSO popup on an unrouted page.
+    pages: [
+      { path: '/platform-accounts', title: 'Platform accounts', icon: 'account', group: 'Accounts' },
+      { path: '/sticker-packs', title: 'Sticker collections', icon: 'smile', group: 'Accounts' },
+      { path: '/bots', title: 'Your bots', icon: 'bot', group: 'Accounts' },
+      { path: '/matrix-sso', title: 'Matrix SSO', icon: 'extension', group: 'Accounts', hidden: true },
+    ],
     routes: ['/platform-accounts', '/sticker-packs', '/bots', '/matrix-sso'],
   }, dashboard)
 

@@ -29,7 +29,7 @@ describe('actual Cordis CLI startup', () => {
         JSON.stringify(
           pathToFileURL(join(root, 'packages/bridge/src/index.ts')).href,
         ) +
-        ",manifest:'../dist/manifest.json',routes:['/platform-accounts','/sticker-packs','/bots']},{accounts:[],serverConfig:{name:'CrossGram',host:'example.test',port:4430,dcs:[],rsa_key:'PUBLIC'},stickerAccounts:[],stickerPacks:[],bots:[],refresh:async()=>{}}); await entry.ready; await writeFile(" +
+        ",manifest:'../dist/manifest.json',routes:['/platform-accounts','/sticker-packs','/bots','/matrix-sso'],pages:[{path:'/platform-accounts',title:'Platform accounts',icon:'account',group:'Accounts'},{path:'/sticker-packs',title:'Sticker collections',icon:'smile',group:'Accounts'},{path:'/bots',title:'Your bots',icon:'bot',group:'Accounts'},{path:'/matrix-sso',title:'Matrix SSO',icon:'extension',group:'Accounts',hidden:true}]},{accounts:[],serverConfig:{name:'CrossGram',host:'example.test',port:4430,dcs:[],rsa_key:'PUBLIC'},stickerAccounts:[],stickerPacks:[],bots:[],refresh:async()=>{}}); await entry.ready; await writeFile(" +
         JSON.stringify(marker) +
         ',JSON.stringify({baseUrl:ctx.server.baseUrl,buildId:ctx.webui.buildId,module:entry.toJSON()}));}',
       'utf8',
@@ -91,7 +91,17 @@ describe('actual Cordis CLI startup', () => {
         '/platform-accounts',
         '/sticker-packs',
         '/bots',
+        '/matrix-sso',
       ])
+      // The entry's self-registered pages win over package.json metadata, so
+      // the hidden SSO callback stays routable even when the deployed
+      // package.json is stale.
+      expect(
+        info.module.pages.find((page: any) => page.path === '/matrix-sso'),
+      ).toMatchObject({ hidden: true })
+      expect(
+        info.module.routes.includes('/matrix-sso'),
+      ).toBe(true)
       browser = await chromium.launch({
         executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH,
       })
