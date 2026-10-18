@@ -52,6 +52,21 @@ describe('platform account dashboard projection', () => {
       .toEqual({ platformId: 'legacy', platformKind: 'legacy', status: 'unsupported', error: undefined })
   })
 
+  it('flags a rejected Matrix token for in-place re-login with the homeserver hint', () => {
+    const rejected = makeUnavailableAccountView(
+      'matrix', 'matrix', 'error',
+      new Error('MatrixHttpError: M_UNKNOWN_TOKEN: Unknown access token.'),
+    )
+    expect(rejected.relogin).toBe('matrix')
+    // The homeserver hint is attached by the dashboard, not the view factory.
+    expect(rejected.reloginHomeserver).toBeUndefined()
+
+    expect(makeUnavailableAccountView('matrix', 'matrix', 'error', new Error('M_LIMIT_EXCEEDED')))
+      .not.toHaveProperty('relogin')
+    expect(makeUnavailableAccountView('discord', 'discord', 'error', new Error('offline')))
+      .not.toHaveProperty('relogin')
+  })
+
   it('creates the CrossGram client connection configuration without server secrets', () => {
     const config = makeCrossGramServerConfig('203.0.113.8', 4430, '  -----BEGIN RSA PUBLIC KEY-----\nkey\n-----END RSA PUBLIC KEY-----\n  ')
 

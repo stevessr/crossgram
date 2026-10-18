@@ -680,7 +680,14 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
     )
     if (!platform.getAccount) return makeUnavailableAccountView(platformId, kind, 'unsupported')
     const error = accountErrors.get(platformId)
-    return makeUnavailableAccountView(platformId, kind, error ? 'error' : 'loading', error)
+    const view = makeUnavailableAccountView(platformId, kind, error ? 'error' : 'loading', error)
+    // The Matrix re-login form pre-fills the homeserver from the adapter so
+    // the user only supplies credentials.
+    if (view.relogin === 'matrix') {
+      const client = (platform as { client?: { homeserver?: string } }).client
+      if (client?.homeserver) view.reloginHomeserver = client.homeserver
+    }
+    return view
   })
 
   const publishAccounts = (now = Date.now()) => {

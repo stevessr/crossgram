@@ -18,6 +18,14 @@ export interface PlatformAccountView {
   /** Whether an optional two-step verification password is configured. */
   hasPassword?: boolean
   error?: string
+  /**
+   * Set when the account can be fixed in-place by re-authenticating from the
+   * dashboard (currently `matrix`): the adapter's stored token was rejected
+   * (M_UNKNOWN_TOKEN) and only a fresh login recovers it.
+   */
+  relogin?: 'matrix'
+  /** The platform's configured homeserver, surfaced for the re-login form. */
+  reloginHomeserver?: string
 }
 
 export interface CrossGramServerConfigDc {

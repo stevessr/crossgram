@@ -22,7 +22,7 @@ import {
   useAction,
 } from 'cordis-webui-solidjs/components'
 import { sessionToken } from 'cordis-webui-solidjs/session'
-import AddAccount from './add-account.js'
+import AddAccount, { MatrixReloginModal } from './add-account.js'
 import { cameraErrorMessage, screenErrorMessage, startQrCamera, startQrScreen } from './qr-camera.js'
 import {
   copyText,
@@ -156,6 +156,8 @@ export default function AccountsPage(props: PageProps) {
                 loginCodeTtlSeconds={rpc.data.loginCodeTtlSeconds ?? 300}
                 requestCode={() => rpc.data.requestLoginCode(id)}
                 setPassword={(password) => rpc.data.setLoginPassword(id, password)}
+                onReloginMatrix={() => void action.run(() => rpc.data.refresh())}
+                reloginHomeserver={accounts().get(id)?.reloginHomeserver}
               />
             )}
           </For>
@@ -208,10 +210,13 @@ export function AccountCard(props: {
   loginCodeTtlSeconds: number
   requestCode: () => Promise<void>
   setPassword: (password: string | null) => Promise<void>
+  onReloginMatrix?: () => void
+  reloginHomeserver?: string
 }) {
   const [failedAvatar, setFailedAvatar] = createSignal(false),
     [copied, setCopied] = createSignal(''),
     [passwordOpen, setPasswordOpen] = createSignal(false),
+    [reloginOpen, setReloginOpen] = createSignal(false),
     action = useAction()
   const avatar = createMemo(() => safeImageURL(props.account.avatarUrl))
   createEffect(() => {
@@ -287,6 +292,15 @@ export function AccountCard(props: {
               {props.account.error ||
                 'Details will update when the platform becomes available.'}
             </p>
+            <Show when={props.account.relogin === 'matrix' && props.onReloginMatrix}>
+              <button
+                class="button filled"
+                disabled={!props.connected}
+                onClick={() => setReloginOpen(true)}
+              >
+                重新登录 Matrix
+              </button>
+            </Show>
           </div>
         }
       >
@@ -396,6 +410,17 @@ export function AccountCard(props: {
           onSubmit={async (password) => {
             await props.setPassword(password)
             setPasswordOpen(false)
+          }}
+        />
+      </Show>
+      <Show when={reloginOpen() && props.onReloginMatrix}>
+        <MatrixReloginModal
+          entryId={props.account.platformId}
+          homeserver={props.reloginHomeserver}
+          onClose={() => setReloginOpen(false)}
+          onRelogged={async () => {
+            setReloginOpen(false)
+            await props.onReloginMatrix?.()
           }}
         />
       </Show>

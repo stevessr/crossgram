@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   beginMatrixSso, buildAccountConfiguration, consumeMatrixSsoState,
   createPlatformPlugin, findLoaderEntry, initialAccountDraft, matrixAccountLogin,
-  MATRIX_SSO_KEY,
+  MATRIX_SSO_KEY, updatePlatformPluginConfig,
 } from './account-creation-model.js'
 
 describe('WebUI account onboarding', () => {
@@ -180,5 +180,50 @@ describe('WebUI account onboarding', () => {
     expect(consumeMatrixSsoState(fresh)).toBe(fresh)
     expect(consumeMatrixSsoState(fresh)).toBe('missing')
     sessionStorage.clear()
+  })
+
+  it('patches a plugin config by merging onto the stored entry, never replacing it', async () => {
+    const updates: unknown[] = []
+    const rpc = vi.fn(async (_id: string, method: string, args: unknown[]) => {
+      if (method === 'listConfig') {
+        return [{
+          id: 'accounts/matrix-1',
+          name: '@mtproto-relay/platform-matrix',
+          config: {
+            homeserver: 'https://matrix.example.org',
+            accessToken: 'stale-token',
+            proxy: 'http://127.0.0.1:7890',
+          },
+        }]
+      }
+      if (method === 'updateConfig') updates.push(args[0])
+      return undefined
+    })
+    await updatePlatformPluginConfig(rpc, 'loader', 'accounts/matrix-1', {
+      accessToken: 'fresh-token',
+      userId: '@alice:example.org',
+    })
+    expect(rpc).toHaveBeenCalledTimes(2)
+    expect(updates).toEqual([{
+      id: 'accounts/matrix-1',
+      // homeserver and proxy survive the token rotation; accessToken is replaced.
+      config: {
+        homeserver: 'https://matrix.example.org',
+        accessToken: 'fresh-token',
+        proxy: 'http://127.0.0.1:7890',
+        userId: '@alice:example.org',
+      },
+    }])
+  })
+
+  it('fails closed when the loader entry to patch has disappeared', async () => {
+    const rpc = vi.fn(async (_id: string, method: string) => {
+      if (method === 'listConfig') return []
+      return undefined
+    })
+    await expect(updatePlatformPluginConfig(rpc, 'loader', 'accounts/gone', {
+      accessToken: 'fresh-token',
+    })).rejects.toThrow('未找到该账号的插件配置')
+    expect(rpc).not.toHaveBeenCalledWith('loader', 'updateConfig', expect.anything())
   })
 })

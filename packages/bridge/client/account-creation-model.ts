@@ -240,6 +240,38 @@ export function findLoaderEntry(entries: Record<string, { module: string; method
 }
 
 /**
+ * Patch one existing plugin entry's configuration in place. Used by the Matrix
+ * re-login flow: reads the stored entry through `listConfig`, merges the patch
+ * on top of it, and writes the merged config back through `updateConfig`.
+ *
+ * `updateConfig` replaces the whole `config` object (entry options merge at the
+ * top level only), so writing the bare patch would drop unrelated keys such as
+ * the homeserver or proxy. The merged write keeps them and hot-reloads the
+ * plugin, so a fresh access token takes effect without recreating the platform.
+ */
+export async function updatePlatformPluginConfig(
+  rpc: (id: string, method: string, args: unknown[]) => Promise<unknown>,
+  loaderEntryId: string,
+  entryId: string,
+  patch: Record<string, unknown>,
+): Promise<void> {
+  const raw: unknown = await rpc(loaderEntryId, 'listConfig', [])
+  if (!Array.isArray(raw)) throw new Error('插件管理器没有返回有效的配置列表')
+  const hit = raw.find((item) =>
+    typeof item === 'object' && item !== null
+    && 'id' in item && item.id === entryId)
+  if (typeof hit !== 'object' || hit === null) {
+    throw new Error('未找到该账号的插件配置；可能已在「插件」页面被删除或移动，请刷新账号列表。')
+  }
+  const stored = 'config' in hit ? hit.config : undefined
+  const config: Record<string, unknown> = {
+    ...(typeof stored === 'object' && stored !== null && !Array.isArray(stored) ? stored : {}),
+    ...patch,
+  }
+  await rpc(loaderEntryId, 'updateConfig', [{ id: entryId, config }])
+}
+
+/**
  * Create with credentials while disabled, then enable. If enabling fails, leave
  * the configured plugin disabled for manual recovery rather than deleting secrets
  * or risking a double creation after a network timeout.

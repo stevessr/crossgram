@@ -5,6 +5,7 @@ import { useConnection } from 'cordis-webui-solidjs/client'
 import {
   ACCOUNT_PROVIDERS, beginMatrixSso, buildAccountConfiguration, consumeMatrixSsoState,
   createPlatformPlugin, findLoaderEntry, initialAccountDraft, matrixAccountLogin,
+  updatePlatformPluginConfig,
   type AccountDraft, type AccountPlatform,
 } from './account-creation-model.js'
 
@@ -319,6 +320,221 @@ export default function AddAccount(props: {
         <small class="muted">
           凭据会保存至服务器的插件配置中；请仅在受信任的管理 WebUI 中操作。账号状态将在适配器成功登录后显示为就绪。
         </small>
+      </form>
+    </Modal>
+  )
+}
+
+/**
+ * Re-login an existing Matrix platform whose stored access token was rejected
+ * (M_UNKNOWN_TOKEN). Performs the same password/SSO/token flows as the add
+ * page, then patches the existing plugin entry's `accessToken` (and `userId`
+ * when known) through the loader's update boundary — the plugin hot-reloads
+ * with the new token, no recreate or restart needed.
+ */
+export function MatrixReloginModal(props: {
+  entryId: string
+  homeserver?: string
+  onClose: () => void
+  onRelogged: () => void | Promise<void>
+}) {
+  const connection = useConnection(),
+    action = useAction()
+  const loaderId = createMemo(() => findLoaderEntry(connection.state.entries))
+  const draft = (): AccountDraft => ({
+    ...initialAccountDraft('matrix'),
+    homeserver: props.homeserver ?? '',
+  })
+  const [method, setMethod] = createSignal<'password' | 'sso' | 'token'>('password')
+  const [userId, setUserId] = createSignal('')
+  const [password, setPassword] = createSignal('')
+  const [accessToken, setAccessToken] = createSignal('')
+  const [busy, setBusy] = createSignal(false)
+  const [error, setError] = createSignal('')
+  const [notice, setNotice] = createSignal('')
+  const status = () => error() || notice()
+  const resetMessages = () => { setError(''); setNotice('') }
+  const ssoWindow = new AbortController()
+
+  const persist = async (token: string, knownUserId?: string) => {
+    const patch: Record<string, unknown> = { accessToken: token }
+    if (knownUserId) patch.userId = knownUserId
+    await updatePlatformPluginConfig(
+      (id, rpcMethod, args) => connection.rpc(id, rpcMethod, args),
+      loaderId()!,
+      props.entryId,
+      patch,
+    )
+    setUserId('')
+    setPassword('')
+    setAccessToken('')
+    await props.onRelogged()
+  }
+
+  const passwordLogin = async () => {
+    resetMessages()
+    if (!userId().trim() || !password()) {
+      setError('请填写 Matrix 用户名与密码。')
+      return
+    }
+    setBusy(true)
+    try {
+      const snapshot = { ...draft(), userId: userId(), matrixPassword: password() }
+      const result = await matrixAccountLogin(snapshot, 'password')
+      await persist(snapshot.accessToken, result.userId || userId().trim())
+      setNotice('登录成功，已更新访问令牌。')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const onSsoMessage = (event: MessageEvent) => {
+    if (event.origin !== location.origin) return
+    const data = event.data as {
+      source?: unknown, state?: unknown, loginToken?: unknown,
+    } | undefined
+    if (data?.source !== 'crossgram-matrix-sso') return
+    const state = consumeMatrixSsoState(typeof data.state === 'string' ? data.state : undefined)
+    if (state === 'missing' || state === 'expired') {
+      setError('SSO 回调状态无效或已过期，请重新发起登录。')
+      setBusy(false)
+      return
+    }
+    const loginToken = typeof data.loginToken === 'string' ? data.loginToken : ''
+    if (!loginToken) {
+      setError('回调未携带一次性登录令牌，请重新发起。')
+      setBusy(false)
+      return
+    }
+    window.removeEventListener('message', onSsoMessage)
+    ssoWindow.abort()
+    setBusy(true)
+    void action.run(async () => {
+      const snapshot = draft()
+      const result = await matrixAccountLogin(snapshot, 'sso', loginToken)
+      await persist(snapshot.accessToken, result.userId || undefined)
+      setNotice('登录成功，已更新访问令牌。')
+      event.source?.postMessage?.({ source: 'crossgram-matrix-sso-result', ok: true }, { targetOrigin: location.origin })
+    }).catch((cause) => {
+      const message = cause instanceof Error ? cause.message : String(cause)
+      setError(message)
+      event.source?.postMessage?.({
+        source: 'crossgram-matrix-sso-result', ok: false, message,
+      }, { targetOrigin: location.origin })
+    }).finally(() => setBusy(false))
+  }
+
+  const startSso = () => {
+    resetMessages()
+    if (!props.homeserver) {
+      setError('无法确定 Homeserver 地址，请使用粘贴令牌方式。')
+      return
+    }
+    window.removeEventListener('message', onSsoMessage)
+    window.addEventListener('message', onSsoMessage)
+    setBusy(true)
+    setNotice('已打开登录窗口，等待身份提供方回调…')
+    const popup = window.open(
+      beginMatrixSso(props.homeserver, connection.config.uiPath ?? ''),
+      'crossgram-matrix-sso',
+      'width=520,height=680',
+    )
+    if (!popup) {
+      setError('浏览器拦截了弹出窗口，请允许弹出后重试。')
+      setBusy(false)
+      window.removeEventListener('message', onSsoMessage)
+    }
+  }
+
+  const tokenSubmit = async () => {
+    resetMessages()
+    if (!accessToken().trim()) {
+      setError('请粘贴访问令牌。')
+      return
+    }
+    setBusy(true)
+    try {
+      await persist(accessToken().trim())
+      setNotice('已更新访问令牌。')
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  onCleanup(() => {
+    window.removeEventListener('message', onSsoMessage)
+    ssoWindow.abort()
+  })
+
+  const disabled = () => busy() || !loaderId()
+  return (
+    <Modal title="重新登录 Matrix" onClose={() => { if (!busy()) props.onClose() }}>
+      <form class="stack" onSubmit={(event) => { event.preventDefault(); if (method() === 'password') void passwordLogin() }}>
+        <p class="muted" role="note">
+          当前访问令牌已被 Homeserver 拒绝（M_UNKNOWN_TOKEN）。重新登录后会把新令牌写入现有
+          Matrix 配置并立即生效，无需重建账号。
+        </p>
+        <p class="muted" role="note">Homeserver：{props.homeserver || '未知（可使用粘贴令牌）'}</p>
+        <div class="matrix-login-methods" role="radiogroup" aria-label="Matrix 登录方式">
+          <button type="button" class="button outlined" disabled={disabled()}
+            aria-pressed={method() === 'password'}
+            onClick={() => { resetMessages(); setMethod('password') }}>账号密码登录</button>
+          <button type="button" class="button outlined" disabled={disabled()}
+            aria-pressed={method() === 'sso'}
+            onClick={() => { resetMessages(); setMethod('sso') }}>SSO 回调登录</button>
+          <button type="button" class="button outlined" disabled={disabled()}
+            aria-pressed={method() === 'token'}
+            onClick={() => { resetMessages(); setMethod('token') }}>粘贴访问令牌</button>
+        </div>
+        <Show when={method() === 'password'}>
+          <label class="field">
+            <span>Matrix 用户名</span>
+            <input type="text" autocomplete="off" value={userId()} placeholder="@alice:example.org"
+              disabled={disabled()} onInput={(event) => setUserId(event.currentTarget.value)} />
+            <small class="muted">完整 Matrix ID，例如 @alice:example.org。</small>
+          </label>
+          <label class="field">
+            <span>Matrix 密码</span>
+            <input type="password" autocomplete="off" value={password()}
+              disabled={disabled()} onInput={(event) => setPassword(event.currentTarget.value)} />
+            <small class="muted">仅用于向 Homeserver 换取访问令牌，CrossGram 不会保存密码。</small>
+          </label>
+          <button type="submit" class="button filled" disabled={disabled()}>
+            {busy() ? '正在登录…' : '登录并更新令牌'}
+          </button>
+        </Show>
+        <Show when={method() === 'sso'}>
+          <button type="button" class="button filled" disabled={disabled()} onClick={startSso}>
+            {busy() ? '等待 SSO 回调…' : '通过 Homeserver 登录（弹出窗口）'}
+          </button>
+          <p class="muted" role="note">
+            弹出身份提供方页面完成登录后，一次性令牌会自动回传并换取访问令牌。
+            请允许本站弹出窗口。
+          </p>
+        </Show>
+        <Show when={method() === 'token'}>
+          <label class="field">
+            <span>Matrix Access Token</span>
+            <input type="password" autocomplete="off" value={accessToken()}
+              disabled={disabled()} onInput={(event) => setAccessToken(event.currentTarget.value)} />
+            <small class="muted">来自其它客户端的令牌；更推荐用上面的登录方式自动获取。</small>
+          </label>
+          <button type="button" class="button filled" disabled={disabled()} onClick={() => void tokenSubmit()}>
+            {busy() ? '正在保存…' : '保存令牌'}
+          </button>
+        </Show>
+        <Show when={!loaderId()}>
+          <p class="notice error" role="alert">
+            未找到在线插件管理服务。请先在 WebUI「插件」中启用 @cordisjs/plugin-loader-webui。
+          </p>
+        </Show>
+        <Show when={status()}>
+          <p class={error() ? 'notice error' : 'notice'} role="status">{status()}</p>
+        </Show>
       </form>
     </Modal>
   )

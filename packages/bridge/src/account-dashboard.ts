@@ -63,5 +63,17 @@ export function makeUnavailableAccountView(
     platformKind,
     status,
     error: error instanceof Error ? error.message : error ? String(error) : undefined,
+    // A rejected Matrix access token never recovers by retrying: the dashboard
+    // offers an in-place re-login instead of a bare error message.
+    ...(matrixTokenRejected(error) ? { relogin: 'matrix' as const } : {}),
   }
+}
+
+/**
+ * M_UNKNOWN_TOKEN (the adapter surfaces it as `MatrixHttpError: M_UNKNOWN_TOKEN:
+ * …`) means the configured token can only be fixed by a fresh login.
+ */
+export function matrixTokenRejected(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : error ? String(error) : ''
+  return /M_UNKNOWN_TOKEN/i.test(message)
 }
