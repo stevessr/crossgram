@@ -3,9 +3,9 @@ import { createMemo, createSignal, For, onCleanup, Show } from 'solid-js'
 import { Modal, ActionError, useAction } from 'cordis-webui-solidjs/components'
 import { useConnection } from 'cordis-webui-solidjs/client'
 import {
-  ACCOUNT_PROVIDERS, beginMatrixSso, buildAccountConfiguration, consumeMatrixSsoState,
+  ACCOUNT_PROVIDERS, beginMatrixSso, buildAccountConfiguration,
   createPlatformPlugin, findLoaderEntry, initialAccountDraft, matrixAccountLogin,
-  updatePlatformPluginConfig,
+  updatePlatformPluginConfig, MATRIX_SSO_TOKEN_KEY,
   type AccountDraft, type AccountPlatform,
 } from './account-creation-model.js'
 
@@ -104,44 +104,28 @@ export default function AddAccount(props: {
   }
 
   const ssoWindow = new AbortController()
-  const onSsoMessage = (event: MessageEvent) => {
-    if (event.origin !== location.origin) return
-    const data = event.data as {
-      source?: unknown, state?: unknown, loginToken?: unknown,
-    } | undefined
-    if (data?.source !== 'crossgram-matrix-sso') return
-    const state = consumeMatrixSsoState(typeof data.state === 'string' ? data.state : undefined)
-    if (state === 'missing' || state === 'expired') {
-      setMatrixError('SSO 回调状态无效或已过期，请重新发起登录。')
-      setMatrixBusy(false)
-      return
+
+  /**
+   * The callback page completes the SSO exchange itself and parks the access
+   * token in sessionStorage (no opener dependency). Poll for the draft while
+   * the popup is open, then adopt it into the add-account form.
+   */
+  const adoptSsoDraft = (): boolean => {
+    let parked: { accessToken?: unknown, userId?: unknown } | undefined
+    try {
+      parked = JSON.parse(sessionStorage.getItem(MATRIX_SSO_TOKEN_KEY) ?? 'null') ?? undefined
+    } catch {
+      parked = undefined
     }
-    const loginToken = typeof data.loginToken === 'string' ? data.loginToken : ''
-    if (!loginToken) {
-      setMatrixError('回调未携带一次性登录令牌，请重新发起。')
-      setMatrixBusy(false)
-      return
-    }
-    window.removeEventListener('message', onSsoMessage)
-    ssoWindow.abort()
-    setMatrixBusy(true)
-    void action.run(async () => {
-      const draftSnapshot = { ...draft() }
-      const result = await matrixAccountLogin(draftSnapshot, 'sso', loginToken)
-      setDraft((current) => ({
-        ...current,
-        accessToken: draftSnapshot.accessToken,
-        userId: result.userId || current.userId,
-      }))
-      setMatrixNotice('SSO 登录成功，已获取访问令牌。')
-      event.source?.postMessage?.({ source: 'crossgram-matrix-sso-result', ok: true }, { targetOrigin: location.origin })
-    }).catch((error) => {
-      setMatrixError(error instanceof Error ? error.message : String(error))
-      event.source?.postMessage?.({
-        source: 'crossgram-matrix-sso-result', ok: false,
-        message: error instanceof Error ? error.message : String(error),
-      }, { targetOrigin: location.origin })
-    }).finally(() => setMatrixBusy(false))
+    if (!parked || typeof parked.accessToken !== 'string' || !parked.accessToken) return false
+    sessionStorage.removeItem(MATRIX_SSO_TOKEN_KEY)
+    setDraft((current) => ({
+      ...current,
+      accessToken: parked.accessToken as string,
+      userId: typeof parked.userId === 'string' && parked.userId ? parked.userId : current.userId,
+    }))
+    setMatrixNotice('SSO 登录成功，已获取访问令牌。')
+    return true
   }
 
   const startMatrixSso = () => {
@@ -150,10 +134,8 @@ export default function AddAccount(props: {
       setMatrixError('请先填写 Matrix 服务器地址。')
       return
     }
-    window.removeEventListener('message', onSsoMessage)
-    window.addEventListener('message', onSsoMessage)
     setMatrixBusy(true)
-    setMatrixNotice('已打开登录窗口，等待身份提供方回调…')
+    setMatrixNotice('已打开登录窗口；完成身份提供方认证后令牌会自动回到本表单。')
     const popup = window.open(
       beginMatrixSso(draft().homeserver, connection.config.uiPath ?? ''),
       'crossgram-matrix-sso',
@@ -162,12 +144,24 @@ export default function AddAccount(props: {
     if (!popup) {
       setMatrixError('浏览器拦截了弹出窗口，请允许弹出后重试。')
       setMatrixBusy(false)
-      window.removeEventListener('message', onSsoMessage)
+      return
     }
+    const watch = window.setInterval(() => {
+      if (adoptSsoDraft()) {
+        window.clearInterval(watch)
+        setMatrixBusy(false)
+      } else if (popup.closed) {
+        window.clearInterval(watch)
+        setMatrixBusy(false)
+        if (!draft().accessToken) {
+          setMatrixError('登录窗口已关闭，但未完成令牌交换；请重试或改用账号密码登录。')
+        }
+      }
+    }, 500)
+    ssoWindow.signal.addEventListener('abort', () => window.clearInterval(watch))
   }
 
   onCleanup(() => {
-    window.removeEventListener('message', onSsoMessage)
     ssoWindow.abort()
   })
 
@@ -390,62 +384,39 @@ export function MatrixReloginModal(props: {
     }
   }
 
-  const onSsoMessage = (event: MessageEvent) => {
-    if (event.origin !== location.origin) return
-    const data = event.data as {
-      source?: unknown, state?: unknown, loginToken?: unknown,
-    } | undefined
-    if (data?.source !== 'crossgram-matrix-sso') return
-    const state = consumeMatrixSsoState(typeof data.state === 'string' ? data.state : undefined)
-    if (state === 'missing' || state === 'expired') {
-      setError('SSO 回调状态无效或已过期，请重新发起登录。')
-      setBusy(false)
-      return
-    }
-    const loginToken = typeof data.loginToken === 'string' ? data.loginToken : ''
-    if (!loginToken) {
-      setError('回调未携带一次性登录令牌，请重新发起。')
-      setBusy(false)
-      return
-    }
-    window.removeEventListener('message', onSsoMessage)
-    ssoWindow.abort()
-    setBusy(true)
-    void action.run(async () => {
-      const snapshot = draft()
-      const result = await matrixAccountLogin(snapshot, 'sso', loginToken)
-      await persist(snapshot.accessToken, result.userId || undefined)
-      setNotice('登录成功，已更新访问令牌。')
-      event.source?.postMessage?.({ source: 'crossgram-matrix-sso-result', ok: true }, { targetOrigin: location.origin })
-    }).catch((cause) => {
-      const message = cause instanceof Error ? cause.message : String(cause)
-      setError(message)
-      event.source?.postMessage?.({
-        source: 'crossgram-matrix-sso-result', ok: false, message,
-      }, { targetOrigin: location.origin })
-    }).finally(() => setBusy(false))
-  }
-
   const startSso = () => {
     resetMessages()
     if (!props.homeserver) {
       setError('无法确定 Homeserver 地址，请使用粘贴令牌方式。')
       return
     }
-    window.removeEventListener('message', onSsoMessage)
-    window.addEventListener('message', onSsoMessage)
+    // The callback page completes the exchange itself and rotates the token
+    // on this entry; the popup closing is all we wait for. Poll the entry
+    // config as a light completion signal through the onRelogged callback
+    // the parent passes on modal close — or refresh on visibility.
     setBusy(true)
-    setNotice('已打开登录窗口，等待身份提供方回调…')
+    setNotice('已打开登录窗口；完成身份提供方认证后令牌会自动写回本账号。')
     const popup = window.open(
-      beginMatrixSso(props.homeserver, connection.config.uiPath ?? ''),
+      beginMatrixSso(props.homeserver, connection.config.uiPath ?? '', props.entryId),
       'crossgram-matrix-sso',
       'width=520,height=680',
     )
     if (!popup) {
       setError('浏览器拦截了弹出窗口，请允许弹出后重试。')
       setBusy(false)
-      window.removeEventListener('message', onSsoMessage)
+      return
     }
+    // The callback page rotates the token itself; when the popup closes the
+    // flow is finished (or failed there). Refresh so the parent sees the
+    // ready account.
+    const watch = window.setInterval(() => {
+      if (popup.closed) {
+        window.clearInterval(watch)
+        setBusy(false)
+        void props.onRelogged()
+      }
+    }, 500)
+    ssoWindow.signal.addEventListener('abort', () => window.clearInterval(watch))
   }
 
   const tokenSubmit = async () => {
@@ -466,7 +437,6 @@ export function MatrixReloginModal(props: {
   }
 
   onCleanup(() => {
-    window.removeEventListener('message', onSsoMessage)
     ssoWindow.abort()
   })
 

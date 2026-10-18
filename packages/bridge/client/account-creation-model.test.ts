@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   beginMatrixSso, buildAccountConfiguration, consumeMatrixSsoState,
   createPlatformPlugin, findLoaderEntry, initialAccountDraft, matrixAccountLogin,
-  MATRIX_SSO_KEY, updatePlatformPluginConfig,
+  MATRIX_SSO_KEY, peekMatrixSsoState, updatePlatformPluginConfig,
 } from './account-creation-model.js'
 
 describe('WebUI account onboarding', () => {
@@ -167,13 +167,20 @@ describe('WebUI account onboarding', () => {
     expect(redirect).toContain('https://matrix.example.org/_matrix/client/v3/login/sso/redirect?redirectUrl=')
     const callback = new URL(decodeURIComponent(redirect.split('redirectUrl=')[1]!))
     expect(callback.pathname).toBe('/matrix-sso')
+    // The callback is self-sufficient: the pending record carries the
+    // homeserver (and optional entry target), not an opener dependency.
+    expect(peekMatrixSsoState()).toMatchObject({
+      homeserver: 'https://matrix.example.org/',
+      entryId: null,
+    })
     // A fresh flow only matches its own state once; wrong states never match.
     beginMatrixSso('https://matrix.example.org/', '')
     const state = new URLSearchParams(sessionStorage.getItem(MATRIX_SSO_KEY) ?? '{}').get('state')!
     expect(consumeMatrixSsoState('wrong-state')).toBe('expired')
     expect(consumeMatrixSsoState(state)).toBe('missing')
     sessionStorage.clear()
-    beginMatrixSso('https://matrix.example.org/', '')
+    beginMatrixSso('https://matrix.example.org/', '', 'accounts/matrix-1')
+    expect(peekMatrixSsoState()).toMatchObject({ entryId: 'accounts/matrix-1' })
     const raw = sessionStorage.getItem(MATRIX_SSO_KEY)
     expect(raw).toBeTruthy()
     const fresh = JSON.parse(raw!).state as string

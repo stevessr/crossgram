@@ -152,7 +152,8 @@ export function buildAccountConfiguration(draft: AccountDraft): {
  * boundary persists it — this module never stores the token itself.
  */
 export async function matrixAccountLogin(
-  draft: AccountDraft,
+  draft: Pick<AccountDraft, 'homeserver' | 'userId' | 'matrixPassword'>
+    & Partial<Pick<AccountDraft, 'accessToken'>>,
   kind: 'password' | 'sso',
   ssoLoginToken?: string,
 ): Promise<{ userId: string, deviceId: string }> {
@@ -187,19 +188,29 @@ export async function matrixAccountLogin(
 }
 
 /** The draft is a plain object; mutating it here keeps credentials out of this module's scope. */
-function setDraftToken(draft: AccountDraft, accessToken: string): void {
+function setDraftToken(
+  draft: Partial<Pick<AccountDraft, 'accessToken'>>,
+  accessToken: string,
+): void {
   draft.accessToken = accessToken
 }
 
 /**
  * The homeserver redirects back to `${location.origin}${uiPath}/matrix-sso?state=…&loginToken=…`
  * (spec: the login token rides in the query; the state protects against CSRF).
- * The callback page forwards it to the opener via postMessage; this helper
- * builds that URL and remembers the expected state.
+ * The callback page completes the exchange itself, so the flow does not depend
+ * on the initiating tab staying open; `entryId` targets an existing plugin
+ * entry for the in-place token rotation.
  */
-export function beginMatrixSso(homeserver: string, uiPath = ''): string {
+export function beginMatrixSso(
+  homeserver: string,
+  uiPath = '',
+  entryId?: string,
+): string {
   const state = crypto.randomUUID()
-  sessionStorage.setItem(MATRIX_SSO_KEY, JSON.stringify({ state, homeserver, started: Date.now() }))
+  sessionStorage.setItem(MATRIX_SSO_KEY, JSON.stringify({
+    state, homeserver, started: Date.now(), entryId: entryId ?? null,
+  }))
   const origin = homeserver.trim().replace(/\/+$/, '')
   const redirect = new URL(location.origin + uiPath + '/matrix-sso')
   redirect.searchParams.set('state', state)
@@ -207,6 +218,32 @@ export function beginMatrixSso(homeserver: string, uiPath = ''): string {
 }
 
 export const MATRIX_SSO_KEY = 'crossgram:matrix-sso-pending'
+
+/** A completed SSO exchange awaiting pickup by the add-account form. */
+export const MATRIX_SSO_TOKEN_KEY = 'crossgram:matrix-sso-token'
+
+export interface PendingMatrixSso {
+  state: string
+  homeserver: string
+  entryId: string | null
+}
+
+export function peekMatrixSsoState(): PendingMatrixSso | 'expired' | 'missing' {
+  let pending: { state?: unknown, homeserver?: unknown, started?: unknown, entryId?: unknown } | undefined
+  try {
+    pending = JSON.parse(sessionStorage.getItem(MATRIX_SSO_KEY) ?? 'null') ?? undefined
+  } catch {
+    pending = undefined
+  }
+  if (!pending || typeof pending.state !== 'string' || typeof pending.started !== 'number'
+    || typeof pending.homeserver !== 'string') return 'missing'
+  if (!Number.isFinite(pending.started) || Date.now() - pending.started > 10 * 60_000) return 'expired'
+  return {
+    state: pending.state,
+    homeserver: pending.homeserver,
+    entryId: typeof pending.entryId === 'string' && pending.entryId ? pending.entryId : null,
+  }
+}
 
 export function consumeMatrixSsoState(candidate: string | undefined): string | 'expired' | 'missing' {
   let pending: { state?: unknown, started?: unknown } | undefined
