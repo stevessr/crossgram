@@ -109,6 +109,12 @@ export function apply(ctx: Context, config: Config = {}): void {
   ctx.on('mtproto/connection', (connection, state) => {
     collector.recordConnection(connection, state)
   })
+  // Database-call latencies (emitted by the bridge's timing wrapper). These
+  // surface a storage stall before it shows up in RPC latencies and back the
+  // PostgreSQL-18/io_uring revisit decision with real percentiles.
+  ctx.on('mtproto/db', (op, durationMs) => {
+    collector.recordDb(durationMs)
+  })
   ctx.on('mtproto/traffic', (sample) => {
     collector.recordTraffic(sample)
   })

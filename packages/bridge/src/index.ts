@@ -270,6 +270,31 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   const dcId = config.dcId ?? 1
   const apiPrefix = (config.apiPrefix ?? '/api').replace(/\/$/, '')
   const bridgeLogger = ctx.logger('bridge')
+  // Time every database call and publish the duration on the `mtproto/db`
+  // event (the statistics plugin records percentiles). The wrapper is applied
+  // once, after the database service is ready; `performance.now()` costs
+  // ~50ns, so the instrumentation is effectively free even at full volume.
+  const dbProbe = ctx.effect(() => {
+    ctx.database.prepared().then(() => {
+      const { performance } = globalThis as { performance: { now(): number } }
+      const timing = <A extends unknown[]>(op: string, call: (...args: A) => Promise<unknown>) =>
+        async (...args: A): Promise<unknown> => {
+          const started = performance.now()
+          try {
+            return await call(...args)
+          } finally {
+            ctx.emit('mtproto/db', op, performance.now() - started)
+          }
+        }
+      const database = ctx.database as unknown as Record<string, (...args: never[]) => Promise<unknown>>
+      for (const op of ['get', 'set', 'remove', 'create', 'upsert', 'setOne'] as const) {
+        if (typeof database[op] !== 'function') continue
+        database[op] = timing(op, database[op].bind(ctx.database))
+      }
+    })
+    return () => {}
+  }, 'mtproto-bridge.db-latency-probe')
+  void dbProbe
   const historyTrace = (format: string, ...args: unknown[]) => {
     if (
       format.startsWith('slow dialogs rpc profile')

@@ -48,6 +48,25 @@ describe('StatisticsCollector', () => {
     expect(collector.snapshot(runtime()).activeConnections).toBe(0)
   })
 
+  it('records database-call latencies into the snapshot and time series', () => {
+    const collector = createCollector()
+    collector.recordDb(2)
+    collector.recordDb(140)
+    collector.recordDb(6)
+    const snapshot = collector.sample(runtime(), 1, 1_000)
+    expect(snapshot.db).toMatchObject({ count: 3, maxMs: 140, p99Ms: 140 })
+    // The dbCount point sums across the interval; percentiles take the worst.
+    expect(collector.series.seconds[0]).toMatchObject({ dbCount: 3, dbP99Ms: 140 })
+    // Minute aggregates keep the same semantics: the next sample flushes the
+    // previous minute's bucket.
+    collector.recordDb(200)
+    collector.sample(runtime(), 1, 61_000)
+    expect(collector.series.minutes[0]).toMatchObject({ dbCount: 3, dbP99Ms: 140 })
+    expect(collector.series.seconds.at(-1)).toMatchObject({ dbCount: 1, dbP99Ms: 200 })
+    collector.reset(2_000)
+    expect(collector.snapshot(runtime()).db.count).toBe(0)
+  })
+
   it('retains bounded second history and resets counters without losing live connections', () => {
     const collector = createCollector({ secondRetention: 2 })
     const connection = fakeConnection('conn-live', '127.0.0.1')

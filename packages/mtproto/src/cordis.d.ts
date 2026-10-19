@@ -26,6 +26,8 @@ declare module 'cordis' {
     'mtproto/connection'(connection: MtprotoConnectionScope, state: 'open' | 'close'): void
     'mtproto/debug'(event: MtprotoDebugEvent): void
     'mtproto/traffic'(sample: MtprotoTrafficSample): void
+    /** One completed database call: operation name and duration in ms. */
+    'mtproto/db'(op: string, durationMs: number): void
     'mtproto/packet'(
       this: Context,
       packet: MtprotoPacketScope,

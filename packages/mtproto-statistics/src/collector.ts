@@ -89,6 +89,8 @@ export class StatisticsCollector {
   private readonly packet = new LatencyHistogram()
   private readonly intervalRpc = new LatencyHistogram()
   private readonly intervalPacket = new LatencyHistogram()
+  private readonly db = new LatencyHistogram()
+  private readonly intervalDb = new LatencyHistogram()
   private readonly methods = new Map<string, MethodState>()
   private readonly failures = new Map<string, RpcFailureState>()
   private readonly failureReasons = new Map<string, RpcFailureReasonState>()
@@ -158,6 +160,16 @@ export class StatisticsCollector {
     this.packet.record(durationMs)
     this.intervalPacket.record(durationMs)
     this.packetBytes += Math.max(0, bytes)
+  }
+
+  /**
+   * One completed database call (get/set/remove). The wrapper in the statistics
+   * plugin samples these on the same event-emission path as RPCs, so a stall
+   * shows up here before it shows up in RPC latencies.
+   */
+  recordDb(durationMs: number): void {
+    this.db.record(durationMs)
+    this.intervalDb.record(durationMs)
   }
 
   recordFileRoute(input: {
@@ -302,6 +314,7 @@ export class StatisticsCollector {
     this.currentIntervalSeconds = seconds
     const rpcInterval = this.intervalRpc.snapshot()
     const packetInterval = this.intervalPacket.snapshot()
+    const dbInterval = this.intervalDb.snapshot()
     const point: StatisticsPoint = {
       at,
       rpcCount: rpcInterval.count,
@@ -310,6 +323,9 @@ export class StatisticsCollector {
       rpcP99Ms: rpcInterval.p99Ms,
       packetCount: packetInterval.count,
       packetP90Ms: packetInterval.p90Ms,
+      dbCount: dbInterval.count,
+      dbP90Ms: dbInterval.p90Ms,
+      dbP99Ms: dbInterval.p99Ms,
       receivedBytes: Math.round(this.intervalReceivedBytes / seconds),
       sentBytes: Math.round(this.intervalSentBytes / seconds),
       activeConnections: this.connections.size,
@@ -344,6 +360,7 @@ export class StatisticsCollector {
     const snapshot = this.snapshot(runtime, point)
     this.intervalRpc.reset()
     this.intervalPacket.reset()
+    this.intervalDb.reset()
     this.intervalRpcErrors = 0
     this.intervalReceivedBytes = 0
     this.intervalSentBytes = 0
@@ -364,6 +381,7 @@ export class StatisticsCollector {
       totalConnections: this.totalConnections,
       rpc: { ...rpc, errors: this.rpcErrors, errorRate: ratio(this.rpcErrors, rpc.count) },
       packets: { ...packets, bytes: this.packetBytes },
+      db: this.db.snapshot(),
       traffic: {
         receivedBytes: this.receivedBytes,
         sentBytes: this.sentBytes,
@@ -397,6 +415,8 @@ export class StatisticsCollector {
     this.startedAt = at
     this.rpc.reset()
     this.packet.reset()
+    this.db.reset()
+    this.intervalDb.reset()
     this.intervalRpc.reset()
     this.intervalPacket.reset()
     this.methods.clear()
@@ -593,6 +613,9 @@ function aggregatePoints(points: StatisticsPoint[]): StatisticsPoint {
     rpcP99Ms: maximum('rpcP99Ms'),
     packetCount: sum('packetCount'),
     packetP90Ms: maximum('packetP90Ms'),
+    dbCount: sum('dbCount'),
+    dbP90Ms: maximum('dbP90Ms'),
+    dbP99Ms: maximum('dbP99Ms'),
     receivedBytes: average('receivedBytes'),
     sentBytes: average('sentBytes'),
     activeConnections: last.activeConnections,

@@ -140,6 +140,10 @@ export interface StatisticsPoint {
   rpcP99Ms: number
   packetCount: number
   packetP90Ms: number
+  /** Database calls observed in the interval (get/set/remove wrappers). */
+  dbCount: number
+  dbP90Ms: number
+  dbP99Ms: number
   receivedBytes: number
   sentBytes: number
   activeConnections: number
@@ -163,6 +167,8 @@ export interface StatisticsSnapshot {
   totalConnections: number
   rpc: DistributionSnapshot & { errors: number, errorRate: number }
   packets: DistributionSnapshot & { bytes: number }
+  /** Cumulative database-call latency distribution since start. */
+  db: DistributionSnapshot
   traffic: {
     receivedBytes: number
     sentBytes: number

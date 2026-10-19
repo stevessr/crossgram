@@ -156,6 +156,21 @@ export function StatisticsDashboard(props: {
             tone="tertiary"
           />
           <Metric
+            label={'Database calls / ' +
+              (range() === 'seconds'
+                ? 'sample'
+                : range() === 'minutes'
+                  ? 'minute'
+                  : 'hour')}
+            value={formatNumber(points().at(-1)?.dbCount ?? 0)}
+            detail={
+              formatNumber(snapshot().db.count) + ' total · P90 ' +
+              formatMs(snapshot().db.p90Ms)
+            }
+            values={values('dbCount')}
+            tone="tertiary"
+          />
+          <Metric
             label={t("Network throughput")}
             value={
               formatBytes(
@@ -252,6 +267,17 @@ export function StatisticsDashboard(props: {
             detail={formatNumber(snapshot().rpc.errors) + ' errors'}
             values={values('rpcErrors')}
             tone="error"
+          />
+          <Metric
+            label={t("Database latency")}
+            value={formatMs(snapshot().db.p90Ms)}
+            detail={
+              formatNumber(snapshot().db.count) + ' calls · P99 ' +
+              formatMs(snapshot().db.p99Ms) + ' · max ' +
+              formatMs(snapshot().db.maxMs)
+            }
+            values={values('dbP90Ms')}
+            tone="tertiary"
           />
         </div>
         <div class="stats-two-columns">
