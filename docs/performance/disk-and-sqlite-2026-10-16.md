@@ -183,4 +183,9 @@ probe was built to measure. The shipped probe therefore uses
   (8 MiB) with mmap-served reads. Revisit if the database is ever shown to
   stall (e.g. DB-call latency percentiles in a probe) or the host gets more
   memory.
+  **Update (2026-10-19): the probe exists now.** The bridge times every
+  database call and the statistics dashboard shows DB call rate and P90/P99
+  (`/mtproto-statistics`: overview card "Database calls", RPC-tab card
+  "Database latency"). Revisit is warranted if DB P99 sustains above RPC P99
+  while the co-tenant disk is idle.
 
