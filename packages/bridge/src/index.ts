@@ -274,6 +274,9 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
   // event (the statistics plugin records percentiles). The wrapper is applied
   // once, after the database service is ready; `performance.now()` costs
   // ~50ns, so the instrumentation is effectively free even at full volume.
+  // A call slower than DB_SLOW_MS is journald-logged: during a co-tenant disk
+  // stall these lines are the visible fingerprint in production logs.
+  const DB_SLOW_MS = 1_000
   const dbProbe = ctx.effect(() => {
     ctx.database.prepared().then(() => {
       const { performance } = globalThis as { performance: { now(): number } }
@@ -283,7 +286,11 @@ export function apply(ctx: Context, config: BridgeConfig = {}): void {
           try {
             return await call(...args)
           } finally {
-            ctx.emit('mtproto/db', op, performance.now() - started)
+            const durationMs = performance.now() - started
+            ctx.emit('mtproto/db', op, durationMs)
+            if (durationMs > DB_SLOW_MS) {
+              bridgeLogger.warn('slow database call (%s): %dms', op, Math.round(durationMs))
+            }
           }
         }
       const database = ctx.database as unknown as Record<string, (...args: never[]) => Promise<unknown>>
