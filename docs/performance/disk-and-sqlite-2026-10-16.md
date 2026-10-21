@@ -144,10 +144,19 @@ session, forever, while no Telegram client was connected:
 
 The bridge's idle warm-up also re-subscribed every paused session hourly to keep
 it warm, which on this host costs about a minute of CPU per platform per hour,
-so the runtime configuration now sets
+so the runtime configuration then set
 `bridge.config.lazySync.idleSyncIntervalMs: 86400000` with a one-minute window:
 a session still starts on the first client RPC that needs it, and the hourly
 storm is gone.
+
+**Update (2026-10-21):** the daily cadence left up to 24h of unsynced
+platform messages when no Telegram client was active. The cadence is now
+5 minutes — `activeWindowMs: 300000` (a session stays subscribed for 5
+minutes after the last client RPC), `idleSyncIntervalMs: 300000`
+(one bounded 60s sync window every 5 minutes while idle). Measured cost of
+one window is ~35s of bootstrap CPU per platform; at this cadence that is
+roughly 12% of a core on average while idle, which the host sustains without
+memory or PSI pressure.
 
 Verified afterwards: zero subscription lifecycle events in the 11 minutes that
 followed (previously 5–25 per burst), worker CPU back to ~15% of a core, WebUI
