@@ -20,8 +20,8 @@ import { Config as memoryUpdateStoreConfig } from '../../update-store-memory/src
 
 const cases = [
   ['bridge', bridgeConfig, [
-    'dcId', 'serverHost', 'serverPort', 'altEndpoints', 'apiPrefix', 'onDemandLoginCodes', 'groupFilesMiniApp', 'uploadPath', 'autoMuteGroupChats',
-    'blockedContentMode', 'recalledMessageMode', 'lazySync', 'voiceWorkerSocketPath', 'voiceWorkerTimeoutMs', 'voiceDirectIce',
+    'dcId', 'serverHost', 'serverPort', 'altEndpoints', 'apiPrefix', 'publicWsEndpoint', 'onDemandLoginCodes', 'groupFilesMiniApp', 'uploadPath', 'autoMuteGroupChats',
+    'officialStickerBotToken', 'officialStickerApiBase', 'blockedContentMode', 'recalledMessageMode', 'lazySync', 'voiceWorkerSocketPath', 'voiceWorkerTimeoutMs', 'voiceDirectIce',
     'voiceTurnHost', 'voiceTurnPort', 'voiceTurnSharedSecret', 'voiceTurnTtlSeconds',
   ]],
   ['debug', debugConfig, ['maxEvents', 'initiallyPaused', 'apiPath']],
@@ -85,6 +85,7 @@ describe('plugin config schemas', () => {
       serverPort: 4430,
       altEndpoints: [],
       apiPrefix: '/api',
+      publicWsEndpoint: '',
       onDemandLoginCodes: true,
       groupFilesMiniApp: {
         enabled: true,
@@ -95,6 +96,8 @@ describe('plugin config schemas', () => {
       },
       uploadPath: 'data/bridge-uploads',
       autoMuteGroupChats: true,
+      officialStickerBotToken: '',
+      officialStickerApiBase: 'https://api.telegram.org',
       blockedContentMode: 'hide-user',
       recalledMessageMode: 'show',
       lazySync: {
