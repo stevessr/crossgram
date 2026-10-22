@@ -37,6 +37,14 @@ printf 'TELEGRAM_BOT_TOKEN_VERIFIER_SECRET=%s\n' "$(openssl rand -base64 48 | tr
   | sudo tee -a /etc/crossgram.env >/dev/null
 ```
 
+A separate, opt-in [PGX backend](../docs/performance/pgx-backend.md) is also
+available for disposable development and test deployments. It reuses the
+PostgreSQL wire driver with a two-connection pool. The production default
+remains PostgreSQL; PGX v0.1 is not crash-safe. To select it after setting
+`CROSSGRAM_PGX_*` variables in `/etc/crossgram.env`, run
+`sudo node /opt/crossgram/deploy/select-database.mjs pgx` and restart the
+service. Switching backend never copies application data.
+
 Provision the local `crossgram` PostgreSQL role/database and persist its random
 password in `/etc/crossgram.env` before starting the service:
 

@@ -62,6 +62,23 @@
           __jsExpr: process.env.CROSSGRAM_POSTGRES_PASSWORD
         database: crossgram
         max: 10
+    - id: database-pgx
+      name: '@cordisjs/plugin-database-postgres'
+      disabled: true
+      # Experimental PGX runtime (pgrundev/pgx); PostgreSQL wire protocol.
+      # Keep only one database driver enabled at a time.
+      config:
+        host:
+          __jsExpr: process.env.CROSSGRAM_PGX_HOST || '127.0.0.1'
+        port:
+          __jsExpr: Number(process.env.CROSSGRAM_PGX_PORT || 5432)
+        user:
+          __jsExpr: process.env.CROSSGRAM_PGX_USER || 'postgres'
+        password:
+          __jsExpr: process.env.CROSSGRAM_PGX_PASSWORD
+        database:
+          __jsExpr: process.env.CROSSGRAM_PGX_DATABASE || 'app'
+        max: 2
 - id: update-store
   name: '@mtproto-relay/update-store-database'
   config:
